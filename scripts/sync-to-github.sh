@@ -12,7 +12,9 @@
 #
 # It refuses to guess. A dirty source, a dirty target, a target branch that has
 # local commits origin does not, or unrelated histories without an explicit
-# flag all stop it before anything is moved.
+# flag all stop it before anything is moved. Before moving anything it runs the
+# workspace's checks — fmt, clippy with warnings denied, and the test suite —
+# so a broken thread cannot become a broken GitHub branch.
 #
 # usage:
 #   scripts/sync-to-github.sh                 # merge into the target and push
@@ -43,6 +45,7 @@ PUSH=1
 DRY_RUN=0
 ALLOW_UNRELATED=0
 FF_SOURCE=1
+RUN_CHECKS=1
 
 usage() {
     cat <<'USAGE'
@@ -60,11 +63,17 @@ options:
                        ~/Documents/GitHub/rigel)
   --branch NAME        branch to sync (default: the source's current branch)
   --no-push            stop after the merge, do not push
+  --no-checks          mirror without running fmt, clippy and the tests
   --no-ff-source       leave this checkout where it is
   --allow-unrelated    permit a merge between histories with no common
                        ancestor, taking the source's tree where they disagree
   --dry-run            print the plan and exit; changes nothing
   -h, --help           this text
+
+When the source is a Cargo workspace, the checks run before anything is merged
+or pushed: cargo fmt --check, cargo clippy -D warnings, cargo test. A failure
+leaves both sides untouched. --no-checks is for mirroring a commit you have
+already verified yourself.
 
 After a merge the source is fast-forwarded onto the new target commit, so the
 next run has nothing to reconcile.
@@ -78,6 +87,7 @@ while [ $# -gt 0 ]; do
         --branch) BRANCH_OPT="${2:-}"; shift 2 ;;
         --branch=*) BRANCH_OPT="${1#*=}"; shift ;;
         --no-push) PUSH=0; shift ;;
+        --no-checks) RUN_CHECKS=0; shift ;;
         --no-ff-source) FF_SOURCE=0; shift ;;
         --allow-unrelated) ALLOW_UNRELATED=1; shift ;;
         --dry-run) DRY_RUN=1; shift ;;
@@ -122,6 +132,35 @@ ff_source_onto() {
     git -C "$SOURCE_ROOT" merge --quiet --ff-only FETCH_HEAD \
         || die "source could not fast-forward onto the synced commit"
     say "source fast-forwarded to $(git -C "$SOURCE_ROOT" rev-parse --short HEAD)"
+}
+
+# Run the workspace's own gates against the source. Nothing has moved yet, so a
+# failure costs only the wait; the target and origin stay exactly as they were.
+run_checks() {
+    if [ "$RUN_CHECKS" -eq 0 ]; then
+        say "checks  skipped (--no-checks)"
+        return 0
+    fi
+    if [ ! -f "$SOURCE_ROOT/Cargo.toml" ]; then
+        say "checks  none (no Cargo.toml at the source root)"
+        return 0
+    fi
+    command -v cargo >/dev/null 2>&1 \
+        || die "cargo is not on PATH, so the mirror would be unverified (--no-checks to override)"
+
+    local name cmd output
+    while IFS='|' read -r name cmd; do
+        if output=$(cd "$SOURCE_ROOT" && eval "$cmd" 2>&1); then
+            say "checks  $name ok"
+        else
+            printf '%s\n' "$output" | tail -40 | sed 's/^/  /' >&2
+            die "$name failed in the source; nothing was merged or pushed"
+        fi
+    done <<'CHECKS'
+fmt|cargo fmt --all -- --check
+clippy|cargo clippy --workspace --all-targets -- -D warnings
+test|cargo test --workspace
+CHECKS
 }
 
 # --- where ----------------------------------------------------------------
@@ -208,6 +247,10 @@ if git -C "$TARGET" merge-base --is-ancestor "$source_head" "$target_head"; then
         say "dry run: nothing changed"
         exit 0
     fi
+    if [ "$PUSH" -eq 1 ] \
+        && [ "$(git -C "$TARGET" rev-list --count "origin/$BRANCH..$target_head")" -gt 0 ]; then
+        run_checks
+    fi
     push_if_ahead
     ff_source_onto "$target_head"
     exit 0
@@ -241,9 +284,14 @@ case "$plan" in
 esac
 
 if [ "$DRY_RUN" -eq 1 ]; then
+    [ "$RUN_CHECKS" -eq 1 ] && say "checks  fmt, clippy, test would run first"
     say "dry run: nothing changed"
     exit 0
 fi
+
+# --- checks --------------------------------------------------------------
+
+run_checks
 
 # --- move ----------------------------------------------------------------
 
