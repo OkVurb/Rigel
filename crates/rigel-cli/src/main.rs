@@ -98,7 +98,7 @@ enum SkillCommand {
         /// Write the body to `<DIR>/<name>/SKILL.md`.
         #[arg(long, value_name = "DIR")]
         to: Option<PathBuf>,
-        /// Record a pin for this body hash (a session binds to it in Phase 3).
+        /// Print the body hash a session will pin to (binding lands in Phase 3).
         #[arg(long)]
         pin: bool,
         #[arg(long)]
@@ -340,7 +340,15 @@ async fn run_skills(dir: &Path, command: SkillCommand) -> ExitCode {
                     return ExitCode::SUCCESS;
                 }
 
-                print_detail(&detail, pin);
+                if pin {
+                    match index.body(&id).await {
+                        Ok(Some((_, sha))) => println!(
+                            "pin       {sha} — a session will bind to this hash in Phase 3\n"
+                        ),
+                        _ => println!("pin       no body to pin yet\n"),
+                    }
+                }
+                print_detail(&detail);
                 ExitCode::SUCCESS
             }
             Ok(None) => skills_failure(SkillsError::NotIndexed(id), as_json),
@@ -512,7 +520,7 @@ async fn run_skills(dir: &Path, command: SkillCommand) -> ExitCode {
     }
 }
 
-fn print_detail(detail: &rigel_core::SkillDetail, pin: bool) {
+fn print_detail(detail: &rigel_core::SkillDetail) {
     let skill = &detail.skill;
     println!("{}", skill.name);
     println!("  {}", skill.description);
@@ -543,9 +551,6 @@ fn print_detail(detail: &rigel_core::SkillDetail, pin: bool) {
     );
     if let Some(seen) = skill.last_seen_at {
         println!("  last seen {}", rigel_core::skills::fmt_time(seen));
-    }
-    if pin {
-        println!("  pin       recorded for the current body hash");
     }
 
     if !detail.capabilities.is_empty() {
