@@ -12,7 +12,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use sqlx::SqlitePool;
-use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions, SqliteSynchronous};
+use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions, SqliteSynchronous};
 
 use crate::migrate::{INDEX_MIGRATIONS, MigrateError, Migration, PROJECT_MIGRATIONS, apply};
 
@@ -30,6 +30,9 @@ pub enum StorageError {
 
     #[error("database error: {0}")]
     Database(#[from] sqlx::Error),
+
+    #[error("could not put the database in WAL mode: {0}")]
+    Wal(String),
 }
 
 /// An open, migrated database. Cloning shares the pool.
@@ -65,10 +68,15 @@ impl Store {
     ) -> Result<Self, StorageError> {
         let path = path.as_ref().to_path_buf();
 
+        // `journal_mode` is deliberately not an option here. sqlx applies requested pragmas
+        // on every connection it opens, and switching journal mode takes an exclusive lock
+        // that `busy_timeout` cannot wait for: a connection opened while another write is in
+        // flight fails immediately with "database is locked", and the attempt can also
+        // invalidate a read snapshot underneath a deferred transaction. WAL belongs to the
+        // file, so it is set once, below.
         let options = SqliteConnectOptions::new()
             .filename(&path)
             .create_if_missing(true)
-            .journal_mode(SqliteJournalMode::Wal)
             .synchronous(SqliteSynchronous::Normal)
             .foreign_keys(true)
             .busy_timeout(Duration::from_secs(5));
@@ -79,6 +87,7 @@ impl Store {
             .connect_with(options)
             .await?;
 
+        ensure_wal(&pool).await?;
         apply(&pool, migrations).await?;
 
         Ok(Self { pool, path })
@@ -90,6 +99,36 @@ impl Store {
 
     pub fn path(&self) -> &Path {
         &self.path
+    }
+}
+
+/// Put the database in WAL mode if it is not already, with retries.
+///
+/// The pragma that changes journal mode needs an exclusive lock, and SQLite will not consult
+/// the busy handler for it, so two processes opening a brand-new project at once can collide.
+/// Once the file is WAL the call is a no-op that returns the current mode.
+async fn ensure_wal(pool: &SqlitePool) -> Result<(), StorageError> {
+    let mut mode: String = sqlx::query_scalar("PRAGMA journal_mode")
+        .fetch_one(pool)
+        .await?;
+    for _ in 0..40 {
+        if mode.eq_ignore_ascii_case("wal") {
+            return Ok(());
+        }
+        match sqlx::query_scalar::<_, String>("PRAGMA journal_mode = WAL")
+            .fetch_one(pool)
+            .await
+        {
+            Ok(next) => mode = next,
+            Err(_) => tokio::time::sleep(Duration::from_millis(50)).await,
+        }
+    }
+    if mode.eq_ignore_ascii_case("wal") {
+        Ok(())
+    } else {
+        Err(StorageError::Wal(format!(
+            "it stayed in {mode}; another process is holding the file"
+        )))
     }
 }
 

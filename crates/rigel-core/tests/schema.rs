@@ -24,10 +24,43 @@ async fn table_names(store: &Store) -> Vec<String> {
     rows.into_iter().map(|(name,)| name).collect()
 }
 
+/// Starting twice at once is the normal case on Windows: the app and the CLI, or two
+/// threads of the same process. Both read `schema_migrations` before either writes, so the
+/// read and the migration have to be made atomic against each other.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn concurrent_first_open_applies_each_migration_once() {
+    let tmp = TempDir::new().unwrap();
+    let opens = (0..4).map(|_| Store::open_project(tmp.path()));
+    for opened in futures::future::join_all(opens).await {
+        opened.expect("every concurrent open succeeds");
+    }
+
+    let store = open_project(tmp.path()).await;
+    let versions: Vec<(i64,)> =
+        sqlx::query_as("SELECT version FROM schema_migrations ORDER BY version")
+            .fetch_all(store.pool())
+            .await
+            .unwrap();
+    let expected: Vec<(i64,)> = PROJECT_MIGRATIONS
+        .iter()
+        .map(|migration| (migration.version,))
+        .collect();
+    assert_eq!(versions, expected, "each migration recorded exactly once");
+}
+
 #[tokio::test]
 async fn project_schema_applies_once_and_reopening_is_a_no_op() {
     let tmp = TempDir::new().unwrap();
     let store = open_project(tmp.path()).await;
+
+    let mode: String = sqlx::query_scalar("PRAGMA journal_mode")
+        .fetch_one(store.pool())
+        .await
+        .unwrap();
+    assert_eq!(
+        mode, "wal",
+        "WAL is set once for the file, not requested per connection"
+    );
 
     assert_eq!(store.path().file_name().unwrap(), "rigel.db");
     assert!(store.path().parent().unwrap().ends_with(".rigel"));

@@ -76,7 +76,15 @@ pub enum MigrateError {
 /// Apply every migration not yet recorded, in order.
 ///
 /// Returns the versions applied by this call; an up-to-date database returns an empty vec.
+///
+/// The whole check-and-apply runs in one `BEGIN IMMEDIATE` transaction. The app and the CLI
+/// can open the same project at the same moment, and a deferred transaction would let both
+/// read "not applied" and then race to create the same tables — the loser failing with a
+/// lock error or an existing table. Taking the write lock first makes the second opener
+/// wait, then read the winner's result and do nothing.
 pub async fn apply(pool: &SqlitePool, migrations: &[Migration]) -> Result<Vec<i64>, MigrateError> {
+    let mut tx = pool.begin_with("BEGIN IMMEDIATE").await?;
+
     sqlx::raw_sql(
         "CREATE TABLE IF NOT EXISTS schema_migrations (
            version    INTEGER PRIMARY KEY,
@@ -84,12 +92,12 @@ pub async fn apply(pool: &SqlitePool, migrations: &[Migration]) -> Result<Vec<i6
            applied_at INTEGER NOT NULL
          );",
     )
-    .execute(pool)
+    .execute(&mut *tx)
     .await?;
 
     let applied: Vec<(i64, String)> =
         sqlx::query_as("SELECT version, name FROM schema_migrations ORDER BY version")
-            .fetch_all(pool)
+            .fetch_all(&mut *tx)
             .await?;
 
     let known_max = migrations.iter().map(|m| m.version).max().unwrap_or(0);
@@ -133,7 +141,6 @@ pub async fn apply(pool: &SqlitePool, migrations: &[Migration]) -> Result<Vec<i6
             continue;
         }
 
-        let mut tx = pool.begin().await?;
         sqlx::raw_sql(migration.sql).execute(&mut *tx).await?;
         sqlx::query("INSERT INTO schema_migrations (version, name, applied_at) VALUES (?, ?, ?)")
             .bind(migration.version)
@@ -141,11 +148,11 @@ pub async fn apply(pool: &SqlitePool, migrations: &[Migration]) -> Result<Vec<i6
             .bind(now_ms())
             .execute(&mut *tx)
             .await?;
-        tx.commit().await?;
 
         applied_now.push(migration.version);
     }
 
+    tx.commit().await?;
     Ok(applied_now)
 }
 
