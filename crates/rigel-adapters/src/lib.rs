@@ -1,16 +1,25 @@
 //! Harness adapters.
 //!
-//! Phase 1 defines the contract only: what a harness is, how it authenticates, and the
-//! probe the UI needs before it can offer a spawn button. Each protocol implementation
-//! (ACP, Codex app-server, Claude stream-json) arrives in Phase 4.
+//! Each external harness gets one module behind the `Adapter` trait. Phase 4 builds them in
+//! order: Codex app-server/exec, Claude stream-json, then the ACP clients (Cursor, Cline).
 
 use std::path::PathBuf;
 
+use rigel_core::credentials::Secret;
 use serde::{Deserialize, Serialize};
 
+pub mod acp;
+pub mod claude;
 pub mod codex;
 pub mod registry;
 
+pub use acp::{
+    AcpClient, AcpConfig, AcpEvent, AcpTurn, AcpUsage, ApprovalDecision, ApprovalOption,
+    ApprovalRequest, Approver, DenyAll,
+};
+pub use claude::{
+    ClaudeAdapter, ClaudeConfig, ClaudeEvent, ClaudeTurn, ClaudeUsage, PermissionMode,
+};
 pub use codex::{CodexAdapter, CodexConfig, CodexEvent, CodexUsage, Transport, TurnResult};
 pub use registry::{AdapterCache, probe_all, probe_cached};
 
@@ -31,6 +40,20 @@ pub enum AuthMode {
     ApiKey,
     Subscription,
     None,
+}
+
+/// Replace every injected credential value with `<redacted>`. Applied to events, error text and
+/// anything else that leaves an adapter, so a harness that echoes its own environment cannot put a
+/// key into a transcript or a log line.
+pub fn redact(value: &str, secrets: &[Secret]) -> String {
+    secrets.iter().fold(value.to_string(), |redacted, secret| {
+        let exposed = secret.expose();
+        if exposed.is_empty() {
+            redacted
+        } else {
+            redacted.replace(exposed, "<redacted>")
+        }
+    })
 }
 
 /// The keychain entry and environment variable a harness receives at its process boundary.

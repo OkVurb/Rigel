@@ -21,6 +21,7 @@ use rigel_core::credentials::{CredentialStore, present_in};
 use serde::{Deserialize, Serialize};
 use tokio::process::Command;
 
+use crate::claude::ClaudeConfig;
 use crate::codex::{CodexConfig, auth_mode};
 use crate::{AuthMode, Capabilities, Harness, HarnessInfo, credential_spec};
 
@@ -162,8 +163,8 @@ pub fn parse_version(text: &str) -> Option<String> {
         .map(str::to_string)
 }
 
-/// Probe every harness. Codex reports through its adapter's configured endpoint; the other three
-/// have no adapter yet, so their probe is version plus auth classification.
+/// Probe every harness. Codex and Claude report through their adapter's configured credentials;
+/// Cursor and Cline have no turn adapter yet, so their probe is version plus auth classification.
 pub async fn probe_all(store: &dyn CredentialStore) -> Vec<HarnessInfo> {
     let mut infos = Vec::with_capacity(HARNESSES.len());
     for harness in HARNESSES {
@@ -242,16 +243,45 @@ pub async fn probe_codex(config: &CodexConfig) -> HarnessInfo {
     }
 }
 
+/// Claude's probe lives with its adapter for the same reason as Codex's: auth is decided by the
+/// adapter's own injected environment, not by a keychain lookup performed here.
+pub async fn probe_claude(config: &ClaudeConfig) -> HarnessInfo {
+    let exe = resolve_exe(Harness::Claude, &config.exe);
+    let installed = exe.is_file();
+    let version = if installed {
+        version_of(&exe).await
+    } else {
+        None
+    };
+
+    HarnessInfo {
+        harness: Harness::Claude,
+        installed,
+        version: version.clone(),
+        path: installed.then_some(exe),
+        auth_mode: crate::claude::auth_mode(config),
+        capabilities: capabilities(Harness::Claude, version.as_deref()),
+        provider: credential_spec(Harness::Claude, None).map(|spec| spec.provider.to_string()),
+        install_hint: (!installed).then(|| install_hint(Harness::Claude)),
+    }
+}
+
 /// A bare `codex`/`codex.exe` is looked up on `PATH` with the same extension rules as every other
 /// harness; an explicit path is used as given.
 pub(crate) fn resolve_codex_exe(exe: &Path) -> PathBuf {
+    resolve_exe(Harness::Codex, exe)
+}
+
+/// The same lookup for any harness. An explicit path is used as given, so a test can point an
+/// adapter at a fixture without touching `PATH`.
+pub(crate) fn resolve_exe(harness: Harness, exe: &Path) -> PathBuf {
     if exe.components().count() > 1 {
         return exe.to_path_buf();
     }
-    locate(Harness::Codex).unwrap_or_else(|| exe.to_path_buf())
+    locate(harness).unwrap_or_else(|| exe.to_path_buf())
 }
 
-async fn version_of(path: &Path) -> Option<String> {
+pub(crate) async fn version_of(path: &Path) -> Option<String> {
     let mut command = command_for(path);
     command
         .arg("--version")

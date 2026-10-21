@@ -10,6 +10,16 @@ name = "fake-codex"
 path = "tests/fixtures/fake_codex.rs"
 test = false
 
+[[bin]]
+name = "fake-claude"
+path = "tests/fixtures/fake_claude.rs"
+test = false
+
+[[bin]]
+name = "fake-acp"
+path = "tests/fixtures/fake_acp.rs"
+test = false
+
 [dependencies]
 async-trait = { workspace = true }
 rigel-core = { path = "../rigel-core" }
