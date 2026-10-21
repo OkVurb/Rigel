@@ -310,7 +310,7 @@ async fn main() -> ExitCode {
 
         Command::Codex { command } => harness::run_codex(command).await,
 
-        Command::Harness { command } => harness::run_harness(command).await,
+        Command::Harness { command } => harness::run_harness(command, &dir).await,
 
         Command::Mcp {
             project,

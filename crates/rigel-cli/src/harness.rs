@@ -58,14 +58,14 @@ pub enum HarnessCommand {
     },
 }
 
-pub async fn run_harness(command: HarnessCommand) -> ExitCode {
+pub async fn run_harness(command: HarnessCommand, dir: &std::path::Path) -> ExitCode {
     match command {
-        HarnessCommand::Probe { json, refresh } => probe_harnesses(json, refresh).await,
+        HarnessCommand::Probe { json, refresh } => probe_harnesses(dir, json, refresh).await,
     }
 }
 
-async fn probe_harnesses(as_json: bool, refresh: bool) -> ExitCode {
-    let path = rigel_core::default_index_dir().join(CACHE_FILE);
+async fn probe_harnesses(dir: &std::path::Path, as_json: bool, refresh: bool) -> ExitCode {
+    let path = dir.join(CACHE_FILE);
     let cache = match rigel_adapters::probe_cached(&path, &KeychainCredentialStore, refresh).await {
         Ok(cache) => cache,
         Err(error) => {

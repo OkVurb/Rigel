@@ -120,6 +120,12 @@ mod tests {
             "ANTHROPIC_API_KEY"
         );
         assert_eq!(
+            credential_spec(Harness::Codex, Some("http://[::1]:20128/v1"))
+                .unwrap()
+                .provider,
+            rigel_core::credentials::OMNIROUTE
+        );
+        assert_eq!(
             credential_spec(Harness::Cursor, None).unwrap().env_var,
             "CURSOR_API_KEY"
         );

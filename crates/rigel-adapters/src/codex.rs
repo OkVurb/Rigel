@@ -264,7 +264,8 @@ impl CodexAdapter {
     }
 
     fn command(&self) -> Command {
-        let mut command = Command::new(&self.config.exe);
+        let exe = crate::registry::resolve_codex_exe(&self.config.exe);
+        let mut command = crate::registry::command_for(&exe);
         command
             .current_dir(&self.config.cwd)
             .kill_on_drop(true)

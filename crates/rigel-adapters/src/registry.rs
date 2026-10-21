@@ -65,7 +65,9 @@ pub fn install_hint(harness: Harness) -> String {
         Harness::Codex => "npm install -g @openai/codex".to_string(),
         Harness::Claude => "npm install -g @anthropic-ai/claude-code".to_string(),
         Harness::Cursor if cfg!(windows) => {
-            "irm 'https://cursor.com/install?win32=true' | iex".to_string()
+            // PowerShell syntax wrapped so it also runs from cmd or a Git Bash shell.
+            "powershell -NoProfile -Command \"irm 'https://cursor.com/install?win32=true' | iex\""
+                .to_string()
         }
         Harness::Cursor => "curl https://cursor.com/install -fsS | bash".to_string(),
         Harness::Cline => "npm install -g cline".to_string(),
@@ -202,9 +204,16 @@ pub async fn probe(harness: Harness, store: &dyn CredentialStore) -> HarnessInfo
 /// Codex's probe lives with its adapter because its auth depends on the configured endpoint
 /// (router → `rigel/omniroute`, direct → `rigel/openai`).
 pub async fn probe_codex(config: &CodexConfig) -> HarnessInfo {
-    let exe = &config.exe;
-    let output =
-        tokio::time::timeout(PROBE_TIMEOUT, Command::new(exe).arg("--version").output()).await;
+    // Resolve the same way the other harnesses do, so an npm `codex.cmd` shim is probed (and
+    // later spawned) instead of reported missing just because CreateProcess cannot run batch files.
+    let exe = resolve_codex_exe(&config.exe);
+    let mut command = command_for(&exe);
+    command
+        .arg("--version")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let output = tokio::time::timeout(PROBE_TIMEOUT, command.output()).await;
 
     let (installed, version) = match output {
         Ok(Ok(output)) if output.status.success() => {
@@ -218,7 +227,7 @@ pub async fn probe_codex(config: &CodexConfig) -> HarnessInfo {
         _ => (false, None),
     };
 
-    let path = installed.then(|| reported_path(Harness::Codex, exe));
+    let path = installed.then_some(exe);
 
     HarnessInfo {
         harness: Harness::Codex,
@@ -233,11 +242,13 @@ pub async fn probe_codex(config: &CodexConfig) -> HarnessInfo {
     }
 }
 
-fn reported_path(harness: Harness, exe: &Path) -> PathBuf {
+/// A bare `codex`/`codex.exe` is looked up on `PATH` with the same extension rules as every other
+/// harness; an explicit path is used as given.
+pub(crate) fn resolve_codex_exe(exe: &Path) -> PathBuf {
     if exe.components().count() > 1 {
         return exe.to_path_buf();
     }
-    locate(harness).unwrap_or_else(|| exe.to_path_buf())
+    locate(Harness::Codex).unwrap_or_else(|| exe.to_path_buf())
 }
 
 async fn version_of(path: &Path) -> Option<String> {
@@ -302,7 +313,7 @@ fn windows_extensions() -> Vec<String> {
         .collect()
 }
 
-fn command_for(path: &Path) -> Command {
+pub(crate) fn command_for(path: &Path) -> Command {
     #[cfg(windows)]
     {
         let batch = path
@@ -574,6 +585,16 @@ mod tests {
         assert!(cache.refresh_auth(&store));
         assert_eq!(cache.harnesses[0].info.auth_mode, AuthMode::ApiKey);
         assert!(!cache.refresh_auth(&store));
+    }
+
+    #[test]
+    fn an_explicit_binary_path_wins_over_the_path_scan() {
+        let dir = tempfile::tempdir().unwrap();
+        let exe = dir
+            .path()
+            .join(if cfg!(windows) { "agent.exe" } else { "agent" });
+        std::fs::write(&exe, b"stub").unwrap();
+        assert_eq!(resolve_codex_exe(&exe), exe);
     }
 
     #[test]

@@ -250,7 +250,7 @@ const PREVIEW_HARNESSES: HarnessInfo[] = [
     auth_mode: "none",
     capabilities: { acp: true, json_stream: true, programmatic_approval: true, worktree: true, nested_agents: false },
     provider: "cursor",
-    install_hint: "irm 'https://cursor.com/install?win32=true' | iex",
+    install_hint: "powershell -NoProfile -Command \"irm 'https://cursor.com/install?win32=true' | iex\"",
   },
   {
     harness: "cline",
