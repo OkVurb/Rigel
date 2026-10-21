@@ -1,0 +1,19 @@
+# deps
+node_modules/
+.tools/
+
+# build output
+dist/
+dist-ssr/
+*.tsbuildinfo
+
+# local
+.env
+.env.*
+!.env.example
+*.log
+.DS_Store
+Thumbs.db
+
+# generated screenshots stay out of history except the ones we reference
+screenshots/*.tmp.png
