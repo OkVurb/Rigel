@@ -160,6 +160,8 @@ replace the localStorage notes above.
 | **P4.2** Per-agent API keys | `crates/rigel-core/src/credentials.rs`, `crates/rigel-adapters/src/codex.rs`, `ui/src/settings.tsx` | env-first test store; per-spawn redacted env injection; honest `ApiKey` / `Subscription` / `None` probe; pre-spawn refusal and first-event child kill in `tests/codex.rs`. Direct Codex resolves `rigel/openai`; only the local OmniRoute endpoint on port 20128 resolves `rigel/omniroute`, still injected as `OPENAI_API_KEY` because that is the name Codex accepts. Review fix: the provider now names that variable with `env_key` and leaves `requires_openai_auth` off, so Codex cannot fall back to the ChatGPT login — `45ac7e7`, `27377b3` |
 | **P4.5** Codex adapter | `crates/rigel-adapters/src/codex.rs` | app-server primary, `exec --json` fallback that never re-runs a turn which already produced tokens, per-turn usage from `thread/tokenUsage/updated`; `tests/codex.rs` (4) against `tests/fixtures/fake_codex.rs`; real turn 21 Oct — 155,894 in / 5 out — `7b3c2fb` |
 | `rigel codex` CLI | `crates/rigel-cli/src/harness.rs` | `probe --json` reports 0.162.1 and an absolute path; `run --json` returns text, transport, fallback flag and usage |
+| **P4.6** Claude adapter | `crates/rigel-adapters/src/claude.rs`, `tests/claude.rs`, `tests/fixtures/fake_claude.rs` | NDJSON stream normalised into `Started` / `Delta` / `Message` / `Notice`; per-turn usage and `total_cost_usd`; argv, cwd and stream shapes pinned by 10 tests (prompt on argv, key never on argv, `--bare` present, subscription identity killed, key redacted out of every event, blocked turn surfaced, silent non-zero exit refused, a truncated stream without a `result` line rejected). Probe reports 2.1.251 against the real CLI |
+| **P4.3** ACP client | `crates/rigel-adapters/src/acp.rs`, `tests/acp.rs`, `tests/fixtures/fake_acp.rs` | JSON-RPC v1 client for `agent acp` / `cline --acp`; initialize → session/new → session/prompt; `session/update` normalised into message, thought, tool-call, plan, usage, notice and `unmapped` events; `session/request_permission` routed to an `Approver` and answered only with an option the agent offered, otherwise `cancelled`; 8 tests against a scripted agent (approval outcome on the wire, unoffered allow downgraded, protocol 99 refused, hung turn cancelled and acknowledged, relative cwd refused, no key no spawn) |
 
 ---
 
@@ -1099,7 +1101,7 @@ Approvals are bound to an `approval_id` issued by the harness, not to text in th
 
 ## 11. The plan
 
-**State as of 21 Oct 2026:** Phases 0–3 complete; Phase 4 in progress.
+**State as of 21 Oct 2026:** Phases 0–3 complete; Phase 4 in progress (5/19).
 Run `node scripts/handoff-status.mjs` for live counts; this table is the summary.
 
 | Phase | Scope | State | Items |
@@ -1108,7 +1110,7 @@ Run `node scripts/handoff-status.mjs` for live counts; this table is the summary
 | 1 | Rust skeleton and storage | **complete** | 10/10 |
 | 2 | The shelf, real | **complete** | 11/11 |
 | 3 | Native agent, chat and the bill | **complete** | 11/11 |
-| 4 | Harness adapters | in progress | 3/19 |
+| 4 | Harness adapters | in progress | 5/19 |
 | 5 | Claims, attribution, merged diff | not started | 0/8 |
 | 6 | Dependencies and trust | not started | 0/8 |
 | 7 | Hardening and open-source release | not started | 0/9 |
@@ -1207,12 +1209,34 @@ unverified on a machine that has the CLI. The Codex turn itself was not re-run a
 (one turn injects ~155k input tokens, P4.19); the overrides are covered against the fake binary and
 match the documented custom-provider form. Next in order: P4.3/P4.4, with P4.7/P4.8 fixtures alongside.
 
+**Review note (21 Oct 2026, second session):** P4.6 and P4.3 landed together because they share the
+same shape — spawn a CLI, normalise its events, and make the credential boundary testable without
+the vendor. Both adapters are exercised only against fixture binaries; Claude's real CLI answers
+`--version` (2.1.251) and was *not* given a live turn, because one turn injects ~155k input tokens
+(P4.19). Cursor and Cline are still not installed, so the ACP client is verified against
+`tests/fixtures/fake_acp.rs` and nothing else.
+
+Redaction is applied per event and again to the completed message and the stored turn, so a
+credential that is echoed inside one chunk is caught. A credential split across two stream chunks
+would still reach a transient event before the redacted final text replaces it; closing that needs
+a streaming redactor and is recorded rather than assumed. Neither adapter has a CLI verb yet
+(`rigel codex` is the only one); they are library surfaces until P4.10 wires the app's turn loop.
+
+Two deliberate deviations, both recorded in their checklist lines: Claude does not yet receive
+`--permission-prompt-tool mcp__rigel__approve` (the server it names arrives with P4.10, and a
+dangling tool name would turn every permission request into an error), and P4.4 is untouched
+because Cline's per-agent provider file has no verified format yet; spawning `cline --acp` without
+one would authenticate as the vendor login or not at all, so `AcpClient::spawn` refuses it before
+starting a process. Next: P4.4 once Cline's config shape is checked against an installed CLI, then
+P4.7 fixtures and P4.8 normalisation.
+
+
 - [x] **P4.1** `probe()` for all four, writing `adapters.json`; UI lists missing harnesses with an install hint — `27377b3`
 - [x] **P4.2** Per-agent keychain injection; probe reports `auth_mode` and refuses `subscription` (D21) — `45ac7e7`
-- [ ] **P4.3** ACP client: `agent acp`, session updates, `session/request_permission` → approval UI
+- [x] **P4.3** ACP client: `agent acp`, session updates, `session/request_permission` → approval UI — `AcpClient` speaks protocol v1, refuses a different major version and a relative cwd, routes every permission request through the `Approver` trait (deny-by-default), sends `session/cancel` on timeout and waits for the agent's acknowledgement; unknown updates are kept as `unmapped` — `crates/rigel-adapters/src/acp.rs`, `tests/acp.rs` — `f2c8dbf`
 - [ ] **P4.4** ACP client: `cline --acp`, same client, separate probe
 - [x] **P4.5** Codex adapter: app-server JSON-RPC primary (probe passed 21 Oct), `codex exec --json` fallback behind the trait. Write the `-c` overrides explicitly; do not shell out to `omniroute run`/`launch-codex` — `7b3c2fb`
-- [ ] **P4.6** Claude adapter: `claude -p --output-format stream-json --verbose --include-partial-messages --permission-prompt-tool mcp__rigel__approve`
+- [x] **P4.6** Claude adapter: `claude -p --bare --output-format stream-json --verbose --include-partial-messages --permission-mode <mode>` — **deviation:** `--permission-prompt-tool` is not passed yet, because the MCP approval server it names does not exist until P4.10 and naming a missing tool would fail every permission request; the default policy is the CLI's own, which fails closed. `--bare` makes D21 enforceable: only `ANTHROPIC_API_KEY` authenticates, and a child that reports another `apiKeySource` is killed at its first event — `crates/rigel-adapters/src/claude.rs`, `tests/claude.rs` — `f2c8dbf`
 - [ ] **P4.7** Golden fixtures per harness per scenario (start, tool call, approval, error, interrupt) + replay tests
 - [ ] **P4.8** Normalisation for all ten item kinds; unmappable events retained as `unmapped`
 - [ ] **P4.9** Roster UI (D40): nested subagents, `observed only` labels, per-agent spend and claims; at most two transcripts side by side, no tabs or grids
