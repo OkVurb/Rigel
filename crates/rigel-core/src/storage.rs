@@ -43,16 +43,16 @@ impl Store {
     ///
     /// Also writes `.rigel/.gitignore` on first use so a session log can never be
     /// committed by accident (handoff §6.1).
-    pub async fn open_project(root: impl AsRef<Path>) -> Result<Self, StorageError> {
-        let dir = root.as_ref().join(".rigel");
+    pub async fn open_project(root: &Path) -> Result<Self, StorageError> {
+        let dir = root.join(".rigel");
         create_dir(&dir)?;
         write_gitignore(&dir)?;
         Self::open(dir.join("rigel.db"), PROJECT_MIGRATIONS).await
     }
 
     /// Open (creating if needed) the global index database.
-    pub async fn open_index(data_dir: impl AsRef<Path>) -> Result<Self, StorageError> {
-        let dir = data_dir.as_ref().to_path_buf();
+    pub async fn open_index(data_dir: &Path) -> Result<Self, StorageError> {
+        let dir = data_dir.to_path_buf();
         create_dir(&dir)?;
         Self::open(dir.join("index.db"), INDEX_MIGRATIONS).await
     }

@@ -32,14 +32,17 @@ command palette.
 
 ## The Rust core
 
-The workspace at the repository root is the app itself. `prototype/` stays as the visual reference
-until the UI is ported (P1.7).
+The workspace at the repository root is the app itself: `ui/` is the renderer, `crates/` the Rust
+core and CLI, and `crates/rigel-app` the Tauri 2 shell. `prototype/` remains as the visual reference.
 
 ```bash
 cargo build --workspace
 cargo test --workspace
 cargo run -q -p rigel-cli -- doctor --json
-cargo run -q -p rigel-cli -- migrate --project .
+cargo run -q -p rigel-cli -- session start --project .
+
+cd ui && npm install && npm run dev   # renderer in a browser, mock shelf
+cargo run -p rigel-app                 # desktop shell; builds ui/dist first
 ```
 
 `migrate` creates `<project>/.rigel/rigel.db` and writes a `.gitignore` for it, so a session log can

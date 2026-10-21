@@ -5,9 +5,23 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 
+[lib]
+name = "rigel_app"
+path = "src/lib.rs"
+
 [[bin]]
 name = "rigel-app"
 path = "src/main.rs"
 
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
 [dependencies]
 rigel-core = { path = "../rigel-core" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tauri = { version = "2", features = [] }
+toml = "0.8"
+
+[dev-dependencies]
+tempfile = { workspace = true }

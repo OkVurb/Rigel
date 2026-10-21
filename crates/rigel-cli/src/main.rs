@@ -1,14 +1,13 @@
 //! `rigel` — the CLI half of the app.
 //!
-//! Phase 1 ships only what the migration work needs: `doctor`, which will grow one check
-//! per phase, and `migrate`, which is how a project database gets created without
-//! launching the window.
+//! Everything here goes through the same core the window uses, which is what makes the
+//! Phase 1 exit test meaningful: two separate processes, one database, one session.
 
 use std::path::PathBuf;
 use std::process::ExitCode;
 
 use clap::{Parser, Subcommand};
-use rigel_core::Store;
+use rigel_core::{SessionService, Store};
 use serde_json::json;
 
 #[derive(Parser)]
@@ -31,6 +30,41 @@ enum Command {
         #[arg(long, value_name = "PATH", default_value = ".")]
         project: PathBuf,
     },
+
+    /// Session operations for one project.
+    Session {
+        #[command(subcommand)]
+        command: SessionCommand,
+    },
+}
+
+#[derive(Subcommand)]
+enum SessionCommand {
+    /// Start a session and print its id.
+    Start {
+        #[arg(long, value_name = "PATH", default_value = ".")]
+        project: PathBuf,
+        #[arg(long)]
+        title: Option<String>,
+        #[arg(long)]
+        budget_cents: Option<i64>,
+    },
+
+    /// List sessions, newest first.
+    List {
+        #[arg(long, value_name = "PATH", default_value = ".")]
+        project: PathBuf,
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// End a session.
+    End {
+        #[arg(long, value_name = "PATH", default_value = ".")]
+        project: PathBuf,
+        #[arg(long)]
+        id: String,
+    },
 }
 
 #[tokio::main]
@@ -43,7 +77,7 @@ async fn main() -> ExitCode {
                 let report = json!({
                     "ok": true,
                     "version": env!("CARGO_PKG_VERSION"),
-                    "server": rigel_mcp_name(),
+                    "server": "rigel",
                     "checks": [],
                 });
                 println!("{report}");
@@ -64,10 +98,73 @@ async fn main() -> ExitCode {
                 ExitCode::from(2)
             }
         },
+
+        Command::Session { command } => run_session(command).await,
     }
 }
 
-/// Kept as a function so `doctor` does not need the MCP crate as a dependency yet.
-fn rigel_mcp_name() -> &'static str {
-    "rigel"
+async fn run_session(command: SessionCommand) -> ExitCode {
+    match command {
+        SessionCommand::Start {
+            project,
+            title,
+            budget_cents,
+        } => match SessionService::open(&project).await {
+            Ok(service) => match service.start(title.as_deref(), budget_cents).await {
+                Ok(session) => {
+                    println!("{}", session.id);
+                    ExitCode::SUCCESS
+                }
+                Err(error) => fail(error),
+            },
+            Err(error) => fail(error),
+        },
+
+        SessionCommand::List {
+            project,
+            json: as_json,
+        } => match SessionService::open(&project).await {
+            Ok(service) => match service.list().await {
+                Ok(sessions) => {
+                    if as_json {
+                        println!(
+                            "{}",
+                            serde_json::to_string_pretty(&sessions).unwrap_or_default()
+                        );
+                    } else if sessions.is_empty() {
+                        println!("no sessions");
+                    } else {
+                        for session in sessions {
+                            println!(
+                                "{}  {:<11}  {:<13}  {}",
+                                &session.id[..8.min(session.id.len())],
+                                format!("{:?}", session.status).to_lowercase(),
+                                session.created_at,
+                                session.title.unwrap_or_default()
+                            );
+                        }
+                    }
+                    ExitCode::SUCCESS
+                }
+                Err(error) => fail(error),
+            },
+            Err(error) => fail(error),
+        },
+
+        SessionCommand::End { project, id } => match SessionService::open(&project).await {
+            Ok(service) => match service.end(&id).await {
+                Ok(session) => {
+                    println!("{}", session.id);
+                    ExitCode::SUCCESS
+                }
+                Err(error) => fail(error),
+            },
+            Err(error) => fail(error),
+        },
+    }
+}
+
+fn fail(error: impl std::fmt::Display) -> ExitCode {
+    eprintln!("rigel: {error}");
+    ExitCode::from(2)
 }
