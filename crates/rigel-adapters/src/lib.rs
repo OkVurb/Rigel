@@ -8,6 +8,10 @@ use std::path::PathBuf;
 
 use serde::Serialize;
 
+pub mod codex;
+
+pub use codex::{CodexAdapter, CodexConfig, CodexEvent, CodexUsage, Transport, TurnResult};
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Harness {
