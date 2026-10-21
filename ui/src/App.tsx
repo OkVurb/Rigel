@@ -79,14 +79,30 @@ export default function App() {
   // answer is a boolean — the window never receives the key itself.
   useEffect(() => {
     if (!isTauri()) {
-      setKeys({ openrouter: false, omniroute: false });
+      setKeys({
+        openrouter: false,
+        omniroute: false,
+        openai: false,
+        anthropic: false,
+        cursor: false,
+      });
       return;
     }
     let live = true;
     api
       .keyStatus()
       .then((next) => live && setKeys(next))
-      .catch(() => live && setKeys({ openrouter: false, omniroute: false }));
+      .catch(
+        () =>
+          live &&
+          setKeys({
+            openrouter: false,
+            omniroute: false,
+            openai: false,
+            anthropic: false,
+            cursor: false,
+          }),
+      );
     return () => {
       live = false;
     };

@@ -30,6 +30,137 @@ const PROVIDERS = [
   },
 ] as const;
 
+const HARNESS_KEYS = [
+  {
+    id: "openai",
+    harness: "Codex",
+    name: "OpenAI",
+    env: "OPENAI_API_KEY",
+    placeholder: "sk-…",
+  },
+  {
+    id: "anthropic",
+    harness: "Claude Code",
+    name: "Anthropic",
+    env: "ANTHROPIC_API_KEY",
+    placeholder: "sk-ant-…",
+  },
+  {
+    id: "cursor",
+    harness: "Cursor",
+    name: "Cursor",
+    env: "CURSOR_API_KEY",
+    placeholder: "key-…",
+  },
+] as const;
+
+type HarnessKey = (typeof HARNESS_KEYS)[number];
+
+function HarnessKeyRow({
+  item,
+  present,
+  onKeys,
+  onNotice,
+}: {
+  item: HarnessKey;
+  present: boolean;
+  onKeys: (status: KeyStatus) => void;
+  onNotice: (notice: string) => void;
+}) {
+  const [value, setValue] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [confirmRemove, setConfirmRemove] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const save = async () => {
+    const key = value.trim();
+    if (!key) return;
+    setBusy(true);
+    setError(null);
+    try {
+      onKeys(await api.setKey(item.id, key));
+      setValue("");
+      setConfirmRemove(false);
+      onNotice(`${item.name} key stored for ${item.harness}.`);
+    } catch (problem) {
+      setError(problem instanceof Error ? problem.message : String(problem));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const remove = async () => {
+    setBusy(true);
+    setError(null);
+    try {
+      onKeys(await api.deleteKey(item.id));
+      setConfirmRemove(false);
+      onNotice(`${item.name} key removed.`);
+    } catch (problem) {
+      setError(problem instanceof Error ? problem.message : String(problem));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div className="harness-key-row">
+      <div className="harness-key-label">
+        <strong>{item.harness}</strong>
+        <span>
+          {present ? `${item.name} key set` : `Needs API key · ${item.id}`}
+        </span>
+      </div>
+      <input
+        type="password"
+        aria-label={`${item.name} API key`}
+        value={value}
+        onChange={(event) => setValue(event.target.value)}
+        onKeyDown={(event) => {
+          if (event.key === "Enter") {
+            event.preventDefault();
+            void save();
+          }
+        }}
+        placeholder={item.placeholder}
+        autoComplete="off"
+        spellCheck={false}
+        disabled={busy}
+      />
+      <div className="settings-actions">
+        <button className="primary" onClick={() => void save()} disabled={busy || !value.trim()}>
+          Save
+        </button>
+        {present ? (
+          confirmRemove ? (
+            <>
+              <button className="chip danger" onClick={() => void remove()} disabled={busy}>
+                Confirm delete
+              </button>
+              <button className="chip" onClick={() => setConfirmRemove(false)} disabled={busy}>
+                Cancel
+              </button>
+            </>
+          ) : (
+            <button className="chip danger" onClick={() => setConfirmRemove(true)} disabled={busy}>
+              Delete
+            </button>
+          )
+        ) : null}
+      </div>
+      <p className="fine">
+        {error ? (
+          error
+        ) : (
+          <>
+            Write-only entry <code>rigel/{item.id}</code>. Headless: <code>{item.env}</code>.
+          </>
+        )}
+      </p>
+    </div>
+  );
+}
+
 /**
  * Providers and keys. The renderer can store a key and ask whether one exists; it never
  * receives the value back. That is enforced by the Tauri commands, not by this form.
@@ -303,6 +434,28 @@ export default function SettingsView({ keys, onKeys, onNotice }: Props) {
         </section>
 
         <section className="settings-section">
+          <div className="settings-head">
+            <h3>Harness keys</h3>
+            <span className="pill cancelled">API keys only</span>
+          </div>
+          <p className="fine">
+            Each harness receives only its own key when Rigel starts the process. Vendor logins and
+            subscriptions are never reused.
+          </p>
+          <div className="harness-key-list">
+            {HARNESS_KEYS.map((item) => (
+              <HarnessKeyRow
+                key={item.id}
+                item={item}
+                present={keys?.[item.id] ?? false}
+                onKeys={onKeys}
+                onNotice={onNotice}
+              />
+            ))}
+          </div>
+        </section>
+
+        <section className="settings-section">
           <h3>Model</h3>
           <p className="fine">
             The native agent's default is <code>{settings?.model ?? "gpt-5.6-sol-medium"}</code>;
@@ -323,9 +476,8 @@ export default function SettingsView({ keys, onKeys, onNotice }: Props) {
         <div>
           <h3>Headless</h3>
           <p className="fine">
-            The CLI reads the same keychain entry: <code>rigel keys set omniroute</code> reads
-            from stdin and never echoes the value. <code>rigel agent run --provider</code>{" "}
-            switches between the router and OpenRouter.
+            The CLI reads the same keychain entries. <code>rigel keys set openai</code> and the
+            other provider commands read from stdin and never echo the value.
           </p>
         </div>
       </aside>

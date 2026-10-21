@@ -15,6 +15,8 @@
 //! back to `exec`; if it fails after, the error is returned and the partial text is kept. Re-running a
 //! turn that already reached the model would charge twice for one prompt.
 
+use std::collections::BTreeMap;
+use std::fmt;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::time::Duration;
@@ -25,9 +27,11 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, Lines};
 use tokio::process::{ChildStdin, ChildStdout, Command};
 use tokio::time::{Instant, timeout_at};
 
+use rigel_core::credentials::{CredentialStore, Secret, get_from};
+
 use crate::{
     Adapter, AdapterError, ApprovalPolicy, AuthMode, Capabilities, Harness, HarnessInfo,
-    SandboxMode,
+    SandboxMode, credential_spec,
 };
 
 /// The model Rigel defaults to. The `-medium` suffix is OmniRoute's effort convention (Q74).
@@ -54,7 +58,7 @@ impl Transport {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct CodexConfig {
     /// The `codex` binary. Resolved from `PATH` when left as the default.
     pub exe: PathBuf,
@@ -67,6 +71,28 @@ pub struct CodexConfig {
     pub transport: Transport,
     /// One turn, start to finish. The router can be slow on the first turn of the day.
     pub timeout: Duration,
+    /// Per-agent process environment. Values stay wrapped so debug output is always redacted.
+    pub env: BTreeMap<String, Secret>,
+    /// Existence means the vendor login may be usable as a subscription. Rigel never reads it.
+    pub vendor_login: Option<PathBuf>,
+}
+
+impl fmt::Debug for CodexConfig {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("CodexConfig")
+            .field("exe", &self.exe)
+            .field("base_url", &self.base_url)
+            .field("model", &self.model)
+            .field("cwd", &self.cwd)
+            .field("sandbox", &self.sandbox)
+            .field("approval", &self.approval)
+            .field("transport", &self.transport)
+            .field("timeout", &self.timeout)
+            .field("env", &self.env)
+            .field("vendor_login", &self.vendor_login)
+            .finish()
+    }
 }
 
 impl CodexConfig {
@@ -81,7 +107,32 @@ impl CodexConfig {
             approval: ApprovalPolicy::Never,
             transport: Transport::Auto,
             timeout: Duration::from_secs(180),
+            env: BTreeMap::new(),
+            vendor_login: default_vendor_login(),
         }
+    }
+
+    /// Resolve the configured harness credential into this one process environment. Missing or
+    /// unavailable storage leaves the map empty so `probe()` can report `None` or `Subscription`;
+    /// starting a turn will refuse before spawning.
+    pub fn inject_credential(&mut self, store: &dyn CredentialStore) -> bool {
+        let Some(spec) = credential_spec(Harness::Codex, Some(&self.base_url)) else {
+            return false;
+        };
+        self.env.remove(spec.env_var);
+        match get_from(store, spec.provider) {
+            Ok(secret) => {
+                self.env.insert(spec.env_var.to_string(), secret);
+                true
+            }
+            Err(_) => false,
+        }
+    }
+
+    pub fn credential_provider(&self) -> &'static str {
+        credential_spec(Harness::Codex, Some(&self.base_url))
+            .expect("Codex always has a credential specification")
+            .provider
     }
 }
 
@@ -151,22 +202,30 @@ impl CodexAdapter {
     where
         F: FnMut(CodexEvent),
     {
+        if auth_mode(&self.config) != AuthMode::ApiKey {
+            return Err(AdapterError::RequiresApiKey {
+                harness: Harness::Codex,
+            });
+        }
+        let secrets = self.config.env.values().cloned().collect::<Vec<_>>();
+        let mut emit = |event| on_event(redact_event(event, &secrets));
         let started = Instant::now();
         let outcome = match self.config.transport {
-            Transport::AppServer => self.app_server_turn(prompt, &mut on_event).await,
-            Transport::Exec => self.exec_turn(prompt, &mut on_event).await,
-            Transport::Auto => match self.app_server_turn(prompt, &mut on_event).await {
+            Transport::AppServer => self.app_server_turn(prompt, &mut emit).await,
+            Transport::Exec => self.exec_turn(prompt, &mut emit).await,
+            Transport::Auto => match self.app_server_turn(prompt, &mut emit).await {
                 Ok(result) => Ok(result),
                 Err(Failure::BeforeTurn(reason)) => {
-                    on_event(CodexEvent::Notice {
-                        message: format!("app-server failed ({reason}); falling back to exec"),
+                    emit(CodexEvent::Notice {
+                        message: format!(
+                            "app-server failed ({}); falling back to exec",
+                            redact_text(&reason, &secrets)
+                        ),
                     });
-                    self.exec_turn(prompt, &mut on_event)
-                        .await
-                        .map(|mut result| {
-                            result.fell_back = true;
-                            result
-                        })
+                    self.exec_turn(prompt, &mut emit).await.map(|mut result| {
+                        result.fell_back = true;
+                        result
+                    })
                 }
                 Err(error) => Err(error),
             },
@@ -175,9 +234,10 @@ impl CodexAdapter {
         outcome
             .map(|mut result| {
                 result.duration = started.elapsed();
+                result.text = redact_text(&result.text, &secrets);
                 result
             })
-            .map_err(AdapterError::from)
+            .map_err(|failure| AdapterError::from(failure.redacted(&secrets)))
     }
 
     /// The `-c` overrides for pointing Codex at a router. Written here, never taken from
@@ -194,7 +254,9 @@ impl CodexAdapter {
                 self.config.base_url
             ),
             "model_providers.omniroute.wire_api=\"responses\"".to_string(),
-            "model_providers.omniroute.requires_openai_auth=false".to_string(),
+            // Codex sends the injected OPENAI_API_KEY to the router. OmniRoute currently accepts
+            // unauthenticated loopback requests, but Rigel never relies on that gap (§10, D21).
+            "model_providers.omniroute.requires_openai_auth=true".to_string(),
         ]
     }
 
@@ -208,6 +270,18 @@ impl CodexAdapter {
             // Inherited, not piped: nothing reads stderr, and an unread pipe can fill and
             // deadlock a chatty child. Codex's log lines belong in the process's own stderr.
             .stderr(Stdio::inherit());
+        // Do not let an ambient vendor key bypass the per-agent resolver. The resolved map is the
+        // only way a harness credential crosses the process boundary.
+        command
+            .env_remove("OPENAI_API_KEY")
+            .env_remove("ANTHROPIC_API_KEY")
+            .env_remove("CURSOR_API_KEY")
+            .envs(
+                self.config
+                    .env
+                    .iter()
+                    .map(|(name, value)| (name, value.expose())),
+            );
         command
     }
 
@@ -269,6 +343,12 @@ impl CodexAdapter {
             let Ok(message) = serde_json::from_str::<Value>(&line) else {
                 continue;
             };
+
+            if is_subscription_notification(&message) {
+                let _ = child.kill().await;
+                let _ = child.wait().await;
+                return Err(Failure::RequiresApiKey);
+            }
 
             if let Some(id) = message.get("id").and_then(Value::as_u64) {
                 if let Some(error) = message.get("error") {
@@ -393,6 +473,11 @@ impl CodexAdapter {
             let Ok(value) = serde_json::from_str::<Value>(&line) else {
                 continue;
             };
+            if is_subscription_exec_event(&value) {
+                let _ = child.kill().await;
+                let _ = child.wait().await;
+                return Err(Failure::RequiresApiKey);
+            }
             match classify_exec(&value) {
                 ExecStep::Started { thread } => {
                     thread_id = Some(thread.clone());
@@ -492,17 +577,23 @@ impl Adapter for CodexAdapter {
     }
 }
 
-/// How Codex proves who it is. Rigel always supplies an API key (D21); with the router that
-/// key is Rigel's own, and the router currently does not enforce it (see §10).
+/// How Codex proves who it is. A loopback URL is not evidence: only an injected, non-empty API
+/// key qualifies. A vendor login file is checked for existence only and classed as Subscription.
 fn auth_mode(config: &CodexConfig) -> AuthMode {
-    let key_in_env = ["OMNIROUTE_API_KEY", "OPENAI_API_KEY"].iter().any(|name| {
-        std::env::var(name)
-            .map(|value| !value.trim().is_empty())
-            .unwrap_or(false)
+    let has_key = credential_spec(Harness::Codex, Some(&config.base_url)).is_some_and(|spec| {
+        config
+            .env
+            .get(spec.env_var)
+            .is_some_and(|value| !value.expose().trim().is_empty())
     });
-    let loopback = config.base_url.contains("127.0.0.1") || config.base_url.contains("localhost");
-    if key_in_env || loopback {
+    if has_key {
         AuthMode::ApiKey
+    } else if config
+        .vendor_login
+        .as_ref()
+        .is_some_and(|path| path.is_file())
+    {
+        AuthMode::Subscription
     } else {
         AuthMode::None
     }
@@ -514,16 +605,82 @@ enum Failure {
     BeforeTurn(String),
     /// The turn started; retrying would bill twice.
     AfterTurn(String),
+    RequiresApiKey,
+}
+
+impl Failure {
+    fn redacted(self, secrets: &[Secret]) -> Self {
+        match self {
+            Self::BeforeTurn(reason) => Self::BeforeTurn(redact_text(&reason, secrets)),
+            Self::AfterTurn(reason) => Self::AfterTurn(redact_text(&reason, secrets)),
+            Self::RequiresApiKey => Self::RequiresApiKey,
+        }
+    }
 }
 
 impl From<Failure> for AdapterError {
     fn from(failure: Failure) -> Self {
         match failure {
+            Failure::RequiresApiKey => AdapterError::RequiresApiKey {
+                harness: Harness::Codex,
+            },
             Failure::BeforeTurn(reason) | Failure::AfterTurn(reason) => {
                 AdapterError::Other(format!("codex: {reason}"))
             }
         }
     }
+}
+
+fn default_vendor_login() -> Option<PathBuf> {
+    std::env::var_os("USERPROFILE")
+        .or_else(|| std::env::var_os("HOME"))
+        .map(PathBuf::from)
+        .map(|home| home.join(".codex").join("auth.json"))
+}
+
+fn redact_text(value: &str, secrets: &[Secret]) -> String {
+    secrets.iter().fold(value.to_string(), |redacted, secret| {
+        let exposed = secret.expose();
+        if exposed.is_empty() {
+            redacted
+        } else {
+            redacted.replace(exposed, "<redacted>")
+        }
+    })
+}
+
+fn redact_event(event: CodexEvent, secrets: &[Secret]) -> CodexEvent {
+    match event {
+        CodexEvent::Started {
+            thread_id,
+            transport,
+        } => CodexEvent::Started {
+            thread_id: redact_text(&thread_id, secrets),
+            transport,
+        },
+        CodexEvent::Delta { text } => CodexEvent::Delta {
+            text: redact_text(&text, secrets),
+        },
+        CodexEvent::Message { text } => CodexEvent::Message {
+            text: redact_text(&text, secrets),
+        },
+        CodexEvent::Notice { message } => CodexEvent::Notice {
+            message: redact_text(&message, secrets),
+        },
+    }
+}
+
+/// Belt-and-braces refusal for a process whose first auth update says it selected ChatGPT.
+fn is_subscription_notification(message: &Value) -> bool {
+    message.get("method").and_then(Value::as_str) == Some("account/updated")
+        && matches!(
+            message["params"].get("authMode").and_then(Value::as_str),
+            Some("chatgpt" | "subscription")
+        )
+}
+
+fn is_subscription_exec_event(value: &Value) -> bool {
+    value.get("type").and_then(Value::as_str) == Some("auth.subscription")
 }
 
 async fn send(stdin: &mut ChildStdin, id: u64, method: &str, params: Value) -> Result<(), Failure> {
@@ -864,7 +1021,7 @@ mod tests {
         assert!(
             overrides
                 .iter()
-                .any(|pair| pair.contains("requires_openai_auth=false"))
+                .any(|pair| pair.contains("requires_openai_auth=true"))
         );
 
         let mut direct = CodexConfig::router(".");
@@ -873,9 +1030,37 @@ mod tests {
     }
 
     #[test]
-    fn a_local_router_counts_as_an_api_key_even_without_one_in_env() {
-        let config = CodexConfig::router(".");
-        // Whatever the ambient environment holds, loopback means Rigel's own key.
+    fn loopback_is_not_authentication_without_an_injected_key() {
+        let mut config = CodexConfig::router(".");
+        config.vendor_login = None;
+        assert_eq!(auth_mode(&config), AuthMode::None);
+
+        config
+            .env
+            .insert("OPENAI_API_KEY".to_string(), Secret::new("not-printed"));
         assert_eq!(auth_mode(&config), AuthMode::ApiKey);
+    }
+
+    #[test]
+    fn child_errors_and_events_cannot_echo_an_injected_key() {
+        let secrets = vec![Secret::new("sk-test-must-stay-secret")];
+        let error = AdapterError::from(
+            Failure::AfterTurn("child echoed sk-test-must-stay-secret".to_string())
+                .redacted(&secrets),
+        );
+        assert_eq!(error.to_string(), "codex: child echoed <redacted>");
+
+        let event = redact_event(
+            CodexEvent::Notice {
+                message: "notice sk-test-must-stay-secret".to_string(),
+            },
+            &secrets,
+        );
+        assert_eq!(
+            event,
+            CodexEvent::Notice {
+                message: "notice <redacted>".to_string()
+            }
+        );
     }
 }

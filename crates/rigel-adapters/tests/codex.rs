@@ -7,15 +7,17 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use rigel_adapters::{
-    Adapter, ApprovalPolicy, CodexAdapter, CodexConfig, CodexEvent, SandboxMode, Transport,
+    Adapter, AdapterError, ApprovalPolicy, AuthMode, CodexAdapter, CodexConfig, CodexEvent,
+    Harness, SandboxMode, Transport,
 };
+use rigel_core::credentials::Secret;
 
 fn fake_path() -> PathBuf {
     PathBuf::from(env!("CARGO_BIN_EXE_fake-codex"))
 }
 
 fn config(cwd: &std::path::Path, transport: Transport) -> CodexConfig {
-    CodexConfig {
+    let mut config = CodexConfig {
         exe: fake_path(),
         base_url: "http://127.0.0.1:20128/v1".to_string(),
         model: "gpt-5.6-sol-medium".to_string(),
@@ -24,7 +26,14 @@ fn config(cwd: &std::path::Path, transport: Transport) -> CodexConfig {
         approval: ApprovalPolicy::Never,
         transport,
         timeout: Duration::from_secs(10),
-    }
+        env: Default::default(),
+        vendor_login: None,
+    };
+    config.env.insert(
+        "OPENAI_API_KEY".to_string(),
+        Secret::new("test-secret-that-must-not-print"),
+    );
+    config
 }
 
 #[tokio::test]
@@ -97,6 +106,79 @@ async fn probe_reports_the_installed_version() {
     assert!(info.capabilities.json_stream);
     assert!(info.capabilities.programmatic_approval);
     assert!(!info.capabilities.acp);
+    assert_eq!(info.auth_mode, AuthMode::ApiKey);
+}
+
+#[tokio::test]
+async fn injected_environment_reaches_the_child_without_exposing_the_value() {
+    let dir = tempfile::tempdir().unwrap();
+    let adapter = CodexAdapter::new(config(dir.path(), Transport::AppServer));
+    let mut notices = Vec::new();
+
+    adapter
+        .run_turn("say pong", |event| {
+            if let CodexEvent::Notice { message } = event {
+                notices.push(message);
+            }
+        })
+        .await
+        .expect("turn should complete");
+
+    assert!(notices.iter().any(|notice| notice == "OPENAI_API_KEY=set"));
+    assert!(
+        notices
+            .iter()
+            .all(|notice| !notice.contains("test-secret-that-must-not-print"))
+    );
+}
+
+#[tokio::test]
+async fn subscription_probe_reports_but_run_refuses_before_spawn() {
+    let dir = tempfile::tempdir().unwrap();
+    let login = dir.path().join("auth.json");
+    std::fs::write(&login, b"contents are deliberately never read").unwrap();
+    let mut cfg = config(dir.path(), Transport::AppServer);
+    cfg.env.clear();
+    cfg.vendor_login = Some(login);
+    let adapter = CodexAdapter::new(cfg);
+
+    let info = adapter.probe().await.expect("probe should still succeed");
+    assert_eq!(info.auth_mode, AuthMode::Subscription);
+    let error = adapter.run_turn("do not run", |_| {}).await.unwrap_err();
+    assert!(matches!(
+        error,
+        AdapterError::RequiresApiKey {
+            harness: Harness::Codex
+        }
+    ));
+    assert!(!dir.path().join("SPAWNED").exists());
+}
+
+#[tokio::test]
+async fn subscription_event_kills_a_child_that_was_started_with_a_key() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("SUBSCRIPTION_EVENT"), b"").unwrap();
+    let mut cfg = config(dir.path(), Transport::AppServer);
+    cfg.timeout = Duration::from_secs(5);
+    let adapter = CodexAdapter::new(cfg);
+    let started = std::time::Instant::now();
+
+    let error = adapter.run_turn("do not bill", |_| {}).await.unwrap_err();
+    assert!(matches!(error, AdapterError::RequiresApiKey { .. }));
+    assert!(dir.path().join("SPAWNED").exists());
+    assert!(
+        started.elapsed() < Duration::from_secs(2),
+        "the child should be killed instead of reaching its timeout"
+    );
+}
+
+#[test]
+fn config_debug_redacts_injected_keys() {
+    let dir = tempfile::tempdir().unwrap();
+    let config = config(dir.path(), Transport::Exec);
+    let debug = format!("{config:?}");
+    assert!(debug.contains("OPENAI_API_KEY"));
+    assert!(!debug.contains("test-secret-that-must-not-print"));
 }
 
 #[tokio::test]

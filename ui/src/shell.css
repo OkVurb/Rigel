@@ -1362,6 +1362,64 @@ input {
   gap: 8px;
 }
 
+.harness-key-list {
+  display: grid;
+  gap: 10px;
+}
+
+.harness-key-row {
+  display: grid;
+  grid-template-columns: minmax(120px, 0.7fr) minmax(180px, 1.4fr) auto;
+  align-items: center;
+  gap: 8px 12px;
+  padding: 12px;
+  border: 1px solid var(--hairline);
+  border-radius: 6px;
+  background: var(--surface);
+}
+
+.harness-key-label {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.harness-key-label strong {
+  color: var(--text);
+  font-size: 12px;
+}
+
+.harness-key-label span {
+  color: var(--faint);
+  font-size: 10px;
+}
+
+.harness-key-row input {
+  min-width: 0;
+  padding: 9px 11px;
+  border: 1px solid var(--hairline);
+  border-radius: 6px;
+  background: var(--raised);
+  color: var(--text);
+  font-family: var(--mono);
+  font-size: 12px;
+}
+
+.harness-key-row .fine {
+  grid-column: 1 / -1;
+  margin: 0;
+}
+
+@media (max-width: 940px) {
+  .harness-key-row {
+    grid-template-columns: 1fr;
+  }
+
+  .harness-key-row .fine {
+    grid-column: auto;
+  }
+}
+
 .settings-main .fine {
   max-width: 560px;
   color: var(--faint);

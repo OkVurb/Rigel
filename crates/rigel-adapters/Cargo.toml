@@ -12,6 +12,7 @@ test = false
 
 [dependencies]
 async-trait = { workspace = true }
+rigel-core = { path = "../rigel-core" }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }

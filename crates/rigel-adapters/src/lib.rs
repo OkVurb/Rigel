@@ -31,6 +31,99 @@ pub enum AuthMode {
     None,
 }
 
+/// The keychain entry and environment variable a harness receives at its process boundary.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CredentialSpec {
+    pub provider: &'static str,
+    pub env_var: &'static str,
+}
+
+/// Resolve the API key contract for one harness. Codex normally uses `rigel/openai` as
+/// `OPENAI_API_KEY`. When its configured endpoint is the local router, it deliberately uses
+/// `rigel/omniroute` under that same environment name: Codex only understands the OpenAI name,
+/// while the credential is the router's own key. The router's current failure to enforce the key
+/// is never treated as authentication (§10, D21).
+pub fn credential_spec(harness: Harness, base_url: Option<&str>) -> Option<CredentialSpec> {
+    match harness {
+        Harness::Codex if base_url.is_some_and(is_local_omniroute_url) => Some(CredentialSpec {
+            provider: rigel_core::credentials::OMNIROUTE,
+            env_var: "OPENAI_API_KEY",
+        }),
+        Harness::Codex => Some(CredentialSpec {
+            provider: rigel_core::credentials::OPENAI,
+            env_var: "OPENAI_API_KEY",
+        }),
+        Harness::Claude => Some(CredentialSpec {
+            provider: rigel_core::credentials::ANTHROPIC,
+            env_var: "ANTHROPIC_API_KEY",
+        }),
+        Harness::Cursor => Some(CredentialSpec {
+            provider: rigel_core::credentials::CURSOR,
+            env_var: "CURSOR_API_KEY",
+        }),
+        Harness::Native | Harness::Cline => None,
+    }
+}
+
+fn is_local_omniroute_url(value: &str) -> bool {
+    let value = value.trim().to_ascii_lowercase();
+    let authority = value
+        .strip_prefix("http://")
+        .or_else(|| value.strip_prefix("https://"))
+        .unwrap_or(&value)
+        .split('/')
+        .next()
+        .unwrap_or_default();
+    let (host, port) = if authority.starts_with('[') {
+        let Some((host, suffix)) = authority.split_once(']') else {
+            return false;
+        };
+        (host, suffix.strip_prefix(':'))
+    } else {
+        authority
+            .rsplit_once(':')
+            .map_or((authority, None), |(host, port)| (host, Some(port)))
+    };
+    matches!(host, "127.0.0.1" | "localhost" | "[::1") && port == Some("20128")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn harness_credentials_are_explicit() {
+        assert_eq!(
+            credential_spec(Harness::Codex, Some("https://api.openai.com/v1")),
+            Some(CredentialSpec {
+                provider: rigel_core::credentials::OPENAI,
+                env_var: "OPENAI_API_KEY",
+            })
+        );
+        assert_eq!(
+            credential_spec(Harness::Codex, Some("http://127.0.0.1:20128/v1")),
+            Some(CredentialSpec {
+                provider: rigel_core::credentials::OMNIROUTE,
+                env_var: "OPENAI_API_KEY",
+            })
+        );
+        assert_eq!(
+            credential_spec(Harness::Codex, Some("http://localhost:11434/v1"))
+                .unwrap()
+                .provider,
+            rigel_core::credentials::OPENAI
+        );
+        assert_eq!(
+            credential_spec(Harness::Claude, None).unwrap().env_var,
+            "ANTHROPIC_API_KEY"
+        );
+        assert_eq!(
+            credential_spec(Harness::Cursor, None).unwrap().env_var,
+            "CURSOR_API_KEY"
+        );
+    }
+}
+
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
 pub struct Capabilities {
     pub acp: bool,
@@ -69,7 +162,9 @@ pub enum AdapterError {
     #[error("{harness:?} is not installed")]
     NotInstalled { harness: Harness },
 
-    #[error("{harness:?} is authenticated only by a subscription; Rigel requires an API key")]
+    #[error(
+        "{harness:?} requires its own API key; Rigel will not reuse a subscription or vendor login"
+    )]
     RequiresApiKey { harness: Harness },
 
     #[error("{0}")]

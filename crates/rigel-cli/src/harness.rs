@@ -10,6 +10,7 @@ use std::process::ExitCode;
 
 use clap::Subcommand;
 use rigel_adapters::{Adapter, AdapterError, CodexAdapter, CodexConfig, CodexEvent, Transport};
+use rigel_core::credentials::KeychainCredentialStore;
 use serde_json::json;
 
 #[derive(Subcommand)]
@@ -75,6 +76,7 @@ async fn probe(exe: Option<PathBuf>, as_json: bool) -> ExitCode {
     if let Some(exe) = exe {
         config.exe = exe;
     }
+    config.inject_credential(&KeychainCredentialStore);
     let adapter = CodexAdapter::new(config);
 
     match adapter.probe().await {
@@ -163,6 +165,9 @@ async fn run(options: RunOptions) -> ExitCode {
         config.exe = exe;
     }
 
+    let credential_provider = config.credential_provider().to_string();
+    config.inject_credential(&KeychainCredentialStore);
+
     let adapter = CodexAdapter::new(config);
     let mut notices = Vec::new();
     let mut streamed = false;
@@ -234,9 +239,22 @@ async fn run(options: RunOptions) -> ExitCode {
         }
         Err(error) => {
             if as_json {
-                println!("{}", json!({ "ok": false, "error": error.to_string() }));
+                println!(
+                    "{}",
+                    json!({
+                        "ok": false,
+                        "error": error.to_string(),
+                        "provider": credential_provider,
+                        "fix": format!("rigel keys set {credential_provider}"),
+                    })
+                );
             }
             eprintln!("rigel: {error}");
+            if matches!(error, AdapterError::RequiresApiKey { .. }) {
+                eprintln!(
+                    "fix: store the {credential_provider} key with `rigel keys set {credential_provider}`"
+                );
+            }
             ExitCode::from(2)
         }
     }

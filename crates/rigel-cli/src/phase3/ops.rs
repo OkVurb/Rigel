@@ -215,8 +215,9 @@ pub fn run_keys(command: KeyCommand) -> ExitCode {
             let providers = [
                 credentials::OMNIROUTE,
                 credentials::OPENROUTER,
-                "openai",
-                "anthropic",
+                credentials::OPENAI,
+                credentials::ANTHROPIC,
+                credentials::CURSOR,
             ];
             let rows: Vec<_> = providers
                 .iter()

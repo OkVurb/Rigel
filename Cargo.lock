@@ -2929,6 +2929,7 @@ name = "rigel-adapters"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "rigel-core",
  "serde",
  "serde_json",
  "tempfile",

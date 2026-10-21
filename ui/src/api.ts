@@ -197,6 +197,9 @@ function previewQuote(prompt: string, spendMicros: number, capMicros: number | n
 export interface KeyStatus {
   openrouter: boolean;
   omniroute: boolean;
+  openai: boolean;
+  anthropic: boolean;
+  cursor: boolean;
 }
 
 /** The serialised `AgentEvent`; `type` is the discriminator. */
@@ -420,17 +423,23 @@ export const api = {
   },
 
   async keyStatus(): Promise<KeyStatus> {
-    if (!isTauri()) return { openrouter: false, omniroute: false };
+    if (!isTauri()) {
+      return { openrouter: false, omniroute: false, openai: false, anthropic: false, cursor: false };
+    }
     return call<KeyStatus>("key_status");
   },
 
   async setKey(provider: string, value: string): Promise<KeyStatus> {
-    if (!isTauri()) return { openrouter: true, omniroute: true };
+    if (!isTauri()) {
+      return { openrouter: true, omniroute: true, openai: true, anthropic: true, cursor: true };
+    }
     return call<KeyStatus>("key_set", { provider, value });
   },
 
   async deleteKey(provider: string): Promise<KeyStatus> {
-    if (!isTauri()) return { openrouter: false, omniroute: false };
+    if (!isTauri()) {
+      return { openrouter: false, omniroute: false, openai: false, anthropic: false, cursor: false };
+    }
     return call<KeyStatus>("key_delete", { provider });
   },
 

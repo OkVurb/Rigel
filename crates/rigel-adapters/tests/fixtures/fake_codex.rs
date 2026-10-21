@@ -7,6 +7,7 @@
 
 use std::io::{BufRead, Write};
 use std::path::Path;
+use std::time::Duration;
 
 use serde_json::{Value, json};
 
@@ -28,6 +29,19 @@ fn main() {
 }
 
 fn exec() {
+    println!(
+        "{}",
+        json!({
+            "type": "item.completed",
+            "item": {
+                "type": "error",
+                "message": format!(
+                    "OPENAI_API_KEY={}",
+                    if std::env::var_os("OPENAI_API_KEY").is_some() { "set" } else { "unset" }
+                )
+            }
+        })
+    );
     println!(
         "{}",
         json!({ "type": "thread.started", "thread_id": "th-exec" })
@@ -56,8 +70,14 @@ fn exec() {
 }
 
 fn app_server() {
+    std::fs::write("SPAWNED", b"").expect("record fake process start");
     if Path::new("FAIL_APP_SERVER").exists() {
         std::process::exit(9);
+    }
+    if Path::new("SUBSCRIPTION_EVENT").exists() {
+        notify("account/updated", json!({ "authMode": "subscription" }));
+        std::thread::sleep(Duration::from_secs(30));
+        return;
     }
 
     let stdin = std::io::stdin();
@@ -76,6 +96,18 @@ fn app_server() {
             "thread/start" => respond(&id, json!({ "threadId": "th-1", "model": "fake" })),
             "turn/start" => {
                 respond(&id, json!({ "turnId": "tn-1" }));
+                notify(
+                    "item/completed",
+                    json!({
+                        "item": {
+                            "type": "error",
+                            "message": format!(
+                                "OPENAI_API_KEY={}",
+                                if std::env::var_os("OPENAI_API_KEY").is_some() { "set" } else { "unset" }
+                            )
+                        }
+                    }),
+                );
                 notify("item/agentMessage/delta", json!({ "delta": "po" }));
                 notify("item/agentMessage/delta", json!({ "delta": "ng" }));
                 notify(

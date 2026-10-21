@@ -71,12 +71,18 @@ impl Default for Settings {
 pub struct KeyStatus {
     pub openrouter: bool,
     pub omniroute: bool,
+    pub openai: bool,
+    pub anthropic: bool,
+    pub cursor: bool,
 }
 
 fn current_key_status() -> KeyStatus {
     KeyStatus {
         openrouter: credentials::present(credentials::OPENROUTER),
         omniroute: credentials::present(credentials::OMNIROUTE),
+        openai: credentials::present(credentials::OPENAI),
+        anthropic: credentials::present(credentials::ANTHROPIC),
+        cursor: credentials::present(credentials::CURSOR),
     }
 }
 
