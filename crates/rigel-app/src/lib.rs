@@ -36,7 +36,11 @@ pub struct ProjectInfo {
 }
 
 fn default_model() -> String {
-    rigel_core::agent::DEFAULT_MODEL.to_string()
+    rigel_core::agent::omniroute::DEFAULT_MODEL.to_string()
+}
+
+fn default_provider() -> String {
+    "omniroute".to_string()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -44,6 +48,9 @@ pub struct Settings {
     pub theme: String,
     pub default_budget_cents: i64,
     pub unattended_default: bool,
+    /// `omniroute` (local router) or `openrouter`. Old settings files gain the default.
+    #[serde(default = "default_provider")]
+    pub provider: String,
     #[serde(default = "default_model")]
     pub model: String,
 }
@@ -54,6 +61,7 @@ impl Default for Settings {
             theme: "dark".to_string(),
             default_budget_cents: 500,
             unattended_default: false,
+            provider: default_provider(),
             model: default_model(),
         }
     }
@@ -62,6 +70,14 @@ impl Default for Settings {
 #[derive(Debug, Clone, Serialize)]
 pub struct KeyStatus {
     pub openrouter: bool,
+    pub omniroute: bool,
+}
+
+fn current_key_status() -> KeyStatus {
+    KeyStatus {
+        openrouter: credentials::present(credentials::OPENROUTER),
+        omniroute: credentials::present(credentials::OMNIROUTE),
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -332,9 +348,27 @@ fn turn_send(
     let settings = load_settings();
     let model_name = model.unwrap_or(settings.model);
 
-    let key = credentials::get(credentials::OPENROUTER).map_err(|error| {
-        format!("{error}. Add a key in Settings, or run a script with `rigel agent run --script`.")
-    })?;
+    // A local router that is down is a process to launch, not a configuration error: the
+    // first turn after a reboot starts OmniRoute before it sends anything.
+    let model: Arc<dyn Model> = match settings.provider.trim().to_lowercase().as_str() {
+        "openrouter" => {
+            let key = credentials::get(credentials::OPENROUTER)
+                .map_err(|error| format!("{error}. Add an OpenRouter key in Settings."))?;
+            Arc::new(OpenRouterModel::new(key))
+        }
+        "omniroute" => {
+            let key = credentials::get(credentials::OMNIROUTE)
+                .map_err(|error| format!("{error}. Add an OmniRoute key in Settings."))?;
+            tauri::async_runtime::block_on(rigel_core::agent::omniroute::ensure_server())
+                .map_err(|error| format!("{error} Start it from Settings."))?;
+            Arc::new(rigel_core::agent::omniroute::model(key))
+        }
+        other => {
+            return Err(format!(
+                "unknown provider `{other}`; use omniroute or openrouter"
+            ));
+        }
+    };
 
     let cancels = state.cancels.clone();
     let budget = Arc::new(BudgetService::new(
@@ -346,7 +380,6 @@ fn turn_send(
     let turn = tauri::async_runtime::block_on(service.append_turn(&agent, Some(&prompt)))
         .map_err(message)?;
 
-    let model: Arc<dyn Model> = Arc::new(OpenRouterModel::new(key));
     let tools = rigel_core::Tools::new(
         root.clone(),
         service.clone(),
@@ -563,18 +596,43 @@ fn memory_write(
 
 #[tauri::command]
 fn key_status() -> Result<KeyStatus, String> {
-    Ok(KeyStatus {
-        openrouter: credentials::present(credentials::OPENROUTER),
-    })
+    Ok(current_key_status())
 }
 
-/// The window never receives a key, only the confirmation that one is stored.
+/// Store a key from the settings form. The renderer sends it once, gets a boolean back, and
+/// clears its field; no command ever returns the secret.
 #[tauri::command]
 fn key_set(provider: String, value: String) -> Result<KeyStatus, String> {
-    credentials::set(&provider, value.trim()).map_err(message)?;
-    Ok(KeyStatus {
-        openrouter: credentials::present(credentials::OPENROUTER),
-    })
+    let value = value.trim();
+    if value.is_empty() {
+        return Err("paste a key first".to_string());
+    }
+    credentials::set(&provider, value).map_err(message)?;
+    Ok(current_key_status())
+}
+
+#[tauri::command]
+fn key_delete(provider: String) -> Result<KeyStatus, String> {
+    credentials::delete(&provider).map_err(message)?;
+    Ok(current_key_status())
+}
+
+/* ------------------------------- omniroute -------------------------------- */
+
+/// Whether the local router answers, and where it lives. This is a short health probe, not a
+/// key test: Settings needs to know if the server is up, not whether the key is right.
+#[tauri::command]
+fn omniroute_status() -> Result<rigel_core::ServerStatus, String> {
+    Ok(tauri::async_runtime::block_on(
+        rigel_core::agent::omniroute::status(),
+    ))
+}
+
+/// Start the router when it is down. `omniroute serve --daemon` is launched and health is
+/// polled, so a success here means the next turn can actually reach it.
+#[tauri::command]
+fn omniroute_start() -> Result<rigel_core::ServerStatus, String> {
+    tauri::async_runtime::block_on(rigel_core::agent::omniroute::ensure_server())
 }
 
 /* -------------------------------- settings ------------------------------- */
@@ -587,6 +645,12 @@ fn settings_get() -> Result<Settings, String> {
 /// Write settings, creating the app data directory if this is a first run.
 #[tauri::command]
 fn settings_set(settings: Settings) -> Result<Settings, String> {
+    if settings.provider != "omniroute" && settings.provider != "openrouter" {
+        return Err(format!(
+            "unknown provider `{}`; use omniroute or openrouter",
+            settings.provider
+        ));
+    }
     let path = settings_path();
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).map_err(message)?;
@@ -614,9 +678,34 @@ fn usage_summary(project: String, session: String) -> Result<Usage, String> {
     })
 }
 
+/// Launch the local router as the window opens, so the first turn does not pay for a cold
+/// start. Lazy start in `turn_send` stays as the fallback: this is an optimisation and must
+/// never block the window, which is why it runs on its own thread and its error is ignored.
+fn warm_router() {
+    if load_settings().provider != "omniroute" || !credentials::present(credentials::OMNIROUTE) {
+        return;
+    }
+    std::thread::Builder::new()
+        .name("rigel-omniroute".to_string())
+        .spawn(|| {
+            let Ok(runtime) = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+            else {
+                return;
+            };
+            let _ = runtime.block_on(rigel_core::agent::omniroute::ensure_server());
+        })
+        .ok();
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
+        .setup(|_app| {
+            warm_router();
+            Ok(())
+        })
         .manage(AppRuntime {
             cancels: Arc::new(Cancels::new()),
         })
@@ -642,6 +731,9 @@ pub fn run() {
             memory_write,
             key_status,
             key_set,
+            key_delete,
+            omniroute_status,
+            omniroute_start,
             settings_get,
             settings_set,
             usage_summary,

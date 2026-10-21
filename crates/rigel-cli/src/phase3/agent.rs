@@ -112,6 +112,151 @@ impl EventSink for PrintSink {
     }
 }
 
+/// `omniroute` unless the caller or `RIGEL_PROVIDER` says otherwise. OmniRoute is Rigel's
+/// default because it is the local router: one key, any model behind it.
+fn provider_name(requested: Option<String>) -> String {
+    requested
+        .or_else(|| std::env::var("RIGEL_PROVIDER").ok())
+        .map(|value| value.trim().to_lowercase())
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| "omniroute".to_string())
+}
+
+fn default_model(provider: &str) -> String {
+    match provider {
+        "openrouter" => rigel_core::agent::openrouter::DEFAULT_MODEL.to_string(),
+        _ => rigel_core::agent::omniroute::DEFAULT_MODEL.to_string(),
+    }
+}
+
+/// The provider's model, with its key resolved. OmniRoute is started on demand: a local
+/// router that is down is not a configuration error, it is a process to launch.
+async fn provider_model(provider: &str) -> Result<Arc<dyn Model>, String> {
+    match provider {
+        "openrouter" => {
+            let key = credentials::get(credentials::OPENROUTER).map_err(|error| {
+                format!("{error}\n  set one with: rigel keys set openrouter (reads stdin)")
+            })?;
+            Ok(Arc::new(OpenRouterModel::new(key)))
+        }
+        "omniroute" => {
+            let key = credentials::get(credentials::OMNIROUTE).map_err(|error| {
+                format!(
+                    "{error}\n  set one with: rigel keys set omniroute (reads stdin)\n  or run a deterministic script with --script"
+                )
+            })?;
+            rigel_core::agent::omniroute::ensure_server().await?;
+            Ok(Arc::new(rigel_core::agent::omniroute::model(key)))
+        }
+        other => Err(format!(
+            "unknown provider `{other}`; use `omniroute` or `openrouter`"
+        )),
+    }
+}
+
+/// The newest active session, or none. Unlike [`resolve_session`] this never creates one:
+/// listing agents and quoting a turn must not write to the database.
+async fn find_session(
+    service: &SessionService,
+    requested: Option<&str>,
+) -> Result<Option<rigel_core::Session>, String> {
+    if let Some(id) = requested {
+        return service
+            .get(id)
+            .await
+            .map(Some)
+            .map_err(|error| error.to_string());
+    }
+    let sessions = service.list().await.map_err(|error| error.to_string())?;
+    Ok(sessions
+        .into_iter()
+        .find(|session| session.status != rigel_core::SessionStatus::Ended))
+}
+
+/// Price the first step of a turn without sending anything: no model call, no agent row, no
+/// turn row and no chat history. A session is read when one exists so the quote uses its
+/// spend and cap; when none exists the quote still works, with the cap reported as unset.
+async fn quote_run(
+    service: &SessionService,
+    prompt: &str,
+    requested: Option<&str>,
+    provider: &str,
+    model: Option<String>,
+    script: Option<&std::path::Path>,
+    as_json: bool,
+) -> ExitCode {
+    let session = match find_session(service, requested).await {
+        Ok(session) => session,
+        Err(error) => {
+            eprintln!("rigel: {error}");
+            return ExitCode::from(1);
+        }
+    };
+
+    // The quote prices the exact request the first step would send: the same system prompt
+    // and tool schemas the coordinator measures, plus the typed prompt.
+    let model_name = model.unwrap_or_else(|| default_model(provider));
+    let context_chars = rigel_core::agent::fixed_context_chars(&model_name);
+    let quote = match &session {
+        Some(session) => {
+            let budget = BudgetService::with_null_interrupt(service.pool().clone());
+            match budget
+                .quote_session(&session.id, &model_name, context_chars, prompt)
+                .await
+            {
+                Ok(quote) => quote,
+                Err(error) => {
+                    eprintln!("rigel: {error}");
+                    return ExitCode::from(1);
+                }
+            }
+        }
+        None => rigel_core::quote_turn(&model_name, context_chars, prompt, 0, None),
+    };
+
+    if as_json {
+        println!(
+            "{}",
+            json!({
+                "ok": true,
+                "dry_run": true,
+                "session": session.as_ref().map(|session| session.id.clone()),
+                "model": model_name,
+                "script": script.is_some(),
+                "quote": quote,
+            })
+        );
+        return ExitCode::SUCCESS;
+    }
+
+    let remaining = match (quote.remaining_micros, quote.cap_micros) {
+        (Some(left), Some(cap)) => format!(
+            "${:.6} left of ${:.2}",
+            left as f64 / 1_000_000.0,
+            cap as f64 / 1_000_000.0
+        ),
+        _ => "no cap set".to_string(),
+    };
+    println!(
+        "≈ ${:.6} first step · {remaining}",
+        quote.first_step_micros as f64 / 1_000_000.0
+    );
+    println!(
+        "  {} tok in · {} tok assumed out · {}",
+        quote.input_tokens, quote.output_tokens, quote.model
+    );
+    if quote.over_remaining {
+        println!(
+            "  over the remaining budget; the cap would stop the turn after the step that crosses"
+        );
+    }
+    if script.is_some() {
+        println!("  scripted model: the real bill comes from the script's reported usage");
+    }
+    println!("dry run: nothing was sent, no agent or turn was created");
+    ExitCode::SUCCESS
+}
+
 async fn resolve_session(
     service: &SessionService,
     requested: Option<&str>,
@@ -143,12 +288,21 @@ pub async fn run_agent(dir: &Path, command: AgentCommand) -> ExitCode {
                 Ok(service) => service,
                 Err(error) => return crate::fail(error),
             };
-            let session = match resolve_session(&service, session.as_deref()).await {
+            // Listing must not start a session as a side effect.
+            let session = match find_session(&service, session.as_deref()).await {
                 Ok(session) => session,
                 Err(error) => {
                     eprintln!("rigel: {error}");
                     return ExitCode::from(1);
                 }
+            };
+            let Some(session) = session else {
+                if as_json {
+                    println!("[]");
+                } else {
+                    println!("no session in this project yet");
+                }
+                return ExitCode::SUCCESS;
             };
             match service.agents(&session.id).await {
                 Ok(agents) => {
@@ -190,16 +344,31 @@ pub async fn run_agent(dir: &Path, command: AgentCommand) -> ExitCode {
             session,
             agent,
             prompt,
+            dry_run,
             script,
+            provider,
             model,
             crash_after_journal,
             max_steps,
             json: as_json,
         } => {
+            let provider = provider_name(provider);
             let service = match SessionService::open(&project).await {
                 Ok(service) => service,
                 Err(error) => return crate::fail(error),
             };
+            if dry_run {
+                return quote_run(
+                    &service,
+                    &prompt,
+                    session.as_deref(),
+                    &provider,
+                    model,
+                    script.as_deref(),
+                    as_json,
+                )
+                .await;
+            }
             let session = match resolve_session(&service, session.as_deref()).await {
                 Ok(session) => session,
                 Err(error) => {
@@ -212,7 +381,7 @@ pub async fn run_agent(dir: &Path, command: AgentCommand) -> ExitCode {
                 if script.is_some() {
                     "script".to_string()
                 } else {
-                    rigel_core::agent::openrouter::DEFAULT_MODEL.to_string()
+                    default_model(&provider)
                 }
             });
 
@@ -243,18 +412,13 @@ pub async fn run_agent(dir: &Path, command: AgentCommand) -> ExitCode {
                         return ExitCode::from(1);
                     }
                 },
-                None => {
-                    let key = match credentials::get(credentials::OPENROUTER) {
-                        Ok(key) => key,
-                        Err(error) => {
-                            eprintln!(
-                                "rigel: {error}\n  set one with: rigel keys set openrouter (reads stdin)\n  or run a deterministic script with --script"
-                            );
-                            return ExitCode::from(1);
-                        }
-                    };
-                    (Arc::new(OpenRouterModel::new(key)), model_name.clone())
-                }
+                None => match provider_model(&provider).await {
+                    Ok(model) => (model, model_name.clone()),
+                    Err(error) => {
+                        eprintln!("rigel: {error}");
+                        return ExitCode::from(1);
+                    }
+                },
             };
 
             let cancels = Arc::new(Cancels::new());

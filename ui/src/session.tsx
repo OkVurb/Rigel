@@ -21,6 +21,7 @@ interface Props {
   onSessions: (sessions: Session[]) => void;
   onActive: (session: Session | null) => void;
   onNotice: (notice: string) => void;
+  onOpenSettings?: () => void;
 }
 
 const money = (micros: number | null | undefined): string =>
@@ -51,7 +52,13 @@ function argsSummary(item: Item): string {
   return "";
 }
 
-export default function SessionView({ project, onSessions, onActive, onNotice }: Props) {
+export default function SessionView({
+  project,
+  onSessions,
+  onActive,
+  onNotice,
+  onOpenSettings,
+}: Props) {
   const tauri = isTauri();
   const [session, setSession] = useState<Session | null>(() => (tauri ? null : previewSession));
   const [agents, setAgents] = useState<Agent[]>(() => (tauri ? [] : previewAgents));
@@ -132,7 +139,8 @@ export default function SessionView({ project, onSessions, onActive, onNotice }:
         if (loadedAgents[0]) {
           setBudget(await api.getBudget(project, loadedAgents[0].id));
         }
-        setKeyPresent((await api.keyStatus()).openrouter);
+        const keys = await api.keyStatus();
+        setKeyPresent(keys.omniroute || keys.openrouter);
       } catch (problem) {
         setError(problem instanceof Error ? problem.message : String(problem));
       }
@@ -151,7 +159,7 @@ export default function SessionView({ project, onSessions, onActive, onNotice }:
       try {
         const [listed, keys] = await Promise.all([api.listSessions(project), api.keyStatus()]);
         if (!live) return;
-        setKeyPresent(keys.openrouter);
+        setKeyPresent(keys.omniroute || keys.openrouter);
         const pick =
           listed.find((candidate) => candidate.status !== "ended") ?? listed[0] ?? null;
         if (pick) {
@@ -608,6 +616,11 @@ export default function SessionView({ project, onSessions, onActive, onNotice }:
             </p>
           </div>
           <div className="session-tools">
+            {keyPresent === false && onOpenSettings ? (
+              <button className="chip warn" onClick={onOpenSettings}>
+                Add key
+              </button>
+            ) : null}
             <label className="toggle">
               <input type="checkbox" checked={raw} onChange={(event) => setRaw(event.target.checked)} />
               raw
@@ -626,7 +639,7 @@ export default function SessionView({ project, onSessions, onActive, onNotice }:
             : !tauri
               ? "Browser preview: sample transcript. Sending adds a canned answer; no model is called."
               : keyPresent === false
-                ? "No OpenRouter key in the OS keychain. The native agent cannot start a turn until one is stored."
+                ? "No provider key in the OS keychain. The native agent cannot start a turn until one is stored."
                 : warning
                   ? "Spend reached 80% of the cap. Raise it or stop; the next turn is refused once it is crossed."
                   : session?.status === "interrupted"
@@ -836,8 +849,8 @@ export default function SessionView({ project, onSessions, onActive, onNotice }:
             {keyPresent === null
               ? "checking the OS keychain…"
               : keyPresent
-                ? "OpenRouter key in the OS keychain. The window never sees it."
-                : "No OpenRouter key. The native agent cannot start a turn."}
+                ? "Provider key in the OS keychain. The window never sees it."
+                : "No provider key. The native agent cannot start a turn."}
           </p>
         </section>
 

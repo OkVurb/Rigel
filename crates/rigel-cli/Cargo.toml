@@ -11,6 +11,7 @@ path = "src/main.rs"
 
 [dependencies]
 clap = { workspace = true }
+rigel-adapters = { path = "../rigel-adapters" }
 rigel-core = { path = "../rigel-core" }
 rigel-mcp = { path = "../rigel-mcp" }
 serde_json = { workspace = true }

@@ -19,8 +19,8 @@ pub mod tree;
 
 pub use agent::{
     AgentError, Cancels, ChatMessage, ChatRequest, Coordinator, DEFAULT_MAX_STEPS, Delta, Model,
-    ModelError, OpenRouterModel, ScriptedModel, StopReason, SubagentPolicy, ToolCall, ToolOutcome,
-    ToolSpec, Tools, TurnRun,
+    ModelError, OpenRouterModel, ScriptedModel, ServerStatus, StopReason, SubagentPolicy, ToolCall,
+    ToolOutcome, ToolSpec, Tools, TurnRun,
 };
 pub use budget::{
     BudgetError, BudgetOutcome, BudgetService, BudgetSnapshot, InterruptSink, ReconcileReport,

@@ -20,5 +20,17 @@ tokio = { workspace = true }
 tokio-util = { workspace = true }
 uuid = { workspace = true }
 
+# keyring 3 chooses its backend by feature: with none enabled it silently uses an
+# in-memory mock, so a stored key disappears with the process. Enable the native store
+# for the platforms Rigel runs on.
+[target.'cfg(windows)'.dependencies]
+keyring = { workspace = true, features = ["windows-native"] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+keyring = { workspace = true, features = ["apple-native"] }
+
+[target.'cfg(all(unix, not(target_os = "macos")))'.dependencies]
+keyring = { workspace = true, features = ["sync-secret-service"] }
+
 [dev-dependencies]
 tempfile = { workspace = true }

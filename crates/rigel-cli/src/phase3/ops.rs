@@ -212,7 +212,12 @@ fn memory_failure(error: rigel_core::MemoryError, as_json: bool) -> ExitCode {
 pub fn run_keys(command: KeyCommand) -> ExitCode {
     match command {
         KeyCommand::Status { json: as_json } => {
-            let providers = [credentials::OPENROUTER, "openai", "anthropic"];
+            let providers = [
+                credentials::OMNIROUTE,
+                credentials::OPENROUTER,
+                "openai",
+                "anthropic",
+            ];
             let rows: Vec<_> = providers
                 .iter()
                 .map(|provider| {

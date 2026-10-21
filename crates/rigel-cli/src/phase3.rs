@@ -27,9 +27,16 @@ pub enum AgentCommand {
         agent: String,
         #[arg(long)]
         prompt: String,
-        /// Deterministic model script instead of OpenRouter (see docs/qa/p3.md).
+        /// Price the first step and exit. Sends no request and creates no agent or turn.
+        #[arg(long)]
+        dry_run: bool,
+        /// Deterministic model script instead of a provider (see docs/qa/p3.md).
         #[arg(long, value_name = "FILE")]
         script: Option<PathBuf>,
+        /// `omniroute` (local router, started if needed) or `openrouter`.
+        /// Defaults to `$RIGEL_PROVIDER`, then `omniroute`.
+        #[arg(long, value_name = "NAME")]
+        provider: Option<String>,
         #[arg(long)]
         model: Option<String>,
         /// Stop after the patch journal is written, before the rename (crash test).

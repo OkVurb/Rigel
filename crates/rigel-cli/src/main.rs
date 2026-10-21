@@ -14,8 +14,10 @@ use rigel_core::{
 };
 use serde_json::json;
 
+mod harness;
 mod phase3;
 
+use harness::CodexCommand;
 use phase3::{AgentCommand, KeyCommand, MemoryCommand, PatchCommand};
 
 #[derive(Parser)]
@@ -77,6 +79,12 @@ enum Command {
     Keys {
         #[command(subcommand)]
         command: KeyCommand,
+    },
+
+    /// The Codex harness: probe it, or run one turn through it.
+    Codex {
+        #[command(subcommand)]
+        command: CodexCommand,
     },
 
     /// Run the stdio MCP server an adapter injects into an agent.
@@ -293,6 +301,8 @@ async fn main() -> ExitCode {
         Command::Memory { command } => phase3::run_memory(command).await,
 
         Command::Keys { command } => phase3::run_keys(command),
+
+        Command::Codex { command } => harness::run_codex(command).await,
 
         Command::Mcp {
             project,

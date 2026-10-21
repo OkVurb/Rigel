@@ -33,7 +33,16 @@ export interface Settings {
   theme: string;
   default_budget_cents: number;
   unattended_default: boolean;
+  /** `omniroute` (local router) or `openrouter`. */
+  provider: string;
   model: string;
+}
+
+/** Live state of the local OmniRoute router. `origin` is where it listens. */
+export interface OmnirouteStatus {
+  running: boolean;
+  origin: string;
+  base_url: string;
 }
 
 export interface Agent {
@@ -187,6 +196,7 @@ function previewQuote(prompt: string, spendMicros: number, capMicros: number | n
 
 export interface KeyStatus {
   openrouter: boolean;
+  omniroute: boolean;
 }
 
 /** The serialised `AgentEvent`; `type` is the discriminator. */
@@ -410,12 +420,30 @@ export const api = {
   },
 
   async keyStatus(): Promise<KeyStatus> {
-    if (!isTauri()) return { openrouter: false };
+    if (!isTauri()) return { openrouter: false, omniroute: false };
     return call<KeyStatus>("key_status");
   },
 
   async setKey(provider: string, value: string): Promise<KeyStatus> {
+    if (!isTauri()) return { openrouter: true, omniroute: true };
     return call<KeyStatus>("key_set", { provider, value });
+  },
+
+  async deleteKey(provider: string): Promise<KeyStatus> {
+    if (!isTauri()) return { openrouter: false, omniroute: false };
+    return call<KeyStatus>("key_delete", { provider });
+  },
+
+  async omnirouteStatus(): Promise<OmnirouteStatus> {
+    if (!isTauri()) {
+      return { running: true, origin: "http://127.0.0.1:20128", base_url: "(browser preview)" };
+    }
+    return call<OmnirouteStatus>("omniroute_status");
+  },
+
+  async omnirouteStart(): Promise<OmnirouteStatus> {
+    if (!isTauri()) throw new Error("Start OmniRoute from the desktop app, not the browser preview.");
+    return call<OmnirouteStatus>("omniroute_start");
   },
 
   async usage(project: string, session: string): Promise<Usage> {
@@ -428,10 +456,16 @@ export const api = {
         theme: "dark",
         default_budget_cents: 500,
         unattended_default: false,
-        model: "openrouter/auto",
+        provider: "omniroute",
+        model: "gpt-5.6-sol-medium",
       };
     }
     return call<Settings>("settings_get");
+  },
+
+  async saveSettings(settings: Settings): Promise<Settings> {
+    if (!isTauri()) return settings;
+    return call<Settings>("settings_set", { settings });
   },
 };
 

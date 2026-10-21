@@ -4,6 +4,7 @@
 //! |---|---|
 //! | [`model`] | the `Model` trait, streamed deltas, tool-call assembly, SSE decoding |
 //! | [`openrouter`] | one real provider, retries and `Retry-After` |
+//! | [`omniroute`] | the local router, its health probe and autostart |
 //! | [`scripted`] | a deterministic model for tests and the offline QA run |
 //! | [`pricing`] | the local price fallback, marked `estimated` |
 //! | [`tools`] | read/list/edit/write, skills, budget — all path-checked |
@@ -15,6 +16,7 @@
 
 pub mod coordinator;
 pub mod model;
+pub mod omniroute;
 pub mod openrouter;
 pub mod pricing;
 pub mod scripted;
@@ -28,6 +30,7 @@ pub use model::{
     ChatMessage, ChatRequest, Delta, DeltaSink, Model, ModelError, RawUsage, SseDecoder, ToolCall,
     ToolCallBuilder, ToolSpec,
 };
+pub use omniroute::ServerStatus;
 pub use openrouter::{DEFAULT_BASE_URL, DEFAULT_MODEL, OpenRouterModel};
 pub use scripted::{Script, ScriptedModel};
 pub use tools::{ToolOutcome, Tools};

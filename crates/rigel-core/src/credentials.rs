@@ -4,11 +4,14 @@
 //! file, never logged, and never returned to the renderer: the UI can ask *whether* a key
 //! exists, not what it is.
 //!
-//! `OPENROUTER_API_KEY` is honoured as a fallback for headless use. That is a deliberate
-//! exception for the CLI and CI, not a storage location: a key in the environment is the
-//! user's choice, and Rigel still never writes it anywhere.
+//! `OPENROUTER_API_KEY` (and the other provider variables below) are honoured as a fallback
+//! for headless use. That is a deliberate exception for the CLI and CI, not a storage
+//! location: a key in the environment is the user's choice, and Rigel still never writes it
+//! anywhere.
 
 pub const OPENROUTER: &str = "openrouter";
+/// The key OmniRoute itself checks on `/v1`; not a provider key.
+pub const OMNIROUTE: &str = "omniroute";
 
 const SERVICE: &str = "rigel";
 
@@ -70,6 +73,7 @@ pub fn get(provider: &str) -> Result<String, KeyError> {
 fn env_key(provider: &str) -> Option<String> {
     let name = match provider {
         OPENROUTER => "OPENROUTER_API_KEY",
+        OMNIROUTE => "OMNIROUTE_API_KEY",
         "openai" => "OPENAI_API_KEY",
         "anthropic" => "ANTHROPIC_API_KEY",
         _ => return None,

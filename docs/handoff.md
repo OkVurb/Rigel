@@ -152,6 +152,13 @@ replace the localStorage notes above.
 | Sources | `skills/github.rs`, `skills/hub.rs` | GitHub (tree + raw bodies + ETag), SkillsMP, SkillHub |
 | CLI | `crates/rigel-cli/src/main.rs` | `skills search\|get\|index\|status\|sync\|stats\|import\|gc`, all `--json` |
 
+### 2.7 Implemented in Phase 4 so far
+
+| Item | Where | Evidence |
+|---|---|---|
+| **P4.5** Codex adapter | `crates/rigel-adapters/src/codex.rs` | app-server primary, `exec --json` fallback that never re-runs a turn which already produced tokens, per-turn usage from `thread/tokenUsage/updated`; `tests/codex.rs` (4) against `tests/fixtures/fake_codex.rs`; real turn 21 Oct — 155,894 in / 5 out — `7b3c2fb` |
+| `rigel codex` CLI | `crates/rigel-cli/src/harness.rs` | `probe --json` reports 0.162.1 and an absolute path; `run --json` returns text, transport, fallback flag and usage |
+
 ---
 
 ## 3. Decisions of record
@@ -160,7 +167,7 @@ replace the localStorage notes above.
 
 | ID | Decision | Source |
 |---|---|---|
-| D1 | The unit is a **project-level session that never cleanly ends**; the UI shows windows onto a log. | Q17 |
+| D1 | The unit is a **project-level session**; the UI shows windows onto a log. **Amended by D35:** a session idle for 24 h auto-ends, and resuming starts a new session. | Q17, Q83 |
 | D2 | Memory is **per agent and portable**; it lives in the repo as text. | Q18, Q47 |
 | D3 | The index is **local-only** and machine-specific. | Q56 |
 | D4 | Uploaded files are **context only**, never project content. | Q19 |
@@ -177,10 +184,29 @@ replace the localStorage notes above.
 | D15 | Skills are untrusted; **capabilities are gated** at the agent's tool layer. | Q49 |
 | D16 | One merged diff with **agent attribution**, not side-by-side panes. | Q24 |
 | D17 | Success metric is **interventions per completed task**, trending down. | Q50 |
-| D18 | Rigel calls model APIs **directly** for its native agent; OpenRouter first. | user, 20 Oct |
-| D19 | The native agent **coordinates and patches**; it has no general bash loop of its own. | user, 20 Oct |
+| D18 | Rigel calls model APIs **directly** for its native agent; the local OmniRoute router first, OpenRouter as the hosted alternative. | user, 20 Oct |
+| D19 | ~~The native agent **coordinates and patches**; it has no general bash loop of its own.~~ **Superseded by D30** — the native agent gets a shell, one approval per command. | user, 20 Oct |
 | D20 | Windows first; macOS and Linux adapters later. | user, 20 Oct |
 | D21 | **Every harness authenticates with its own API key.** No subscription, SSO or browser login is ever reused, and a harness that is only subscription-authenticated refuses to spawn. | user, 20 Oct |
+| D22 | Launch **resumes the newest open session** for the last project; Shelf is one click away. | Q67 |
+| D23 | Diff is a **read-only unified diff per patch** with revert, opened from a patch or a session. Not an editor. | Q68 |
+| D24 | **One window**, with an in-app project switcher that restores the last project. No tabs, no per-project windows. | Q69 |
+| D25 | A **command palette (Ctrl/Cmd+K)** covers sessions, projects, providers, settings, and stop/start. | Q70 |
+| D26 | **Providers are plural and concurrent.** Each agent is bound to a provider + model when its session starts, so several run side by side on different upstreams. OmniRoute is the front door because it already multiplexes seven upstream connections behind one OpenAI-compatible surface; **per-agent OmniRoute API keys** give isolation, policy, budget and `cost --group-by api-key` attribution. OpenRouter stays as a direct fallback. | Q71 |
+| D27 | The **router starts with the app**, in the background. A turn that finds it down starts it, retries once, then fails with a fix-it panel rather than silently switching provider. | Q72, Q75 |
+| D28 | **Model picker with a saved default**, plus a **separate reasoning-effort setting** sent per request — effort is not an id suffix. | Q73, Q74 |
+| D29 | **Cost honesty.** The local ledger stays the hard cap; router/provider usage is reconciled and displayed, never the enforcement source (remote usage lags). Turns the router prices are labelled `estimated`, always with token counts, and prices sync from router metadata. | Q76, Q81 |
+| D30 | The native agent gets a **real shell tool**; every command is approved with its exact text and scope (N2). Supersedes D19. | Q77 |
+| D31 | Writes stay **auto-applied inside the project**, journaled and revertible per patch. No per-write prompt. | Q78 |
+| D32 | **Destructive operations need three things**: a recorded deliberation (agents argue pro/con), a **snapshot of uncommitted work** (D38), and an explicit approval with the exact command. Nothing destructive runs on a single model's say-so. | Q79 |
+| D33 | **Network fetch with per-origin approval**; search and fetch never run unapproved, and fetched text is labelled untrusted. | Q80 |
+| D34 | Subagents **pool under the session cap**; there is no per-child ceiling. | Q82 |
+| D35 | Sessions **auto-end after 24 h idle**; resuming creates a new session. Amends D1. | Q83 |
+| D36 | **Codex is the first external harness** — `codex exec --json` primary, app-server behind the trait — with `rigel-mcp` wired in from day one. Claude Code is deferred: no subscription on this machine, and the router's own Claude connection is marked *banned*. | Q84, Q85 |
+| D37 | **1.0 is a signed MSI** with opt-in signed auto-update, **MIT OR Apache-2.0**, and zero telemetry. | Q86 |
+| D38 | A pre-destructive snapshot is a **git object plus a file copy, not a restore point**: `git stash create` captures tracked changes without touching the index or the worktree, untracked non-ignored files are copied, and `rigel snapshot restore <id>` rebuilds the tree. A Windows restore point is rejected — it rolls back system files and registry and explicitly leaves personal files alone, so it would protect everything except the work at risk. | §15.5 |
+| D39 | Codex's upstream is the **router**, confirmed by probe on 21 Oct (both `exec --json` and app-server passed with `wire_api="responses"`). Rigel writes the `-c` provider overrides itself — never `omniroute run`/`launch-codex`, which is broken here — and `codex.upstream` (`router` or `openai`) is a per-agent setting with **no silent fallback**: a down upstream refuses with a fix-it message (D27). | §15.5 |
+| D40 | Agent visibility is a **roster plus one split pane**: the roster lists every agent with spend and claims, and at most two transcripts sit side by side. No grids, no tabs. | §15.5 |
 
 ### 3.2 Stack
 
@@ -213,6 +239,9 @@ because Rust owns it. The sidecar never touches SQLite, claims, patches or budge
 | "Skills plus one agent chat pane" as the week-one slice | Q26 | The slice now includes budget caps and the claim ledger's read side; a chat without a bill is not shippable. |
 | Storage keys `skilldb:` | `README.md` | Migrated by `rigel skills import` (`docs/migrating-prototype-index.md`); nothing in `crates/` or `ui/` reads or writes them. |
 | Rust-only adapters | this doc, first draft | S3/S4: Rust by default, sidecar where an SDK is the only complete surface. |
+| "The native agent has no bash loop" (D19) | §3.1, §7.1, P3.3 | D30: a shell exists, gated per command. P3.3's registry is extended, not rewritten. |
+| "A session never cleanly ends" (D1) | §3.1, §5 | D35: 24 h idle auto-end; resume starts fresh. |
+| Claude Code as the first harness | §15 draft recommendation | D36: Codex first; Claude deferred. |
 
 ---
 
@@ -240,7 +269,7 @@ because Rust owns it. The sidecar never touches SQLite, claims, patches or budge
         │                   │                    │
    ┌────▼─────┐      ┌──────▼──────┐      ┌──────▼────────┐
    │ Adapters │      │ MCP server  │      │ Model client  │
-   │ ACP      │      │ (stdio,     │      │ OpenRouter    │
+   │ ACP      │      │ (stdio,     │      │ OmniRoute /   │
    │ Codex    │      │  rigel_*)   │      │ (native agent)│
    │ Claude   │      └─────────────┘      └───────────────┘
    │ Native   │
@@ -281,9 +310,46 @@ Sources: [Codex non-interactive](https://developers.openai.com/codex/non-interac
 [Cursor skills](https://cursor.com/docs/skills) · [Cline CLI](https://docs.cline.bot/cli/cli-reference) ·
 [Cline SDK](https://docs.cline.bot/sdk/clinecore) · [Cline ACP](https://docs.cline.bot/usage/acp)
 
-Versions observed: Codex CLI **0.163.0** (15 Oct 2026); Claude Code **2.1.305** (reported, unverified);
-Cursor CLI **v2026.10.08**; Cline CLI **3.0.73**. Record `--version` output in `adapters.json` at first
-run and pin fixtures to it.
+Versions observed: Codex CLI **0.162.1** (21 Oct probe; 0.163.0 was recorded on 15 Oct, so it moves);
+Claude Code **2.1.251** (21 Oct `omniroute status`); Cursor **3.24.12**; Cline CLI **3.0.73**
+(15 Oct, unverified since). Record `--version` output in `adapters.json` at first run and pin fixtures
+to it.
+
+**Probed on this machine, 21 Oct 2026 (Codex CLI 0.162.1).** Both Codex transports survive the router
+with `wire_api = "responses"` and **no API key**:
+
+```bash
+codex exec --json -c 'model_provider="omniroute"' \
+  -c 'model_providers.omniroute.base_url="http://127.0.0.1:20128/v1"' \
+  -c 'model_providers.omniroute.wire_api="responses"' \
+  -c 'model_providers.omniroute.requires_openai_auth=false' \
+  -m gpt-5.6-sol-medium "reply with exactly: pong"
+```
+
+- `exec --json`: `thread.started` → `agent_message` `pong` → `turn.completed`, exit 0.
+- `app-server`: `initialize` → `thread/start` → `turn/start` → `item/agentMessage/delta` `pong` →
+  `turn/completed` with status `completed`, 7.3 s end to end.
+- **Cost warning:** the exec turn reported **155,895 input tokens** for a one-word answer, because Codex
+  injects this machine's 2,378 skills into every request. If input is priced at $3/M that is ~$0.47 per
+  turn — the number that matters for D29 is input, not output.
+- **The OmniRoute launchers are broken here.** `omniroute run codex` and `omniroute launch-codex` both
+  pass `^^^"model_provider=\^^^"omniroute…` as argv, which Codex rejects, and the CLI's default context
+  is `http://localhost:0`. Rigel must write the `-c` overrides itself.
+- **Auth gap:** `/v1/chat/completions` and `/v1/responses` answer without a key from localhost (only
+  `/v1/models` returns 401). Rigel still sends its key, but the router is not an auth boundary —
+  anything local can spend (§10).
+- **Reproduce it:** `CODEX_EXE=… node scripts/codex-router-probe.mjs` runs both transports and prints
+  `exec --json PASS` / `app-server PASS` plus the token counts. It is the first thing P4.5 should run.
+- **Implemented:** `crates/rigel-adapters/src/codex.rs` writes exactly these overrides, streams
+  `item/agentMessage/delta`, reads per-turn usage from `thread/tokenUsage/updated`, and falls back to
+  `exec` only when app-server produced no tokens. `rigel codex probe` and `rigel codex run` are the CLI
+  surface; the adapter tests use `tests/fixtures/fake_codex.rs`, so they pass without Codex installed.
+
+**Order (D36).** Codex first, because the probe above works: its router connection is `active`, while
+Claude's is marked `banned` and there is no subscription to fall back on (D21). `omniroute setup-codex` / `launch-codex` already generate Codex profiles
+pointed at the router, so a harness can share the native agent's bill instead of opening a second one.
+Claude Code is deferred, not dropped — the adapter trait and fixtures are written so it slots in when an
+`ANTHROPIC_API_KEY` exists.
 
 ### 4.3 Constraints the research imposes
 
@@ -311,7 +377,7 @@ run and pin fixtures to it.
 | Claude Code | `ANTHROPIC_API_KEY` in the agent's env | `rigel/anthropic` | subscription login |
 | Cursor | `CURSOR_API_KEY` | `rigel/cursor` | browser login |
 | Cline | provider keys written to a **per-agent** config, never the global one | `rigel/cline.<provider>` | unauthenticated / credit-only mode |
-| Native agent | OpenRouter key | `rigel/openrouter` | — |
+| Native agent | OmniRoute key (local router) or OpenRouter key | `rigel/omniroute` / `rigel/openrouter` | — |
 
 Rules:
 
@@ -748,6 +814,10 @@ Tools (JSON Schema 2020-12). All return `{ "ok": true, ... }` or
 Writes are rejected with `PATH_LEAK` if `content` matches `[A-Za-z]:\`, `/Users/`, `/home/`, or an
 `ssh-rsa` / `glpat-` / `sk-` prefix.
 
+`run_command` (D30) and `fetch_url` (D33) are **native-agent tools only** and are deliberately absent
+from this MCP surface: a harness already has its own shell and its own network, and routing either
+through Rigel would turn one approval boundary into two disagreeing ones.
+
 ### 7.2 CLI (`rigel`, same binary)
 
 ```
@@ -843,10 +913,15 @@ The sidecar, when used, implements the same wire contract from Rust's point of v
 spawns `node sidecar/index.mjs`, speaks NDJSON `{id, method, params}` / `{id, result}` / `{event}` and
 re-emits `AgentEvent`s. No Rust code above the adapter knows the difference.
 
-### 7.5 Native model client (OpenRouter first)
+### 7.5 Native model client (OmniRoute first)
 
-- `POST https://openrouter.ai/api/v1/chat/completions`, `stream: true`, `tools: [...]`,
-  `usage: { include: true }` so the response carries cost.
+- Default is the local OmniRoute router at `http://127.0.0.1:20128/v1` (override with
+  `RIGEL_OMNIROUTE_URL`). If `/api/health` is down, Rigel runs
+  `omniroute serve --daemon --no-open` once and waits for health before sending. The default
+  model is `gpt-5.6-sol-medium`.
+- OpenRouter remains a provider (`--provider openrouter`, `RIGEL_PROVIDER`, or Settings).
+- `POST {base}/chat/completions`, `stream: true`, `tools: [...]`,
+  `usage: { include: true }` so a provider that reports cost does so.
 - Model catalogue from `GET /api/v1/models`; cache 24 h in `index.db`.
 - Retries: 3 attempts on 429/5xx with full jitter, honouring `Retry-After`; never retry a stream after
   the first token.
@@ -922,7 +997,9 @@ propose(path, base_hash, new_content):
 ```
 
 Revert applies the inverse only if `sha256(current) == result_hash`; otherwise `conflicted` and the
-user resolves. This is the only path by which Rigel itself writes project files (D8, D19).
+user resolves. This is the only path by which Rigel itself writes project files (D8, D31). Shell
+commands approved under D30 do not go through it — their filesystem effects are observed and attributed
+by the Phase 5 watcher, not journalled.
 
 ### 8.5 Resume
 
@@ -1000,7 +1077,8 @@ Claims render as `claimed by codex-2 · unverified`, amber outline, never a lock
 | Patch safety | CAS on `base_hash`; no writes outside root; binary files refused |
 | Memory | Committed, validated, secret-pattern rejected (I7) |
 | Sidecar | No DB access, no claim authority, no approvals; its events are re-normalised by the Rust adapter that owns the agent |
-| Network | No telemetry. Outbound calls: OpenRouter (native agent), GitHub/marketplaces (indexing, on demand), update manifest (opt-out) |
+| Network | No telemetry. Outbound calls: OmniRoute on loopback (native agent, which fans out to providers), OpenRouter when selected, GitHub/marketplaces (indexing, on demand), update manifest (opt-out) |
+| Router auth | OmniRoute answers `/v1/chat/completions` and `/v1/responses` from localhost **without a key** (probed 21 Oct); `/v1/models` returns 401. Rigel sends its key regardless, never treats the router as an auth boundary, and `rigel doctor` warns when router auth is disabled |
 | Logs | Redact tokens by pattern; rotate at 10 MB; local only |
 | Third-party terms | Rigel never reuses a vendor subscription's auth; each harness authenticates itself (§4.3.3) |
 
@@ -1011,7 +1089,7 @@ Approvals are bound to an `approval_id` issued by the harness, not to text in th
 
 ## 11. The plan
 
-**State as of 21 Oct 2026:** Phases 0–2 complete; Phases 3–7 unstarted.
+**State as of 21 Oct 2026:** Phases 0–3 complete; Phase 4 in progress.
 Run `node scripts/handoff-status.mjs` for live counts; this table is the summary.
 
 | Phase | Scope | State | Items |
@@ -1020,7 +1098,7 @@ Run `node scripts/handoff-status.mjs` for live counts; this table is the summary
 | 1 | Rust skeleton and storage | **complete** | 10/10 |
 | 2 | The shelf, real | **complete** | 11/11 |
 | 3 | Native agent, chat and the bill | **complete** | 11/11 |
-| 4 | Harness adapters | not started | 0/12 |
+| 4 | Harness adapters | in progress | 1/19 |
 | 5 | Claims, attribution, merged diff | not started | 0/8 |
 | 6 | Dependencies and trust | not started | 0/8 |
 | 7 | Hardening and open-source release | not started | 0/9 |
@@ -1082,17 +1160,17 @@ harness every later phase depends on.
 
 **Goal:** a usable chat pane with tool calls, streaming, cost accounting, budget caps and replay.
 
-- [x] **P3.1** Model client: streaming SSE, tool-call parsing, retry-with-jitter, `Retry-After`
-- [x] **P3.2** Cost accounting from response usage, local price fallback, `BudgetService::reconcile`
-- [x] **P3.3** Native coordinator loop (D19) with the tool registry from §7.1
-- [x] **P3.4** `rigel-mcp` stdio server, scoped by `--session` and `--agent`
-- [x] **P3.5** Patch pipeline: CAS check, write-ahead journal, fsync, revert
-- [x] **P3.6** Memory service: committed files, path/secret validator (I7), `memory_index`
-- [x] **P3.7** Transcript UI: role gutter, collapsed tool lines, inline approvals, streaming text
-- [x] **P3.8** Budget reserve/account/interrupt, pre-turn quote in the composer, 80% inline prompt, cap editing
-- [x] **P3.9** Replay from `raw_json` with a raw/debug toggle
-- [x] **P3.10** Intervention counter in the status bar (`interventions / tasks`)
-- [x] **P3.11** **Exit test:** $0.25 cap, read three files, patch one; kill mid-turn, relaunch, resume; no patch applied twice and `git diff` is byte-identical — `scripts/p3-exit-test.sh`, results in `docs/qa/p3.md`
+- [x] **P3.1** Model client: streaming SSE, tool-call parsing, retry-with-jitter, `Retry-After` — `c23b268`
+- [x] **P3.2** Cost accounting from response usage, local price fallback, `BudgetService::reconcile` — `c23b268`
+- [x] **P3.3** Native coordinator loop (D19) with the tool registry from §7.1 — `c23b268`
+- [x] **P3.4** `rigel-mcp` stdio server, scoped by `--session` and `--agent` — `c23b268`
+- [x] **P3.5** Patch pipeline: CAS check, write-ahead journal, fsync, revert — `c23b268`
+- [x] **P3.6** Memory service: committed files, path/secret validator (I7), `memory_index` — `c23b268`
+- [x] **P3.7** Transcript UI: role gutter, collapsed tool lines, inline approvals, streaming text — `c23b268`
+- [x] **P3.8** Budget reserve/account/interrupt, pre-turn quote in the composer, 80% inline prompt, cap editing — `c23b268`
+- [x] **P3.9** Replay from `raw_json` with a raw/debug toggle — `c23b268`
+- [x] **P3.10** Intervention counter in the status bar (`interventions / tasks`) — `c23b268`
+- [x] **P3.11** **Exit test:** $0.25 cap, read three files, patch one; kill mid-turn, relaunch, resume; no patch applied twice and `git diff` is byte-identical — `scripts/p3-exit-test.sh`, results in `docs/qa/p3.md`; `c23b268`
 
 **Not yet:** tool and harness approvals (P4). The native loop's only inline prompt is the 80% cap
 one; `approval` items are stored and rendered, but no adapter can answer them until Phase 4.
@@ -1102,20 +1180,32 @@ one; `approval` items are stored and rendered, but no adapter can answer them un
 **Goal:** Codex, Claude Code, Cursor and Cline as first-class agents — each authenticated by **its own
 API key**, never a subscription login (D21) — with approvals and normalised events.
 
+**Order (D36):** P4.1 → P4.2 → P4.5 (Codex, with P4.7/P4.8 alongside it) → P4.3 (Cursor ACP) → P4.4 →
+P4.10, then P4.6 (Claude) once an `ANTHROPIC_API_KEY` exists. P4.13–P4.17 come before P4.6: they are
+what makes the approval surface worth having.
+
 - [ ] **P4.1** `probe()` for all four, writing `adapters.json`; UI lists missing harnesses with an install hint
 - [ ] **P4.2** Per-agent keychain injection; probe reports `auth_mode` and refuses `subscription` (D21)
 - [ ] **P4.3** ACP client: `agent acp`, session updates, `session/request_permission` → approval UI
 - [ ] **P4.4** ACP client: `cline --acp`, same client, separate probe
-- [ ] **P4.5** Codex adapter: app-server JSON-RPC primary, `codex exec --json` fallback behind the trait
+- [x] **P4.5** Codex adapter: app-server JSON-RPC primary (probe passed 21 Oct), `codex exec --json` fallback behind the trait. Write the `-c` overrides explicitly; do not shell out to `omniroute run`/`launch-codex` — `7b3c2fb`
 - [ ] **P4.6** Claude adapter: `claude -p --output-format stream-json --verbose --include-partial-messages --permission-prompt-tool mcp__rigel__approve`
 - [ ] **P4.7** Golden fixtures per harness per scenario (start, tool call, approval, error, interrupt) + replay tests
 - [ ] **P4.8** Normalisation for all ten item kinds; unmappable events retained as `unmapped`
-- [ ] **P4.9** Roster UI: nested subagents, `observed only` labels, per-agent spend and claims
+- [ ] **P4.9** Roster UI (D40): nested subagents, `observed only` labels, per-agent spend and claims; at most two transcripts side by side, no tabs or grids
 - [ ] **P4.10** End-to-end approvals across all three protocols, with scope buttons (N2)
 - [ ] **P4.11** Sidecar decision recorded: implement it for Cline SDK-only features, or mark `dropped` with the reason
-- [ ] **P4.12** **Exit test:** four agents each run `rigel doctor --json`; all four show a real command item and exit code; killing one leaves the others running and marks it `Interrupted`
+- [ ] **P4.12** **Exit test:** Codex, Cursor and Cline each run `rigel doctor --json`; all three show a real command item and exit code; killing one leaves the others running and marks it `Interrupted`
+- [ ] **P4.13** `run_command` tool (D30): exact text and scope shown before execution (N2), cwd jailed to the project, timeout and output cap, exit code recorded as a `command` item
+- [ ] **P4.14** Egress tool (D33): `fetch_url` with approval per origin and once/session/always scopes, size and content-type caps, fetched text labelled untrusted in the transcript
+- [ ] **P4.15** Destructive classifier (D32): deletes outside the project, force-push/reset, recursive remove, registry writes — each maps to a policy row with its own test
+- [ ] **P4.16** Deliberation panel (D32): three read-only agents argue pro and con in one round with no tool access beyond read; the record attaches to the approval item, and the gate stays deterministic — it cannot be voted away
+- [ ] **P4.17** Pre-destructive snapshot (D32, D38): `git stash create` for tracked changes, untracked non-ignored files copied to `%APPDATA%\Rigel\snapshots\<turn>\` with a manifest, `rigel snapshot restore <id>`; non-git directories copy the whole tree under a 2 000-file / 200 MB cap and refuse above it. No disk image, no restore point
+- [ ] **P4.18** **Exit test:** a destructive command triggers deliberation, snapshot and approval; deny leaves the tree byte-identical; approve records the snapshot id and the command text, and restoring the snapshot reproduces the pre-turn tree
+- [ ] **P4.19** Codex context budget (D29, N3): record input tokens per turn, trim or disable the skills-catalogue injection, and surface the per-turn estimate before sending. The 21 Oct probe spent 155,895 input tokens on a one-word answer
 
-**Not yet:** claims enforcement (Phase 5), worktrees (Phase 5).
+**Not yet:** claims enforcement (Phase 5), worktrees (Phase 5), durable shell transcripts, and any
+egress outside an approved origin.
 
 ### Phase 5 — Claims, attribution, merged diff *(2 weeks)*
 
@@ -1159,15 +1249,18 @@ API key**, never a subscription login (D21) — with approvals and normalised ev
 
 Phases 1–3 are the shortest path to something the author would open on purpose: a shelf that works and a
 chat that bills honestly. Phase 4 is the expensive one (four protocols) and comes after the UI has a
-shape, so adapter work lands in a stable shell. Phase 5 is the differentiator but needs adapters to be
+shape, so adapter work lands in a stable shell. It now starts with one harness rather than four in
+parallel (D36): two of the four cannot authenticate on this machine, and a single working approval
+path is worth more than four half-tested ones. Phase 5 is the differentiator but needs adapters to be
 worth anything. Phase 6 is separable and can be pulled earlier if a real task blocks on it. Phase 7 is
 not optional: an unsigned, undocumented binary is not the deliverable D59 describes.
 
 ### 11.2 Total
 
-~13.5 weeks of focused work, roughly four months of evenings. If that is too long, the honest cut is
-Phase 4 down to two harnesses (Codex + Claude), saving ~1.5 weeks and keeping the promise intact for
-the two that matter most on this machine.
+~15 weeks of focused work, roughly four and a half months of evenings — D30, D32 and D33 add about a
+week and a half to Phase 4. If that is too long, the honest cut is Phase 4 down to **Codex only**
+(D36): ~2 weeks saved, and the three shell/egress powers still land because they are what the native
+agent is missing today.
 
 ---
 
@@ -1266,6 +1359,7 @@ Tauri's `tauri.conf.json` may live in `crates/rigel-app`; the frontend `dist` pa
 ### 14.4 Where the intent comes from
 
 - `docs/interview-answers.md` — 60 answers, seven collisions, reasoning behind D1–D17.
+- §15 below — the round-2 questions (Q67–Q86) and their answers, recorded as D22–D37.
 - `docs/phase-0-teardown.md` — competitor evidence and the gap table.
 - `docs/design-prompt.md` — the visual system (N8).
 - `docs/skill-intelligence.md` — discovery, fingerprinting, safety, ranking detail.
@@ -1284,3 +1378,352 @@ Do not start with the UI. Start with the contract:
 
 That sequence gives every later phase somewhere to put its evidence, and designs out the failure mode
 "it works on my machine but nobody can check".
+
+---
+
+## 15. Open questions — round 2 (Q67–Q86)
+
+Twenty decisions that shape the next phases. **Answered 21 Oct 2026.** Answers are recorded as D22–D37
+in §3.1 and summarised in §15.0. The option lists stay as the record of what was offered; the
+`(recommended)` markers show the defaults that were suggested, not necessarily the outcome.
+
+### 15.0 Answers
+
+| Q | Answer given | Decision |
+|---|---|---|
+| 67 | Resume the newest open session on launch | D22 |
+| 68 | Read-only unified diff per patch, with revert | D23 |
+| 69 | One window; switch projects in-app | D24 |
+| 70 | Palette covers everything | D25 |
+| 71 | Several providers at once, one per agent; OmniRoute is fine if it can front all the keys | D26 |
+| 72 | Auto-start, retry once, then a clear failure | D27 |
+| 73 | Picker with a saved default | D28 |
+| 74 | Separate reasoning-effort setting | D28 |
+| 75 | Start with the app | D27 |
+| 76 | `estimated` plus token counts | D29 |
+| 77 | Full shell, approval per command | D30 |
+| 78 | Auto-apply, journaled and revertible | D31 |
+| 79 | Agents deliberate, snapshot first, then ask | D32 |
+| 80 | Fetch with per-origin approval | D33 |
+| 81 | Budget follows real provider usage | D29 |
+| 82 | Pooled under the session cap | D34 |
+| 83 | Auto-end after 24 h | D35 |
+| 84 | Implementer's choice → Codex, since there is no Claude subscription | D36 |
+| 85 | Wire `rigel-mcp` in from day one | D36 |
+| 86 | Signed MSI, opt-in updater, MIT/Apache-2.0, no telemetry | D37 |
+
+Four answers were free text rather than a letter; each is worked out below before the question list.
+
+### 15.1 "Multiple providers for multiple agents at once" (Q71 → D26)
+
+The ask, restated: several upstream providers usable **simultaneously**, with each agent able to sit on
+a different one, using keys already on this machine — and OmniRoute is acceptable *if* it can front all
+of them.
+
+It can, and this is the one place where the router is genuinely the right layer. Verified on this
+machine with `omniroute providers list`: seven provider connections are already configured
+(`antigravity`, `claude` — marked **banned**, `codex`, `codex-cloud`, `huggingface`, `kiro`,
+`opencode`), and the CLI exposes `providers add|edit|rotate|metrics`, `combo`, `simulate` and
+`cost --group-by api-key`. One OpenAI-compatible surface, many upstreams.
+
+The design that follows:
+
+- **Binding, not global state.** `agent` rows gain `provider` and `model`; the client is resolved per
+  agent at spawn, not per process. Two agents on two providers is two clients, not a new architecture —
+  turns already run on tokio.
+- **One OmniRoute API key per agent** (`omniroute keys add`, `keys policy`, `keys expiration`). This is
+  what makes concurrency safe: per-key budget, per-key policy, and `cost --group-by api-key` gives the
+  roster exact per-agent spend without inventing an attribution scheme.
+- **Direct fallback stays.** OpenRouter remains a real second path (D18), so a router outage is not a
+  total outage.
+- **Untested:** two simultaneous streams through one router. It is a ten-minute check — two turns in
+  flight on different keys, confirm both complete and bill separately — and it belongs in P4.2.
+
+One thing this does *not* decide: whether several agents are **visible side by side**. D24 keeps one
+window and a project switcher; a split roster view is a separate call. Ask before building it.
+
+### 15.2 The round table before a destructive action (Q79 → D32)
+
+Taken literally, the answer is three mechanisms, not one:
+
+1. **Deliberation.** Three read-only agents argue pro and con for one round, no tools beyond read, and
+   the transcript attaches to the approval item. This is advisory. The gate itself stays deterministic:
+   a classifier marks the operation destructive, and *that* is what requires approval. Agents must not
+   be able to vote the gate away, or a prompt-injected agent becomes the exploit. (P4.16)
+2. **Snapshot.** "Back up the PC first" is scoped to the state that has no other copy — the uncommitted
+   tree (D38): a `git stash create` object for tracked changes, plus a copy of untracked non-ignored
+   files. `rigel snapshot restore <id>` puts both back. A disk image needs VSS and elevation; a Windows
+   restore point is deliberately *not* used, because it leaves project files alone and would protect
+   everything except the work at risk. (P4.17)
+3. **Approval.** Exact command and scope, as N2 already requires. (P4.15)
+
+Cost and latency, so nobody is surprised: one round of three small agents is roughly 2–4k output tokens
+— a few cents — and 5–15 s of wall clock. That is fine for a rare operation and unacceptable for every
+write, which is exactly why it only fires on the classifier's say-so.
+
+### 15.3 "Budget from the API usage" (Q81 → D29)
+
+The instinct is right and the mechanism needs splitting in two, because provider-reported usage **lags**
+by minutes and is only as granular as the key. It cannot be the thing that stops a turn.
+
+- **Enforcement stays local.** The ledger already charges every step as it lands and stops within one
+turn (P3.8, §12). That remains the hard cap. D10 is unchanged.
+- **Reconciliation reads the provider.** `rigel doctor` compares the ledger against
+  `omniroute cost --group-by api-key` (and `usage quota|utilization` for upstream limits), plus
+  OpenRouter's key endpoint for credits. Drift over ~2% is a visible warning, not a silent correction.
+- **Prices come from the router** where it exposes them, which fixes the gap that made
+  `gpt-5.6-sol-medium` fall back to the conservative default.
+- **Per-agent keys make it exact** — same mechanism as D26, which is why these two decisions belong
+  together.
+
+The answer did not name a window. Until someone does, the cap stays **$5 per session**; a daily or
+weekly ceiling is a separate setting and should not be invented.
+
+### 15.4 Codex first (Q84 → D36)
+
+No Claude subscription, and the router's Claude connection is banned, so Claude Code would be built
+against an account that cannot answer. Codex's connection is active, `codex exec --json` is its stable
+headless surface, and `omniroute setup-codex` already generates profiles pointed at the router.
+
+So: Codex first, pointed at the router with explicit `-c` overrides rather than OmniRoute's own
+launcher, which is broken on this machine (see §4.2). With `requires_openai_auth=false` no key is even
+needed — the router answered without one — but Rigel sends its key anyway so the setting keeps working
+once router auth is enforced. If a direct OpenAI key is preferred later, it is one line behind the
+adapter trait. `rigel-mcp` is wired in from day one (Q85): it is how approvals and skill tools reach any
+harness, and retrofitting it after the adapter is written is the expensive order.
+
+The probe also killed an assumption: a one-word Codex turn reported **155,895 input tokens** because
+Codex auto-loads this machine's 2,378 skills. At $3/M input that is ~$0.47, so the $5 session cap buys
+about ten Codex turns. Trimming that injection is P4.19, not a Phase 7 nicety.
+
+### 15.5 Closed, 21 Oct 2026 — D38–D40
+
+**Snapshot scope → D38: uncommitted work, not a restore point.**
+Windows System Restore rolls back system files, drivers, the registry and installed programs; Microsoft's
+own wording is that it **does not affect personal files**
+([Microsoft Q&A](https://learn.microsoft.com/en-sg/answers/questions/6016372/how-do-i-fix-my-system-restore-to-an-earlier-date)).
+For a coding agent that is precisely backwards — it would leave the project untouched and reconfigure
+the machine. It also needs elevation and takes minutes.
+
+What actually protects the work is the state that has no copy anywhere else: the uncommitted tree.
+`git stash create` writes a stash commit without changing the index, the worktree or any ref, and the
+manifest records its SHA; untracked non-ignored files are copied next to it. Restore is
+`git checkout <sha> -- .` plus the copied files, exposed as `rigel snapshot restore <id>`. Committed
+work needs no snapshot. A non-git directory — or a repository with no commits yet — gets the whole tree
+copied, capped at 2 000 files / 200 MB; above the cap Rigel refuses and asks for an explicit skip
+rather than pretending it took a backup.
+
+**Codex upstream → D39: router by default, no silent fallback.**
+An `omniroute setup-codex` profile with a Rigel-owned router key keeps the native agent and Codex on one
+bill and one key policy, which is the whole reason D26 chose the router. The risk is concrete:
+`codex exec --json` talks OpenAI-compatible HTTP and should pass through fine, while app-server is
+version-dependent and may not honour a custom base URL. So P4.5 probes both before anything is built on
+top: if `exec --json` fails through the router, the default flips to the direct OpenAI key and the reason
+is recorded here. The setting is per agent (`codex.upstream`), so this is one flag either way, and a
+missing upstream fails loudly instead of quietly billing another provider.
+
+**Agent visibility → D40: roster plus one split pane.**
+One window (D24) does not mean one transcript. The roster lists every agent — status, spend, claims,
+`observed only` — and any two of them can be shown side by side for a comparison. Two is the cap:
+three panes at 13px body text stops being an instrument and becomes a spreadsheet. Everything beyond
+two is the roster's job.
+
+### A. The shape of a working day
+
+**67. What does Rigel show when it opens?**
+Today it always opens Shelf, and a project must be typed in before Session works.
+
+- **A.** Resume the newest open session for the last project, with Shelf one click away. *(recommended)*
+- **B.** Keep Shelf as the launch screen; sessions stay a deliberate second step.
+- **C.** Open a session list first, scoped to the last project.
+
+*Blocks:* shell routing, remembering the last project. *Today:* Shelf only.
+
+**68. How much of the Diff surface do you actually want?**
+The rail has a Diff item with no real content; patch diffs are already stored and rendered inside
+Session.
+
+- **A.** A read-only merged diff with per-hunk attribution, opened from a patch or a session. *(recommended)*
+- **B.** An editor: accept/reject individual hunks and apply from Diff.
+- **C.** Drop the Diff tab; the transcript and patch detail are enough.
+
+*Blocks:* P5 scope, conflict UI.
+
+**69. One project at a time, or many?**
+The window holds a single `projectPath` today, so comparing two repos means reopening.
+
+- **A.** One project per window; restore the last one on launch. *(recommended)*
+- **B.** Tabs for several projects in one window.
+- **C.** A global session list across projects, with the tree in a side panel.
+
+*Blocks:* how many SQLite pools the app owns, window state.
+
+**70. Keyboard-first or mouse-first?**
+Only `/` focuses the shelf search; there is no global command surface.
+
+- **A.** A command palette (Ctrl/Cmd+K) for sessions, providers, settings and stop/start. *(recommended)*
+- **B.** A handful of shortcuts, no palette.
+- **C.** Mouse only for now.
+
+*Blocks:* nothing structural; pure UI.
+
+### B. Provider and model
+
+**71. Is OmniRoute the only provider, or one of two?**
+Settings now offers OmniRoute (default) and OpenRouter, each with its own keychain entry.
+
+- **A.** Keep both; OmniRoute is the default, OpenRouter is the escape hatch. *(recommended)*
+- **B.** OmniRoute only — remove OpenRouter and its key path.
+- **C.** OpenRouter only; drop the local router.
+
+*Blocks:* onboarding copy, key commands, docs, `RIGEL_PROVIDER`.
+
+**72. When the router is down and cannot be started, what should a turn do?**
+Today it stops with an error. Your OpenAI and Anthropic keys are in the keychain but no provider
+uses them.
+
+- **A.** Stop, and show a fix-it panel (start router, open Settings, check logs). *(recommended)*
+- **B.** Fall back to OpenRouter automatically when its key exists.
+- **C.** Fall back to OpenAI/Anthropic directly using the stored keys.
+
+*Blocks:* error UX, and whether the bill can silently change model or price mid-session.
+
+**73. How is the model chosen?**
+The default is `gpt-5.6-sol-medium`; `--model` overrides per turn, and the router advertises hundreds
+of models, including `auto/*` combos.
+
+- **A.** A picker in Settings (searchable model list), saved as the session default. *(recommended)*
+- **B.** Three presets — fast / coding / reasoning — that map to model ids.
+- **C.** Keep one fixed default; power users pass `--model`.
+
+*Blocks:* Settings UI, whether the model is a session or an agent property.
+
+**74. Is reasoning effort part of the model id or its own setting?**
+Today it is the `-medium` suffix (`gpt-5.6-sol-medium`), which is OmniRoute's convention.
+
+- **A.** Keep it in the model id. *(recommended)*
+- **B.** A separate `reasoning.effort` setting sent on each request; model id stays clean.
+- **C.** Both: the setting wins when present, the suffix otherwise.
+
+*Blocks:* provider adapter, model validation, which ids the picker shows.
+
+**75. When should the router start?**
+Today the app warms it on launch and retries on each turn; Settings can start it manually.
+
+- **A.** Start with the app, keep the lazy retry. *(recommended)*
+- **B.** Start only on the first turn, not at launch.
+- **C.** Manual only — never start a process behind the user's back.
+
+*Blocks:* launch time, tray behavior, and whether a closed window leaves OmniRoute running.
+
+**76. How honest should the bill be when the router reports no cost?**
+OmniRoute returns token usage but no `usage.cost`, so every OmniRoute turn is billed from Rigel's
+local table and marked `estimated`. `gpt-5.6-sol-medium` is not in that table, so it uses the
+conservative default.
+
+- **A.** Keep `estimated`, and sync prices from the router's model metadata when it exposes them. *(recommended)*
+- **B.** Keep estimates silently; the UI already says `estimated`.
+- **C.** Treat OmniRoute as the source of truth and show no dollar figure when it omits cost.
+
+*Blocks:* the budget guarantee's wording, pricing table upkeep.
+
+### C. What the agent may do
+
+**77. Does the native agent get a shell?**
+D19 says no general bash loop; the tool set is read/list/edit/write/skills/budget/spawn_agents.
+
+- **A.** Keep D19 — no shell. *(recommended)*
+- **B.** Add `run_command` limited to an allowlist (git status, cargo test, rg), approval each time.
+- **C.** Full shell with approvals.
+
+*Blocks:* P4 parity, sandbox story, the exit tests that assume no process spawning.
+
+**78. Are file writes auto-applied?**
+Today an edit is journaled and applied atomically, revertible per patch; there is no per-write prompt.
+
+- **A.** Keep auto-apply inside the project, with journal and revert. *(recommended)*
+- **B.** Approve every patch before it touches disk.
+- **C.** Approve only deletes, writes outside the project, or diffs above a size threshold.
+
+*Blocks:* approval UI reuse in Phase 4, unattended mode.
+
+**79. What happens when the model asks for something destructive?**
+No destructive tool exists today, so this only matters once one is added.
+
+- **A.** Refuse. *(recommended)*
+- **B.** Approval, with the exact command shown.
+- **C.** Allow when the path is inside the project.
+
+*Blocks:* the tool policy table and its tests.
+
+**80. Does the agent get network tools in v1?**
+Only skill indexing calls the network today; `web_search` exists as an item kind but nothing emits it.
+
+- **A.** No agent network tools in v1. *(recommended)*
+- **B.** Web search and fetch with a per-domain allowlist.
+- **C.** Full fetch with approval per origin.
+
+*Blocks:* egress rules in §10, item rendering, prompt-injection story.
+
+### D. Money and sessions
+
+**81. What is the default budget, and over what window?**
+Today: 500¢ ($5) per session, enforced within one turn; no daily or weekly cap.
+
+- **A.** Keep $5 per session. *(recommended)*
+- **B.** $5 per session plus a $20/day ceiling across sessions.
+- **C.** Let the agent propose a per-task budget that the user confirms.
+
+*Blocks:* settings schema, enforcement scope, unattended mode.
+
+**82. Do subagents get their own ceiling?**
+Up to four read-only children run per turn, each billed to the parent session; near the cap a fan-out
+can overshoot by one step per running child.
+
+- **A.** Pooled under the session cap, as today. *(recommended)*
+- **B.** A per-child cap in addition to the session cap.
+- **C.** No subagents by default; opt in per turn.
+
+*Blocks:* budget service changes, roster UI.
+
+**83. Do sessions ever close themselves?**
+D1 says a session never cleanly ends. In practice the list only grows, and startup resumes the newest
+non-ended one.
+
+- **A.** Never auto-end; add an explicit Archive action. *(recommended)*
+- **B.** Auto-archive after 7 days idle.
+- **C.** Auto-end after 24 hours; resuming starts a new session.
+
+*Blocks:* resume semantics, list size, what `active` means in the UI.
+
+### E. Harnesses and release
+
+**84. Which external harness first?**
+Phase 4 lists Codex, Claude Code, Cursor and Cline. Each has a different approval protocol and a
+different amount of protocol risk.
+
+- **A.** Claude Code — stable `stream-json` plus an MCP permission tool. *(recommended)*
+- **B.** Codex — app-server is experimental; `exec --json` is the fallback.
+- **C.** Cursor via ACP.
+- **D.** Cline via ACP (needs the SDK-only approval surface).
+
+*Blocks:* Phase 4 order, fixtures, the first end-to-end approval test.
+
+**85. Does Rigel's MCP server get wired into that harness in v1?**
+`rigel-mcp` already exposes scoped tools over stdio, but no external harness connects to it yet.
+
+- **A.** Yes — it is how approvals and skill tools reach a harness. *(recommended)*
+- **B.** Ship harnesses without MCP; skills stay in Rigel's own UI.
+- **C.** Defer MCP wiring until after the first harness works.
+
+*Blocks:* P4.6/P4.10, the approval path.
+
+**86. What is the 1.0 artifact?**
+P7.4 still has no license decision (the workspace claims MIT OR Apache-2.0), and there is no updater
+or telemetry today.
+
+- **A.** Signed MSI, opt-in signed auto-update, MIT/Apache-2.0, zero telemetry. *(recommended)*
+- **B.** Portable zip first; license and updater later.
+- **C.** MSI plus opt-in crash reports to a hosted endpoint.
+
+*Blocks:* P7, installer work, what a stranger can download this month.

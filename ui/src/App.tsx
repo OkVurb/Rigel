@@ -6,6 +6,7 @@ import {
   isTauri,
   when,
   TauriSkillSource,
+  type KeyStatus,
   type ProjectInfo,
   type Session,
   type SkillDetail,
@@ -16,6 +17,7 @@ import {
 import { RigelMark } from "./mark";
 import { PreviewSkillSource } from "./mock";
 import SessionView from "./session";
+import SettingsView from "./settings";
 
 const ICONS = {
   shelf: "M10 2.5 17 6.5v7l-7 4-7-4v-7l7-4ZM3 6.5l7 4 7-4M10 10.5v7",
@@ -61,6 +63,8 @@ export default function App() {
   const [project, setProject] = useState<ProjectInfo | null>(null);
   const [sessions, setSessions] = useState<Session[]>([]);
   const [activeSession, setActiveSession] = useState<Session | null>(null);
+  const [keys, setKeys] = useState<KeyStatus | null>(null);
+  const [keyPromptDismissed, setKeyPromptDismissed] = useState(false);
 
   const setActive = useCallback((next: Session | null) => setActiveSession(next), []);
   const noticeFromSession = useCallback((next: string) => setNotice(next), []);
@@ -70,6 +74,23 @@ export default function App() {
   const searchRef = useRef<HTMLInputElement | null>(null);
 
   /* ----------------------------- data ----------------------------- */
+
+  // The startup check: does a key exist? It asks the keychain, not the network, and the
+  // answer is a boolean — the window never receives the key itself.
+  useEffect(() => {
+    if (!isTauri()) {
+      setKeys({ openrouter: false, omniroute: false });
+      return;
+    }
+    let live = true;
+    api
+      .keyStatus()
+      .then((next) => live && setKeys(next))
+      .catch(() => live && setKeys({ openrouter: false, omniroute: false }));
+    return () => {
+      live = false;
+    };
+  }, []);
 
   useEffect(() => {
     let live = true;
@@ -196,7 +217,11 @@ export default function App() {
   const sessionProject = project?.root ?? (isTauri() ? "" : "/preview/rigel");
 
   return (
-    <div className={`shell${view === "session" ? " session" : ""}`}>
+    <div
+      className={`shell${view === "session" ? " session" : ""}${
+        view === "settings" ? " settings" : ""
+      }`}
+    >
       <nav className="rail" aria-label="Primary">
         <div className="rail-brand" title="Rigel">
           <RigelMark />
@@ -236,13 +261,35 @@ export default function App() {
         </div>
       </nav>
 
+      {isTauri() && keys && !keys.openrouter && !keys.omniroute && !keyPromptDismissed ? (
+        <div className="key-banner" role="status">
+          <span>
+            No provider key yet. The agent can price a turn, but it cannot send one.
+          </span>
+          <button className="chip warn" onClick={() => setView("settings")}>
+            Add key
+          </button>
+          <button
+            className="key-banner-close"
+            aria-label="Dismiss"
+            title="Dismiss"
+            onClick={() => setKeyPromptDismissed(true)}
+          >
+            ×
+          </button>
+        </div>
+      ) : null}
+
       {view === "session" ? (
         <SessionView
           project={sessionProject}
           onSessions={setSessions}
           onActive={setActive}
           onNotice={noticeFromSession}
+          onOpenSettings={() => setView("settings")}
         />
+      ) : view === "settings" ? (
+        <SettingsView keys={keys} onKeys={setKeys} onNotice={setNotice} />
       ) : (
       <>
       <aside className="list-pane">
@@ -566,6 +613,18 @@ export default function App() {
         <span className="sep">·</span>
         <span>
           {sessions.length} session{sessions.length === 1 ? "" : "s"}
+        </span>
+        <span className="sep">·</span>
+        <span className="mono" title="Provider key in the OS keychain">
+          {isTauri()
+            ? keys
+              ? keys.omniroute
+                ? "omniroute key"
+                : keys.openrouter
+                  ? "openrouter key"
+                  : "no provider key"
+              : "checking key"
+            : "preview key"}
         </span>
         <span className="sep">·</span>
         <span className="mono" title={`source: ${source.label}`}>

@@ -52,7 +52,8 @@ cargo run -q -p rigel-cli -- skills get github:anthropics/skills:skills/pdf/SKIL
 cargo run -q -p rigel-cli -- skills status
 
 # the native agent: one turn, billed to the session
-printf '%s' "$OPENROUTER_KEY" | cargo run -q -p rigel-cli -- keys set openrouter
+# OmniRoute is the default provider; a turn starts `omniroute serve` if it is down.
+printf '%s' "$OMNIROUTE_KEY" | cargo run -q -p rigel-cli -- keys set omniroute
 cargo run -q -p rigel-cli -- session start --project . --budget-cents 25
 cargo run -q -p rigel-cli -- agent run --project . --prompt "read README and fix the typo"
 cargo run -q -p rigel-cli -- patch list --project .
@@ -95,7 +96,7 @@ The prototype's Discover view talks to two marketplaces that send no CORS header
 | Duplicates | **real**: SimHash ≤ 3 bits, clusters computed after every ingest, variants listed under the row |
 | Evidence | **real**: advertised percentages from the description, `unmeasured` until a measurement exists |
 | CLI | `rigel skills search|get|index|status|sync|stats|import|gc`, all with `--json`, §7.2 exit codes |
-| Native agent | **real**: OpenRouter streaming with retries, a deterministic scripted model, eight tools with path-checked reads and writes, skills pinned per session |
+| Native agent | **real**: OmniRoute (local router, autostarted; default `gpt-5.6-sol-medium`) and OpenRouter streaming with retries, a deterministic scripted model, eight tools with path-checked reads and writes, skills pinned per session |
 | Subagents | **real**: `spawn_agents` runs up to 4 read-only children concurrently per turn on an eight-model cheap allowlist (GPT-5/5.4 nano, Gemini Flash-Lite/3 Flash, DeepSeek V4.1 Flash, Qwen3 Coder, Haiku 5.5, GPT-5.4 mini); each child is its own agent row and bill, nested under the parent turn |
 | The bill | **real**: micro-dollar accounting from provider usage, local price fallback, 80% warning, cap enforced within one turn, `reconcile` |
 | Session surface | **real**: roster, role-gutter transcript, streaming text, collapsed tool lines, patch diffs, raw/debug toggle, inline 80% prompt |
@@ -103,6 +104,7 @@ The prototype's Discover view talks to two marketplaces that send no CORS header
 | Resume | **real**: tree hash vs checkpoint, running turns closed as `cancelled`, journal reconciled without applying, forced continue is an intervention |
 | Memory | **real**: committed `MEMORY.md` + topics per agent, absolute-path/secret validator, index rebuild |
 | MCP | **real**: stdio server scoped to `--session` and `--agent`, sharing the same tools |
+| Codex harness | **real**: `rigel codex probe` and one turn through `codex app-server`, with `codex exec --json` as the tested fallback; Rigel writes the router `-c` overrides itself (verified against Codex 0.162.1) |
 | Prototype migration | `rigel skills import --from` + [the export snippet](docs/migrating-prototype-index.md) |
 | Discover / Targets / Dependencies (prototype) | still the Phase 0 browser app; Phase 6 ports them |
 
