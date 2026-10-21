@@ -287,7 +287,12 @@ impl BudgetService {
         let _writer = self.writer.lock().await;
         let (session_id, _spend_before, cap_cents) = self.session_of(agent_id).await?;
 
-        let mut tx = self.pool.begin().await?;
+        // `BEGIN IMMEDIATE`, not the deferred default: this transaction reads `turns`
+        // before it writes, and in WAL mode a deferred transaction that upgrades after a
+        // read fails with SQLITE_BUSY_SNAPSHOT (517) if the log moved underneath it —
+        // immediately, without consulting `busy_timeout`, so retrying on a lock error never
+        // sees it. Taking the write lock first turns that into an ordinary wait.
+        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
 
         // A native turn makes several model calls, so `account` runs several times per turn.
         // Merge with the existing usage row: reconcile sums `usage_json` per turn and would

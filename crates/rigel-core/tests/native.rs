@@ -665,9 +665,9 @@ async fn sibling_subagents_overlap_their_model_calls() {
     let agents = spawn.body["result"]["agents"].as_array().unwrap();
     assert_eq!(
         agents[0]["text"], "child-a done.\n",
-        "asked order, not finish order"
+        "asked order, not finish order: {agents:?}"
     );
-    assert_eq!(agents[1]["text"], "child-b done.\n");
+    assert_eq!(agents[1]["text"], "child-b done.\n", "result: {agents:?}");
     assert!(agents.iter().all(|agent| agent["ok"] == true));
 }
 
@@ -758,7 +758,10 @@ async fn concurrent_usage_is_counted_once_per_charge() {
                     cost_micros: 100,
                     ..Usage::default()
                 };
-                budget.account(&agent.id, &turn.id, &usage).await.unwrap();
+                budget
+                    .account(&agent.id, &turn.id, &usage)
+                    .await
+                    .unwrap_or_else(|error| panic!("account failed: {error:?}"));
             }
         }));
     }
