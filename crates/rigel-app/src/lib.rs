@@ -14,7 +14,10 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use rigel_core::{Session, SessionService, Store};
+use rigel_core::{
+    Session, SessionService, SkillDetail, SkillIndex, SkillsError, Store, SyncPolicy,
+    skills::search::SearchHit,
+};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize)]
@@ -47,6 +50,72 @@ fn message(error: impl std::fmt::Display) -> String {
 
 fn settings_path() -> PathBuf {
     rigel_core::default_index_dir().join("settings.toml")
+}
+
+/// Where the global index lives. `RIGEL_INDEX_DIR` exists so the window can be pointed at a
+/// test index, the same way the CLI's `--data-dir` works.
+fn index_dir() -> PathBuf {
+    std::env::var_os("RIGEL_INDEX_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(rigel_core::default_index_dir)
+}
+
+/// Shelf search. Reads only the local index, so it works offline (§9, Shelf: offline state).
+#[tauri::command]
+fn skills_search(query: String, limit: usize) -> Result<Vec<SearchHit>, String> {
+    tauri::async_runtime::block_on(async move {
+        SkillIndex::open(&index_dir())
+            .await
+            .map_err(message)?
+            .search(&query, limit)
+            .await
+            .map_err(message)
+    })
+}
+
+/// Everything the detail pane shows: metadata, the static review, evidence and variants.
+#[tauri::command]
+fn skills_load(id: String) -> Result<SkillDetail, String> {
+    tauri::async_runtime::block_on(async move {
+        match SkillIndex::open(&index_dir())
+            .await
+            .map_err(message)?
+            .get(&id)
+            .await
+            .map_err(message)?
+        {
+            Some(detail) => Ok(detail),
+            None => Err(message(SkillsError::NotIndexed(id))),
+        }
+    })
+}
+
+/// Source health for the status bar. Never makes a network call.
+#[tauri::command]
+fn skills_status() -> Result<Vec<rigel_core::SourceStatus>, String> {
+    tauri::async_runtime::block_on(async move {
+        SkillIndex::open(&index_dir())
+            .await
+            .map_err(message)?
+            .status()
+            .await
+            .map_err(message)
+    })
+}
+
+/// Walk a repository from the shelf's empty state. The only skill command that uses the
+/// network, and the only one that can take seconds.
+#[tauri::command]
+fn skills_index(repo: String, force: bool) -> Result<rigel_core::IngestReport, String> {
+    tauri::async_runtime::block_on(async move {
+        let index = SkillIndex::open(&index_dir()).await.map_err(message)?;
+        let policy = if force {
+            SyncPolicy::forced()
+        } else {
+            SyncPolicy::normal()
+        };
+        index.index_repo(&repo, policy).await.map_err(message)
+    })
 }
 
 /// Open (creating if needed) a project and report where its session database lives.
@@ -129,7 +198,11 @@ pub fn run() {
             session_start,
             session_list,
             settings_get,
-            settings_set
+            settings_set,
+            skills_search,
+            skills_load,
+            skills_status,
+            skills_index
         ])
         .run(tauri::generate_context!())
         .expect("rigel: failed to start the window");

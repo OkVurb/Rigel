@@ -25,11 +25,21 @@ pub const PROJECT_MIGRATIONS: &[Migration] = &[Migration {
 }];
 
 /// `%APPDATA%\Rigel\index.db`
-pub const INDEX_MIGRATIONS: &[Migration] = &[Migration {
-    version: 1,
-    name: "0001_init",
-    sql: include_str!("../../../migrations/index/0001_init.sql"),
-}];
+///
+/// 0001 is §6.3 verbatim. 0002 is Phase 2's own additions (fetch cache, blob manifest,
+/// fingerprints) and says why in its header.
+pub const INDEX_MIGRATIONS: &[Migration] = &[
+    Migration {
+        version: 1,
+        name: "0001_init",
+        sql: include_str!("../../../migrations/index/0001_init.sql"),
+    },
+    Migration {
+        version: 2,
+        name: "0002_remote_cache",
+        sql: include_str!("../../../migrations/index/0002_remote_cache.sql"),
+    },
+];
 
 #[derive(Debug, thiserror::Error)]
 pub enum MigrateError {

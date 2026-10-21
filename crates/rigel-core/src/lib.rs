@@ -7,10 +7,15 @@
 
 pub mod migrate;
 pub mod session;
+pub mod skills;
 pub mod storage;
 
 pub use migrate::{INDEX_MIGRATIONS, MigrateError, Migration, PROJECT_MIGRATIONS, apply, now_ms};
 pub use session::{
     Agent, Checkpoint, Item, Session, SessionError, SessionService, SessionStatus, Turn,
+};
+pub use skills::{
+    Capability, Evidence, EvidenceSummary, GitHubSource, IndexStats, IngestReport, SkillDetail,
+    SkillIndex, SkillsError, Source, SourceState, SourceStatus, SyncPolicy, VariantRow,
 };
 pub use storage::{StorageError, Store, default_index_dir};
