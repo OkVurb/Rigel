@@ -148,6 +148,17 @@ run_checks() {
     command -v cargo >/dev/null 2>&1 \
         || die "cargo is not on PATH, so the mirror would be unverified (--no-checks to override)"
 
+    # A thread checkout sits about 160 characters deep, and the MSVC linker
+    # refuses to create a file past MAX_PATH even when Windows allows long
+    # paths: the ICU build script lands at exactly 260. Build somewhere short
+    # when the default target directory would overflow.
+    if [ -z "${CARGO_TARGET_DIR:-}" ] && [ "${#SOURCE_ROOT}" -gt 120 ]; then
+        CARGO_TARGET_DIR="${TMPDIR:-/tmp}/rigel-sync-target"
+        mkdir -p "$CARGO_TARGET_DIR"
+        export CARGO_TARGET_DIR
+        say "checks  building in $CARGO_TARGET_DIR (the source path is too deep for the linker)"
+    fi
+
     local name cmd output
     while IFS='|' read -r name cmd; do
         if output=$(cd "$SOURCE_ROOT" && eval "$cmd" 2>&1); then
