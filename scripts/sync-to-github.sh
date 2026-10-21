@@ -90,6 +90,40 @@ say()  { printf '%s\n' "$*"; }
 note() { printf '  %s\n' "$*"; }
 die()  { printf 'sync-to-github: %s\n' "$*" >&2; exit 1; }
 
+# Push only when the target is ahead of origin, so a --no-push run can be
+# finished by the next one instead of blocking it.
+push_if_ahead() {
+    if [ "$PUSH" -eq 0 ]; then
+        say "skipped push (--no-push)"
+        return 0
+    fi
+    local ahead
+    ahead=$(git -C "$TARGET" rev-list --count "origin/$BRANCH..$BRANCH")
+    if [ "$ahead" -eq 0 ]; then
+        say "origin/$BRANCH already has everything"
+        return 0
+    fi
+    if ! git -C "$TARGET" push origin "$BRANCH" 2>&1 | sed 's/^/  /'; then
+        die "push failed; the remote may have moved. Re-run to fetch and merge again"
+    fi
+    say "pushed $BRANCH ($ahead commit(s))"
+}
+
+# Move this checkout onto the commit the target ended on, when that is a plain
+# fast-forward. Keeps the two lines identical, so the next run is a no-op.
+ff_source_onto() {
+    local onto="$1" src_head
+    [ "$FF_SOURCE" -eq 1 ] && [ "$SOURCE_BRANCH" = "$BRANCH" ] || return 0
+    src_head=$(git -C "$SOURCE_ROOT" rev-parse HEAD)
+    [ "$src_head" != "$onto" ] || return 0
+    git -C "$TARGET" merge-base --is-ancestor "$src_head" "$onto" || return 0
+    git -C "$SOURCE_ROOT" fetch --quiet "$TARGET" "$BRANCH" \
+        || die "could not fetch the target back"
+    git -C "$SOURCE_ROOT" merge --quiet --ff-only FETCH_HEAD \
+        || die "source could not fast-forward onto the synced commit"
+    say "source fast-forwarded to $(git -C "$SOURCE_ROOT" rev-parse --short HEAD)"
+}
+
 # --- where ----------------------------------------------------------------
 
 script_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
@@ -147,8 +181,10 @@ if [ "$target_head" != "$origin_head" ]; then
         say "fast-forwarding the target onto origin/$BRANCH first"
         [ "$DRY_RUN" -eq 1 ] || git -C "$TARGET" merge --quiet --ff-only "origin/$BRANCH"
         target_head=$origin_head
+    elif git -C "$TARGET" merge-base --is-ancestor "$origin_head" "$target_head"; then
+        say "target is $(git -C "$TARGET" rev-list --count "origin/$BRANCH..$target_head") commit(s) ahead of origin/$BRANCH; they will be pushed too"
     else
-        die "target has commits on $BRANCH that origin does not; push or reset those before syncing"
+        die "target has diverged from origin/$BRANCH; settle that by hand before syncing"
     fi
 fi
 
@@ -167,7 +203,13 @@ git -C "$TARGET" fetch --quiet "$temp_remote" HEAD \
 source_head=$(git -C "$TARGET" rev-parse FETCH_HEAD)
 
 if git -C "$TARGET" merge-base --is-ancestor "$source_head" "$target_head"; then
-    say "target already contains $SOURCE_BRANCH at $(git -C "$SOURCE_ROOT" rev-parse --short HEAD); nothing to do"
+    say "target already contains $SOURCE_BRANCH at $(git -C "$SOURCE_ROOT" rev-parse --short HEAD); nothing to merge"
+    if [ "$DRY_RUN" -eq 1 ]; then
+        say "dry run: nothing changed"
+        exit 0
+    fi
+    push_if_ahead
+    ff_source_onto "$target_head"
     exit 0
 fi
 
@@ -271,26 +313,10 @@ say "target now at $(git -C "$TARGET" rev-parse --short "$new_head")"
 
 # --- push -----------------------------------------------------------------
 
-if [ "$PUSH" -eq 1 ]; then
-    if ! git -C "$TARGET" push origin "$BRANCH" 2>&1 | sed 's/^/  /'; then
-        die "push failed; the remote may have moved. Re-run to fetch and merge again"
-    fi
-    say "pushed $BRANCH"
-else
-    say "skipped push (--no-push)"
-fi
+push_if_ahead
 
 # --- keep the two on one commit ------------------------------------------
 
-if [ "$FF_SOURCE" -eq 1 ] && [ "$SOURCE_BRANCH" = "$BRANCH" ]; then
-    if [ "$(git -C "$SOURCE_ROOT" rev-parse HEAD)" != "$new_head" ] \
-        && git -C "$TARGET" merge-base --is-ancestor "$source_head" "$new_head"; then
-        git -C "$SOURCE_ROOT" fetch --quiet "$TARGET" "$BRANCH" \
-            || die "could not fetch the target back"
-        git -C "$SOURCE_ROOT" merge --quiet --ff-only FETCH_HEAD \
-            || die "source could not fast-forward onto the synced commit"
-        say "source fast-forwarded to $(git -C "$SOURCE_ROOT" rev-parse --short HEAD)"
-    fi
-fi
+ff_source_onto "$new_head"
 
 say "done"
