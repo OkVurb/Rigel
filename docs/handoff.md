@@ -156,7 +156,8 @@ replace the localStorage notes above.
 
 | Item | Where | Evidence |
 |---|---|---|
-| **P4.2** Per-agent API keys | `crates/rigel-core/src/credentials.rs`, `crates/rigel-adapters/src/codex.rs`, `ui/src/settings.tsx` | env-first test store; per-spawn redacted env injection; honest `ApiKey` / `Subscription` / `None` probe; pre-spawn refusal and first-event child kill in `tests/codex.rs`. Direct Codex resolves `rigel/openai`; only the local OmniRoute endpoint on port 20128 resolves `rigel/omniroute`, still injected as `OPENAI_API_KEY` because that is the name Codex accepts — `45ac7e7` |
+| **P4.1** Harness registry | `crates/rigel-adapters/src/registry.rs`, `crates/rigel-cli/src/harness.rs`, `ui/src/settings.tsx` | probes `codex`, `claude`, `agent`/`cursor-agent` and `cline` (PATHEXT resolution and `cmd /C` for npm shims); `adapters.json` re-probed when a binary's mtime or PATH location changes; missing rows carry an install hint; auth lines name the keychain provider. 21 Oct: Codex 0.162.1 and Claude 2.1.251 report `api key`; Cursor and Cline are `installed: false`. 8 unit tests, `rigel harness probe --json`, 4 cards checked in the browser preview — `27377b3` |
+| **P4.2** Per-agent API keys | `crates/rigel-core/src/credentials.rs`, `crates/rigel-adapters/src/codex.rs`, `ui/src/settings.tsx` | env-first test store; per-spawn redacted env injection; honest `ApiKey` / `Subscription` / `None` probe; pre-spawn refusal and first-event child kill in `tests/codex.rs`. Direct Codex resolves `rigel/openai`; only the local OmniRoute endpoint on port 20128 resolves `rigel/omniroute`, still injected as `OPENAI_API_KEY` because that is the name Codex accepts. Review fix: the provider now names that variable with `env_key` and leaves `requires_openai_auth` off, so Codex cannot fall back to the ChatGPT login — `45ac7e7`, `27377b3` |
 | **P4.5** Codex adapter | `crates/rigel-adapters/src/codex.rs` | app-server primary, `exec --json` fallback that never re-runs a turn which already produced tokens, per-turn usage from `thread/tokenUsage/updated`; `tests/codex.rs` (4) against `tests/fixtures/fake_codex.rs`; real turn 21 Oct — 155,894 in / 5 out — `7b3c2fb` |
 | `rigel codex` CLI | `crates/rigel-cli/src/harness.rs` | `probe --json` reports 0.162.1 and an absolute path; `run --json` returns text, transport, fallback flag and usage |
 
@@ -1107,7 +1108,7 @@ Run `node scripts/handoff-status.mjs` for live counts; this table is the summary
 | 1 | Rust skeleton and storage | **complete** | 10/10 |
 | 2 | The shelf, real | **complete** | 11/11 |
 | 3 | Native agent, chat and the bill | **complete** | 11/11 |
-| 4 | Harness adapters | in progress | 2/19 |
+| 4 | Harness adapters | in progress | 3/19 |
 | 5 | Claims, attribution, merged diff | not started | 0/8 |
 | 6 | Dependencies and trust | not started | 0/8 |
 | 7 | Hardening and open-source release | not started | 0/9 |
@@ -1193,18 +1194,20 @@ API key**, never a subscription login (D21) — with approvals and normalised ev
 P4.10, then P4.6 (Claude) once an `ANTHROPIC_API_KEY` exists. P4.13–P4.17 come before P4.6: they are
 what makes the approval surface worth having.
 
-**Continuation note (21 Oct 2026):** P4.2 was completed before P4.1 under an explicit user waiver.
-Review implementation commit `45ac7e7` and evidence commit `0905925` before changing it. P4.1 is now
-the next blocking task: add probes for Codex, Claude Code, Cursor and Cline, persist `adapters.json`, and
-render the Settings harness list with install hints. When those cards exist, wire `None` and
-`Subscription` auth modes to the existing P4.2 key status as `Needs API key · <provider>`; do not create
-a second credential path. Preserve env-first lookup, write-only key entry, redacted diagnostics,
-pre-spawn refusal, first-event child termination, direct Codex → `rigel/openai`, and local OmniRoute on
-port 20128 → `rigel/omniroute` injected through `OPENAI_API_KEY`. Tests must use the memory credential
-store and fake processes only. Do not add Cline per-agent configuration before P4.4, and do not rework
-P4.2 unless review identifies a concrete defect.
+**Review note (21 Oct 2026):** P4.2 landed before P4.1 under an explicit user waiver. Reviewing
+`45ac7e7` found one defect: the OmniRoute provider asked Codex for OpenAI auth, which sends the turn
+through the ChatGPT login in `~/.codex/auth.json` instead of the injected key. `27377b3` sets
+`env_key="OPENAI_API_KEY"` with `requires_openai_auth=false`, so the per-agent key is the only
+credential available (D21); the invented `exec` auth event is gone, since only app-server reports one.
+That commit also lands P4.1.
 
-- [ ] **P4.1** `probe()` for all four, writing `adapters.json`; UI lists missing harnesses with an install hint
+Known gaps after P4.1: Cursor and Cline are not installed on this machine, so their probes are only
+exercised as `installed: false` rows; Cursor's `Subscription` path (`~/.cursor/cli-config.json`) is
+unverified on a machine that has the CLI. The Codex turn itself was not re-run after the provider fix
+(one turn injects ~155k input tokens, P4.19); the overrides are covered against the fake binary and
+match the documented custom-provider form. Next in order: P4.3/P4.4, with P4.7/P4.8 fixtures alongside.
+
+- [x] **P4.1** `probe()` for all four, writing `adapters.json`; UI lists missing harnesses with an install hint — `27377b3`
 - [x] **P4.2** Per-agent keychain injection; probe reports `auth_mode` and refuses `subscription` (D21) — `45ac7e7`
 - [ ] **P4.3** ACP client: `agent acp`, session updates, `session/request_permission` → approval UI
 - [ ] **P4.4** ACP client: `cline --acp`, same client, separate probe
