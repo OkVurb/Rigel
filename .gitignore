@@ -6,6 +6,12 @@ node_modules/
 dist/
 dist-ssr/
 *.tsbuildinfo
+target/
+
+# Rust: session databases are local by design (see docs/handoff.md §6)
+.rigel/
+*.db-wal
+*.db-shm
 
 # local
 .env

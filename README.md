@@ -30,6 +30,25 @@ npm run dev
 Open the printed localhost URL. `Ctrl+1` packages, `Ctrl+2` discover, `Ctrl+3` targets, `Ctrl+K`
 command palette.
 
+## The Rust core
+
+The workspace at the repository root is the app itself. `prototype/` stays as the visual reference
+until the UI is ported (P1.7).
+
+```bash
+cargo build --workspace
+cargo test --workspace
+cargo run -q -p rigel-cli -- doctor --json
+cargo run -q -p rigel-cli -- migrate --project .
+```
+
+`migrate` creates `<project>/.rigel/rigel.db` and writes a `.gitignore` for it, so a session log can
+never be committed by accident. The schema is numbered SQL in `migrations/`, applied one transaction at
+a time by `rigel_core::migrate`.
+
+On Windows, if the checkout sits under a deep path, set `CARGO_TARGET_DIR=C:/rigel-target` before
+building: `link.exe` fails with `LNK1104` once output paths pass 260 characters.
+
 The Discover view talks to two marketplaces that send no CORS headers, so it uses a **dev-only** proxy
 (`/__hub`, see `prototype/vite.config.ts`). It is allow-listed to `skillsmp.com` and
 `skills.browseract.com`, and exists only on the dev server. The production build shows a clear error
