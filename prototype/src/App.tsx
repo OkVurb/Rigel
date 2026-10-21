@@ -141,7 +141,9 @@ export default function App() {
   return (
     <div className="shell">
       <nav className="rail" aria-label="Primary">
-        <div className="rail-brand">F</div>
+        <div className="rail-brand" title="Orion">
+          O
+        </div>
         <RailButton d={ICONS.sessions} label="Sessions" />
         <RailButton d={ICONS.packages} label="Packages" active={view === "packages"} onClick={() => setView("packages")} />
         <RailButton d={ICONS.discover} label="Discover" active={view === "discover"} onClick={() => setView("discover")} />

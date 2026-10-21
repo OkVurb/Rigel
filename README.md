@@ -1,4 +1,4 @@
-# Skill Index
+# Orion
 
 A local index for agent skills: one catalogue across GitHub and the marketplaces, with duplicate
 detection, a static safety scan, an honest measured-vs-advertised column, and an install matrix per agent
@@ -63,3 +63,8 @@ instead.
   is harmless.
 - The GitHub path uses unauthenticated quota (60 requests/hour). Indexes are cached for an hour.
 - `prototype/src/installed.json` contains the names of skills present on the machine that generated it.
+
+## Naming
+
+Orion is the product. The internal storage keys still say `skilldb:` and the Phase 0 document is titled
+Skill Index — renaming keys would drop existing local data, so they stay until the SQLite migration.

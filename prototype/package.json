@@ -1,5 +1,5 @@
 {
-  "name": "prototype",
+  "name": "orion",
   "private": true,
   "version": "0.0.0",
   "type": "module",
@@ -21,5 +21,6 @@
     "oxlint": "^1.88.0",
     "typescript": "~6.0.3",
     "vite": "^8.3.4"
-  }
+  },
+  "description": "Orion — a local index for agent skills"
 }
