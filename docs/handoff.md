@@ -1160,17 +1160,17 @@ harness every later phase depends on.
 
 **Goal:** a usable chat pane with tool calls, streaming, cost accounting, budget caps and replay.
 
-- [x] **P3.1** Model client: streaming SSE, tool-call parsing, retry-with-jitter, `Retry-After`
-- [x] **P3.2** Cost accounting from response usage, local price fallback, `BudgetService::reconcile`
-- [x] **P3.3** Native coordinator loop (D19) with the tool registry from §7.1
-- [x] **P3.4** `rigel-mcp` stdio server, scoped by `--session` and `--agent`
-- [x] **P3.5** Patch pipeline: CAS check, write-ahead journal, fsync, revert
-- [x] **P3.6** Memory service: committed files, path/secret validator (I7), `memory_index`
-- [x] **P3.7** Transcript UI: role gutter, collapsed tool lines, inline approvals, streaming text
-- [x] **P3.8** Budget reserve/account/interrupt, pre-turn quote in the composer, 80% inline prompt, cap editing
-- [x] **P3.9** Replay from `raw_json` with a raw/debug toggle
-- [x] **P3.10** Intervention counter in the status bar (`interventions / tasks`)
-- [x] **P3.11** **Exit test:** $0.25 cap, read three files, patch one; kill mid-turn, relaunch, resume; no patch applied twice and `git diff` is byte-identical — `scripts/p3-exit-test.sh`, results in `docs/qa/p3.md`
+- [x] **P3.1** Model client: streaming SSE, tool-call parsing, retry-with-jitter, `Retry-After` — `c23b268`
+- [x] **P3.2** Cost accounting from response usage, local price fallback, `BudgetService::reconcile` — `c23b268`
+- [x] **P3.3** Native coordinator loop (D19) with the tool registry from §7.1 — `c23b268`
+- [x] **P3.4** `rigel-mcp` stdio server, scoped by `--session` and `--agent` — `c23b268`
+- [x] **P3.5** Patch pipeline: CAS check, write-ahead journal, fsync, revert — `c23b268`
+- [x] **P3.6** Memory service: committed files, path/secret validator (I7), `memory_index` — `c23b268`
+- [x] **P3.7** Transcript UI: role gutter, collapsed tool lines, inline approvals, streaming text — `c23b268`
+- [x] **P3.8** Budget reserve/account/interrupt, pre-turn quote in the composer, 80% inline prompt, cap editing — `c23b268`
+- [x] **P3.9** Replay from `raw_json` with a raw/debug toggle — `c23b268`
+- [x] **P3.10** Intervention counter in the status bar (`interventions / tasks`) — `c23b268`
+- [x] **P3.11** **Exit test:** $0.25 cap, read three files, patch one; kill mid-turn, relaunch, resume; no patch applied twice and `git diff` is byte-identical — `scripts/p3-exit-test.sh`, results in `docs/qa/p3.md`; `c23b268`
 
 **Not yet:** tool and harness approvals (P4). The native loop's only inline prompt is the 80% cap
 one; `approval` items are stored and rendered, but no adapter can answer them until Phase 4.
