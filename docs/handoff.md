@@ -1193,6 +1193,17 @@ API key**, never a subscription login (D21) — with approvals and normalised ev
 P4.10, then P4.6 (Claude) once an `ANTHROPIC_API_KEY` exists. P4.13–P4.17 come before P4.6: they are
 what makes the approval surface worth having.
 
+**Continuation note (21 Oct 2026):** P4.2 was completed before P4.1 under an explicit user waiver.
+Review implementation commit `45ac7e7` and evidence commit `0905925` before changing it. P4.1 is now
+the next blocking task: add probes for Codex, Claude Code, Cursor and Cline, persist `adapters.json`, and
+render the Settings harness list with install hints. When those cards exist, wire `None` and
+`Subscription` auth modes to the existing P4.2 key status as `Needs API key · <provider>`; do not create
+a second credential path. Preserve env-first lookup, write-only key entry, redacted diagnostics,
+pre-spawn refusal, first-event child termination, direct Codex → `rigel/openai`, and local OmniRoute on
+port 20128 → `rigel/omniroute` injected through `OPENAI_API_KEY`. Tests must use the memory credential
+store and fake processes only. Do not add Cline per-agent configuration before P4.4, and do not rework
+P4.2 unless review identifies a concrete defect.
+
 - [ ] **P4.1** `probe()` for all four, writing `adapters.json`; UI lists missing harnesses with an install hint
 - [x] **P4.2** Per-agent keychain injection; probe reports `auth_mode` and refuses `subscription` (D21) — `45ac7e7`
 - [ ] **P4.3** ACP client: `agent acp`, session updates, `session/request_permission` → approval UI
