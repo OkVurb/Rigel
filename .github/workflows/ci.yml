@@ -36,6 +36,13 @@ jobs:
       - name: Tests
         run: cargo test --workspace
 
+      # The concurrency tests fail on timing, not on logic: they can pass a
+      # hundred runs and fail the one after the change that reintroduced the
+      # race. A single run per push says nothing about them, so repeat them.
+      - name: Concurrency stress
+        shell: bash
+        run: bash scripts/stress-concurrency.sh
+
   ui:
     runs-on: ubuntu-latest
     defaults:
