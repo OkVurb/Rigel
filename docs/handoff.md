@@ -997,13 +997,13 @@ Approvals are bound to an `approval_id` issued by the harness, not to text in th
 
 ## 11. The plan
 
-**State as of 20 Oct 2026:** Phase 0 complete; Phase 1 in progress (4/10); Phases 2–7 unstarted.
+**State as of 20 Oct 2026:** Phase 0 and Phase 1 complete; Phases 2–7 unstarted.
 Run `node scripts/handoff-status.mjs` for live counts; this table is the summary.
 
 | Phase | Scope | State | Items |
 |---|---|---|---|
 | 0 | Prototype | **complete** | 9/9 |
-| 1 | Rust skeleton and storage | in progress | 4/10 |
+| 1 | Rust skeleton and storage | **complete** | 10/10 |
 | 2 | The shelf, real | not started | 0/11 |
 | 3 | Native agent, chat and the bill | not started | 0/11 |
 | 4 | Harness adapters | not started | 0/12 |
@@ -1034,12 +1034,12 @@ harness every later phase depends on.
 - [x] **P1.2** `sqlx` pool, numbered migration runner, `schema_migrations` written transactionally — `af50117`
 - [x] **P1.3** Project database at `0001_init.sql` exactly as §6.2 — `af50117`
 - [x] **P1.4** Index database at `0001_init.sql` as §6.3, including FTS5 triggers — `af50117`
-- [ ] **P1.5** `SessionService`: create, list, end, append turn/item, write checkpoint
-- [ ] **P1.6** Tauri commands `project.open`, `session.start`, `session.list`, `settings.get/set`
-- [ ] **P1.7** UI shell ported to `ui/`: rail, status bar skeleton, Shelf on `MockSkillSource`
-- [ ] **P1.8** CI on a Windows runner: `cargo fmt --check`, `cargo clippy -D warnings`, `cargo test`, `npm run build`
-- [ ] **P1.9** The six non-negotiable tests from §12 exist as `#[ignore]` stubs with names and intent
-- [ ] **P1.10** **Exit test:** open this repo, create a session, restart the app, the session is listed with its original `created_at`
+- [x] **P1.5** `SessionService`: create, list, end, append turn/item, write checkpoint — `e37493b`
+- [x] **P1.6** Tauri commands `project.open`, `session.start`, `session.list`, `settings.get/set` — `e37493b`
+- [x] **P1.7** UI shell ported to `ui/`: rail, status bar skeleton, Shelf on `MockSkillSource` — `e37493b`
+- [x] **P1.8** CI on a Windows runner: `cargo fmt --check`, `cargo clippy -D warnings`, `cargo test`, `npm run build` — `e37493b`
+- [x] **P1.9** The six non-negotiable tests from §12 exist as `#[ignore]` stubs with names and intent — `e37493b`
+- [x] **P1.10** **Exit test:** open this repo, create a session, restart the app, the session is listed with its original `created_at` — `e37493b`
 
 **Not yet:** agents, adapters, MCP, the index migration.
 
