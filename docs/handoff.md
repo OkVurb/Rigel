@@ -134,10 +134,23 @@ verification surface today. Phase 1 changes that (§12).
 - 2,737 skill directories across harnesses; 446 unique catalogue rows; 293 absent from disk.
 - Codex: 5/5 modules installed, hooks resolve. Cursor: hook paths project-relative, degraded.
 - Present: node, npm, python, git, rg, pwsh, wsl. Absent: docker, `GROQ_API_KEY`, `crawl4ai`.
-- GitHub unauthenticated quota: 60 requests/hour.
+- GitHub unauthenticated quota: 60 requests/hour.Do not commit absolute user paths (`C:\Users\<name>\…`) into docs or fixtures. Use `%APPDATA%`,
+`~`, and project-relative paths.
 
-Do not commit absolute user paths (`C:\Users\<name>\…`) into docs or fixtures. Use `%APPDATA%`, `~`,
-and project-relative paths.
+### 2.6 Implemented since §2.1–2.5 (Phases 1–2)
+
+The prototype still exists as the visual reference; the app is now the Rust workspace, and these
+replace the localStorage notes above.
+
+| Surface | Where | Evidence |
+|---|---|---|
+| Session log: sessions, agents, turns, items, checkpoints | `crates/rigel-core/src/session.rs` | `tests/sessions.rs` (5), restart persistence in `docs/qa` for P1.10 |
+| Desktop shell over IPC | `crates/rigel-app/src/lib.rs` | `project.open`, `session.*`, `settings.*`, `skills.*` |
+| Renderer | `ui/src/App.tsx` | shelf wired to the index; browser preview uses sample rows |
+| Global index | `crates/rigel-core/src/skills/index.rs`, `<data dir>/index.db` | FTS5, clusters, evidence; 12 integration tests in `tests/skills.rs` |
+| Skill bodies | `<data dir>/blobs/<sha256>` | never in SQLite (P2.3); `rigel skills gc` reconciles |
+| Sources | `skills/github.rs`, `skills/hub.rs` | GitHub (tree + raw bodies + ETag), SkillsMP, SkillHub |
+| CLI | `crates/rigel-cli/src/main.rs` | `skills search\|get\|index\|status\|sync\|stats\|import\|gc`, all `--json` |
 
 ---
 
@@ -198,7 +211,7 @@ because Rust owns it. The sidecar never touches SQLite, claims, patches or budge
 | Three screens: browser, session, palette | `design-prompt.md` | Four: shelf, session, diff, settings. |
 | `~/.local/share/skill-index/index.db` | `phase-1-plan.md` | Windows-first: `%APPDATA%\Rigel\index.db`. |
 | "Skills plus one agent chat pane" as the week-one slice | Q26 | The slice now includes budget caps and the claim ledger's read side; a chat without a bill is not shippable. |
-| Storage keys `skilldb:` | `README.md` | Kept until Phase 2 migrates localStorage, then deleted. |
+| Storage keys `skilldb:` | `README.md` | Migrated by `rigel skills import` (`docs/migrating-prototype-index.md`); nothing in `crates/` or `ui/` reads or writes them. |
 | Rust-only adapters | this doc, first draft | S3/S4: Rust by default, sidecar where an SDK is the only complete surface. |
 
 ---
@@ -882,9 +895,10 @@ claimant, writer, and a three-way diff against the base.
 ### 8.3 Budgets and the kill switch
 
 ```
+quote(agent, prompt)                    → estimated first-step cost + headroom; advisory only
 reserve(agent, turn, estimated_cents)   → hard fail if session spend + estimate > cap
 account(agent, turn, usage)             → write usage, update agent + session spend
-on turn completion: if session.spend_cents > cap → interrupt every running agent, emit BudgetExceeded
+on each step's usage: if session spend > cap → end the turn there, interrupt every running agent, emit BudgetExceeded
 on hard cap: adapter.interrupt(agent)   → ACP session/cancel, Codex turn interrupt, else SIGTERM
 ```
 
@@ -997,15 +1011,15 @@ Approvals are bound to an `approval_id` issued by the harness, not to text in th
 
 ## 11. The plan
 
-**State as of 20 Oct 2026:** Phase 0 and Phase 1 complete; Phases 2–7 unstarted.
+**State as of 21 Oct 2026:** Phases 0–2 complete; Phases 3–7 unstarted.
 Run `node scripts/handoff-status.mjs` for live counts; this table is the summary.
 
 | Phase | Scope | State | Items |
 |---|---|---|---|
 | 0 | Prototype | **complete** | 9/9 |
 | 1 | Rust skeleton and storage | **complete** | 10/10 |
-| 2 | The shelf, real | not started | 0/11 |
-| 3 | Native agent, chat and the bill | not started | 0/11 |
+| 2 | The shelf, real | **complete** | 11/11 |
+| 3 | Native agent, chat and the bill | **complete** | 11/11 |
 | 4 | Harness adapters | not started | 0/12 |
 | 5 | Claims, attribution, merged diff | not started | 0/8 |
 | 6 | Dependencies and trust | not started | 0/8 |
@@ -1047,17 +1061,20 @@ harness every later phase depends on.
 
 **Goal:** the index becomes the app's own, offline-capable, and queryable by an agent.
 
-- [ ] **P2.1** `trait Source` plus the GitHub source: one tree call, ETag cache, raw bodies
-- [ ] **P2.2** Frontmatter parser and static safety scan ported from `prototype/src/discover.ts`
-- [ ] **P2.3** Content-addressed blob store; bodies never in SQLite
-- [ ] **P2.4** FTS5 search with a documented tiebreak (grade → stars → recency)
-- [ ] **P2.5** SkillsMP and SkillHub connectors returning `SourceStatus` including `stale` + `last_seen_at`
-- [ ] **P2.6** SimHash duplicate clustering; "N variants" UI that never collapses rows
-- [ ] **P2.7** Evidence table with measured/advertised/source/date and an explicit "unmeasured" label
-- [ ] **P2.8** CLI `skills search|get|index --json` with the exit codes from §7.2
-- [ ] **P2.9** One-time migration of the prototype's `skilldb:` localStorage rows, then removal
-- [ ] **P2.10** Shelf wired to real data, including offline and stale states
-- [ ] **P2.11** **Exit test:** with the network off, a search over 40+ matching skills returns in <50 ms from a cold start; re-indexing the same repo makes zero HTTP requests
+- [x] **P2.1** `trait Source` plus the GitHub source: one tree call, ETag cache, raw bodies — `45bdfec`
+- [x] **P2.2** Frontmatter parser and static safety scan ported from `prototype/src/github.ts` — `45bdfec`
+- [x] **P2.3** Content-addressed blob store; bodies never in SQLite — `45bdfec`
+- [x] **P2.4** FTS5 search with a documented tiebreak (grade → stars → recency) — `45bdfec`
+- [x] **P2.5** SkillsMP and SkillHub connectors returning `SourceStatus` including `stale` + `last_seen_at` — `45bdfec`
+- [x] **P2.6** SimHash duplicate clustering; "N variants" UI that never collapses rows — `45bdfec`
+- [x] **P2.7** Evidence table with measured/advertised/source/date and an explicit "unmeasured" label — `45bdfec`
+- [x] **P2.8** CLI `skills search|get|index --json` with the exit codes from §7.2 — `45bdfec`
+- [x] **P2.9** One-time migration of the prototype's `skilldb:` localStorage rows, then removal — `45bdfec`
+- [x] **P2.10** Shelf wired to real data, including offline and stale states — `45bdfec`
+- [x] **P2.11** **Exit test:** with the network off, a search over 40+ matching skills returns in <50 ms from a cold start; re-indexing the same repo makes zero HTTP requests — `45bdfec`, results in `docs/qa/p2.md`
+
+**Not yet:** MinHash and tree-signature clustering (one signal of three), measured evidence
+(Phase 6 produces it), installs (Phase 6), skill tool invocation (Phase 3 for the MCP surface).
 
 **Not yet:** installs (Phase 6), skill tool invocation (Phase 3 for the MCP surface).
 
@@ -1065,17 +1082,20 @@ harness every later phase depends on.
 
 **Goal:** a usable chat pane with tool calls, streaming, cost accounting, budget caps and replay.
 
-- [ ] **P3.1** Model client: streaming SSE, tool-call parsing, retry-with-jitter, `Retry-After`
-- [ ] **P3.2** Cost accounting from response usage, local price fallback, `BudgetService::reconcile`
-- [ ] **P3.3** Native coordinator loop (D19) with the tool registry from §7.1
-- [ ] **P3.4** `rigel-mcp` stdio server, scoped by `--session` and `--agent`
-- [ ] **P3.5** Patch pipeline: CAS check, write-ahead journal, fsync, revert
-- [ ] **P3.6** Memory service: committed files, path/secret validator (I7), `memory_index`
-- [ ] **P3.7** Transcript UI: role gutter, collapsed tool lines, inline approvals, streaming text
-- [ ] **P3.8** Budget reserve/account/interrupt, 80% inline prompt, cap editing
-- [ ] **P3.9** Replay from `raw_json` with a raw/debug toggle
-- [ ] **P3.10** Intervention counter in the status bar (`interventions / tasks`)
-- [ ] **P3.11** **Exit test:** $0.25 cap, read three files, patch one; kill mid-turn, relaunch, resume; no patch applied twice and `git diff` is byte-identical
+- [x] **P3.1** Model client: streaming SSE, tool-call parsing, retry-with-jitter, `Retry-After`
+- [x] **P3.2** Cost accounting from response usage, local price fallback, `BudgetService::reconcile`
+- [x] **P3.3** Native coordinator loop (D19) with the tool registry from §7.1
+- [x] **P3.4** `rigel-mcp` stdio server, scoped by `--session` and `--agent`
+- [x] **P3.5** Patch pipeline: CAS check, write-ahead journal, fsync, revert
+- [x] **P3.6** Memory service: committed files, path/secret validator (I7), `memory_index`
+- [x] **P3.7** Transcript UI: role gutter, collapsed tool lines, inline approvals, streaming text
+- [x] **P3.8** Budget reserve/account/interrupt, pre-turn quote in the composer, 80% inline prompt, cap editing
+- [x] **P3.9** Replay from `raw_json` with a raw/debug toggle
+- [x] **P3.10** Intervention counter in the status bar (`interventions / tasks`)
+- [x] **P3.11** **Exit test:** $0.25 cap, read three files, patch one; kill mid-turn, relaunch, resume; no patch applied twice and `git diff` is byte-identical — `scripts/p3-exit-test.sh`, results in `docs/qa/p3.md`
+
+**Not yet:** tool and harness approvals (P4). The native loop's only inline prompt is the 80% cap
+one; `approval` items are stored and rendered, but no adapter can answer them until Phase 4.
 
 ### Phase 4 — Harness adapters *(3 weeks)*
 

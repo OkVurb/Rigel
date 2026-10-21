@@ -1,0 +1,12 @@
+{
+  "steps": [
+    {
+      "text": "This turn is deliberately expensive: it reports $0.31 against a $0.25 cap.\n",
+      "usage": { "input_tokens": 22000, "output_tokens": 1200, "cost_usd": 0.31 }
+    },
+    {
+      "text": "This step must never be reached: the cap was crossed by the previous usage chunk.\n",
+      "usage": { "input_tokens": 10, "output_tokens": 10, "cost_usd": 0.01 }
+    }
+  ]
+}

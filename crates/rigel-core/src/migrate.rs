@@ -18,18 +18,44 @@ pub struct Migration {
 }
 
 /// `<repo>/.rigel/rigel.db`
-pub const PROJECT_MIGRATIONS: &[Migration] = &[Migration {
-    version: 1,
-    name: "0001_init",
-    sql: include_str!("../../../migrations/project/0001_init.sql"),
-}];
+///
+/// 0002 is Phase 3's: micro-dollar accounting, session skill pins and the turn's stop
+/// reason. 0003 adds the parent link that makes subagent turns attributable without
+/// polluting the top-level transcript. Both say why in their headers.
+pub const PROJECT_MIGRATIONS: &[Migration] = &[
+    Migration {
+        version: 1,
+        name: "0001_init",
+        sql: include_str!("../../../migrations/project/0001_init.sql"),
+    },
+    Migration {
+        version: 2,
+        name: "0002_phase3",
+        sql: include_str!("../../../migrations/project/0002_phase3.sql"),
+    },
+    Migration {
+        version: 3,
+        name: "0003_subagents",
+        sql: include_str!("../../../migrations/project/0003_subagents.sql"),
+    },
+];
 
 /// `%APPDATA%\Rigel\index.db`
-pub const INDEX_MIGRATIONS: &[Migration] = &[Migration {
-    version: 1,
-    name: "0001_init",
-    sql: include_str!("../../../migrations/index/0001_init.sql"),
-}];
+///
+/// 0001 is §6.3 verbatim. 0002 is Phase 2's own additions (fetch cache, blob manifest,
+/// fingerprints) and says why in its header.
+pub const INDEX_MIGRATIONS: &[Migration] = &[
+    Migration {
+        version: 1,
+        name: "0001_init",
+        sql: include_str!("../../../migrations/index/0001_init.sql"),
+    },
+    Migration {
+        version: 2,
+        name: "0002_remote_cache",
+        sql: include_str!("../../../migrations/index/0002_remote_cache.sql"),
+    },
+];
 
 #[derive(Debug, thiserror::Error)]
 pub enum MigrateError {

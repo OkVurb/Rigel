@@ -21,6 +21,7 @@ rigel-core = { path = "../rigel-core" }
 serde = { workspace = true }
 serde_json = { workspace = true }
 tauri = { version = "2", features = [] }
+tokio = { workspace = true }
 toml = "0.8"
 
 [dev-dependencies]
