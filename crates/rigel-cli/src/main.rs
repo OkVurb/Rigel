@@ -17,7 +17,7 @@ use serde_json::json;
 mod harness;
 mod phase3;
 
-use harness::CodexCommand;
+use harness::{CodexCommand, HarnessCommand};
 use phase3::{AgentCommand, KeyCommand, MemoryCommand, PatchCommand};
 
 #[derive(Parser)]
@@ -85,6 +85,12 @@ enum Command {
     Codex {
         #[command(subcommand)]
         command: CodexCommand,
+    },
+
+    /// Every harness on this machine, cached in `adapters.json`.
+    Harness {
+        #[command(subcommand)]
+        command: HarnessCommand,
     },
 
     /// Run the stdio MCP server an adapter injects into an agent.
@@ -303,6 +309,8 @@ async fn main() -> ExitCode {
         Command::Keys { command } => phase3::run_keys(command),
 
         Command::Codex { command } => harness::run_codex(command).await,
+
+        Command::Harness { command } => harness::run_harness(command).await,
 
         Command::Mcp {
             project,

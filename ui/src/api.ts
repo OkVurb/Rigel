@@ -202,6 +202,68 @@ export interface KeyStatus {
   cursor: boolean;
 }
 
+/** One row of `adapters.json` (P4.1). */
+export interface HarnessInfo {
+  harness: "native" | "codex" | "claude" | "cursor" | "cline";
+  installed: boolean;
+  version: string | null;
+  path: string | null;
+  auth_mode: "api_key" | "subscription" | "none";
+  capabilities: {
+    acp: boolean;
+    json_stream: boolean;
+    programmatic_approval: boolean;
+    worktree: boolean;
+    nested_agents: boolean;
+  };
+  provider: string | null;
+  install_hint: string | null;
+}
+
+/** Browser preview only: the shape of a real probe, with this project's recorded versions. */
+const PREVIEW_HARNESSES: HarnessInfo[] = [
+  {
+    harness: "codex",
+    installed: true,
+    version: "0.162.1",
+    path: "C:\\Program Files\\Codex\\codex.exe",
+    auth_mode: "api_key",
+    capabilities: { acp: false, json_stream: true, programmatic_approval: true, worktree: true, nested_agents: false },
+    provider: "omniroute",
+    install_hint: null,
+  },
+  {
+    harness: "claude",
+    installed: true,
+    version: "2.1.251",
+    path: "C:\\Users\\you\\.local\\bin\\claude.exe",
+    auth_mode: "api_key",
+    capabilities: { acp: false, json_stream: true, programmatic_approval: true, worktree: false, nested_agents: true },
+    provider: "anthropic",
+    install_hint: null,
+  },
+  {
+    harness: "cursor",
+    installed: false,
+    version: null,
+    path: null,
+    auth_mode: "none",
+    capabilities: { acp: true, json_stream: true, programmatic_approval: true, worktree: true, nested_agents: false },
+    provider: "cursor",
+    install_hint: "irm 'https://cursor.com/install?win32=true' | iex",
+  },
+  {
+    harness: "cline",
+    installed: false,
+    version: null,
+    path: null,
+    auth_mode: "none",
+    capabilities: { acp: true, json_stream: true, programmatic_approval: true, worktree: true, nested_agents: false },
+    provider: null,
+    install_hint: "npm install -g cline",
+  },
+];
+
 /** The serialised `AgentEvent`; `type` is the discriminator. */
 export type AgentEvent =
   | { type: "turn_started"; session_id: string; agent_id: string; turn_id: string; seq: number; prompt: string | null }
@@ -420,6 +482,12 @@ export const api = {
 
   async revertPatch(id: string): Promise<Patch> {
     return call<Patch>("patch_revert", { id });
+  },
+
+  /** Cached probe rows; `force` re-runs the binaries instead of trusting a fresh cache. */
+  async harnessProbe(force = false): Promise<HarnessInfo[]> {
+    if (!isTauri()) return PREVIEW_HARNESSES;
+    return call<HarnessInfo[]>("harness_probe", { force });
   },
 
   async keyStatus(): Promise<KeyStatus> {

@@ -2941,6 +2941,7 @@ dependencies = [
 name = "rigel-app"
 version = "0.1.0"
 dependencies = [
+ "rigel-adapters",
  "rigel-core",
  "serde",
  "serde_json",

@@ -6,13 +6,15 @@
 
 use std::path::PathBuf;
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 pub mod codex;
+pub mod registry;
 
 pub use codex::{CodexAdapter, CodexConfig, CodexEvent, CodexUsage, Transport, TurnResult};
+pub use registry::{AdapterCache, probe_all, probe_cached};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Harness {
     Native,
@@ -23,7 +25,7 @@ pub enum Harness {
 }
 
 /// How a harness proves who it is. Rigel only ever spawns `ApiKey` (D21).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AuthMode {
     ApiKey,
@@ -124,7 +126,7 @@ mod tests {
     }
 }
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Capabilities {
     pub acp: bool,
     pub json_stream: bool,
@@ -133,7 +135,7 @@ pub struct Capabilities {
     pub nested_agents: bool,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HarnessInfo {
     pub harness: Harness,
     pub installed: bool,
@@ -141,6 +143,14 @@ pub struct HarnessInfo {
     pub path: Option<PathBuf>,
     pub auth_mode: AuthMode,
     pub capabilities: Capabilities,
+    /// Keychain provider named in the UI's `Needs API key · <provider>` line. `None` means the
+    /// harness has no single key to install from this screen (Cline configures providers per
+    /// agent, P4.4).
+    #[serde(default)]
+    pub provider: Option<String>,
+    /// The copy-paste install command, set only while `installed` is false.
+    #[serde(default)]
+    pub install_hint: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

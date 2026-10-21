@@ -1362,6 +1362,50 @@ input {
   gap: 8px;
 }
 
+.harness-list {
+  display: grid;
+  gap: 8px;
+}
+
+.harness-row {
+  display: grid;
+  gap: 4px;
+  padding: 10px 12px;
+  border: 1px solid var(--hairline);
+  border-radius: 6px;
+  background: var(--surface);
+}
+
+.harness-row-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.harness-row-head strong {
+  color: var(--text);
+  font-size: 12px;
+}
+
+.harness-path {
+  display: block;
+  overflow: hidden;
+  color: var(--faint);
+  font-family: var(--mono);
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.harness-row .fine {
+  margin: 0;
+}
+
+.harness-row .needs-key {
+  color: var(--accent);
+}
+
 .harness-key-list {
   display: grid;
   gap: 10px;

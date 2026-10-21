@@ -30,8 +30,8 @@ use tokio::time::{Instant, timeout_at};
 use rigel_core::credentials::{CredentialStore, Secret, get_from};
 
 use crate::{
-    Adapter, AdapterError, ApprovalPolicy, AuthMode, Capabilities, Harness, HarnessInfo,
-    SandboxMode, credential_spec,
+    Adapter, AdapterError, ApprovalPolicy, AuthMode, Harness, HarnessInfo, SandboxMode,
+    credential_spec,
 };
 
 /// The model Rigel defaults to. The `-medium` suffix is OmniRoute's effort convention (Q74).
@@ -254,9 +254,12 @@ impl CodexAdapter {
                 self.config.base_url
             ),
             "model_providers.omniroute.wire_api=\"responses\"".to_string(),
-            // Codex sends the injected OPENAI_API_KEY to the router. OmniRoute currently accepts
-            // unauthenticated loopback requests, but Rigel never relies on that gap (§10, D21).
-            "model_providers.omniroute.requires_openai_auth=true".to_string(),
+            // A custom provider authenticates with the variable it names, and Codex sends that
+            // value as the bearer token. `requires_openai_auth` must stay false here: it selects
+            // Codex's own OpenAI auth (the ChatGPT login in `~/.codex/auth.json`), which is the
+            // subscription reuse D21 forbids, and it bypasses the per-agent environment.
+            "model_providers.omniroute.env_key=\"OPENAI_API_KEY\"".to_string(),
+            "model_providers.omniroute.requires_openai_auth=false".to_string(),
         ]
     }
 
@@ -473,11 +476,8 @@ impl CodexAdapter {
             let Ok(value) = serde_json::from_str::<Value>(&line) else {
                 continue;
             };
-            if is_subscription_exec_event(&value) {
-                let _ = child.kill().await;
-                let _ = child.wait().await;
-                return Err(Failure::RequiresApiKey);
-            }
+            // `exec` has no structured auth event, so the pre-spawn refusal is its only guard;
+            // the app-server transport additionally kills a child that reports a ChatGPT login.
             match classify_exec(&value) {
                 ExecStep::Started { thread } => {
                     thread_id = Some(thread.clone());
@@ -534,52 +534,15 @@ impl Adapter for CodexAdapter {
     }
 
     async fn probe(&self) -> Result<HarnessInfo, AdapterError> {
-        let output = timeout_at(
-            Instant::now() + Duration::from_secs(10),
-            Command::new(&self.config.exe).arg("--version").output(),
-        )
-        .await;
-
-        let (installed, version, path) = match output {
-            Ok(Ok(output)) if output.status.success() => {
-                let stdout = String::from_utf8_lossy(&output.stdout);
-                let version = stdout
-                    .split_whitespace()
-                    .next_back()
-                    .map(|value| value.trim().to_string())
-                    .filter(|value| !value.is_empty());
-                (true, version, Some(resolve_in_path(&self.config.exe)))
-            }
-            _ => (false, None, None),
-        };
-
-        if !installed {
-            return Err(AdapterError::NotInstalled {
-                harness: Harness::Codex,
-            });
-        }
-
-        Ok(HarnessInfo {
-            harness: Harness::Codex,
-            installed,
-            version,
-            path,
-            auth_mode: auth_mode(&self.config),
-            capabilities: Capabilities {
-                acp: false,
-                json_stream: true,
-                programmatic_approval: true,
-                worktree: true,
-                // Codex's item stream does not guarantee nested agent events (§4.2).
-                nested_agents: false,
-            },
-        })
+        // A missing binary is not an error: the probe reports `installed: false` so that Settings
+        // can show an install hint.
+        Ok(crate::registry::probe_codex(&self.config).await)
     }
 }
 
 /// How Codex proves who it is. A loopback URL is not evidence: only an injected, non-empty API
 /// key qualifies. A vendor login file is checked for existence only and classed as Subscription.
-fn auth_mode(config: &CodexConfig) -> AuthMode {
+pub(crate) fn auth_mode(config: &CodexConfig) -> AuthMode {
     let has_key = credential_spec(Harness::Codex, Some(&config.base_url)).is_some_and(|spec| {
         config
             .env
@@ -677,10 +640,6 @@ fn is_subscription_notification(message: &Value) -> bool {
             message["params"].get("authMode").and_then(Value::as_str),
             Some("chatgpt" | "subscription")
         )
-}
-
-fn is_subscription_exec_event(value: &Value) -> bool {
-    value.get("type").and_then(Value::as_str) == Some("auth.subscription")
 }
 
 async fn send(stdin: &mut ChildStdin, id: u64, method: &str, params: Value) -> Result<(), Failure> {
@@ -877,21 +836,6 @@ pub fn resolve_exe(explicit: Option<&Path>) -> PathBuf {
         .unwrap_or_else(|| PathBuf::from(if cfg!(windows) { "codex.exe" } else { "codex" }))
 }
 
-/// Turn a bare command name into the absolute path `probe()` reports. A relative path is
-/// left alone: the caller meant that file.
-fn resolve_in_path(exe: &Path) -> PathBuf {
-    if exe.components().count() > 1 {
-        return exe.to_path_buf();
-    }
-    let Some(path) = std::env::var_os("PATH") else {
-        return exe.to_path_buf();
-    };
-    std::env::split_paths(&path)
-        .map(|dir| dir.join(exe))
-        .find(|candidate| candidate.is_file())
-        .unwrap_or_else(|| exe.to_path_buf())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1021,7 +965,7 @@ mod tests {
         assert!(
             overrides
                 .iter()
-                .any(|pair| pair.contains("requires_openai_auth=true"))
+                .any(|pair| pair.contains("env_key=\"OPENAI_API_KEY\""))
         );
 
         let mut direct = CodexConfig::router(".");

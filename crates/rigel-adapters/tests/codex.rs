@@ -188,5 +188,9 @@ async fn a_missing_binary_is_not_installed() {
     cfg.exe = dir.path().join("does-not-exist");
     let adapter = CodexAdapter::new(cfg);
 
-    assert!(adapter.probe().await.is_err());
+    // P4.1: a missing binary is a reportable row, not an error, so Settings can show a hint.
+    let info = adapter.probe().await.expect("probe reports, never errors");
+    assert!(!info.installed);
+    assert!(info.version.is_none());
+    assert!(info.install_hint.is_some());
 }

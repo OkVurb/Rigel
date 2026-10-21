@@ -623,6 +623,22 @@ fn key_delete(provider: String) -> Result<KeyStatus, String> {
     Ok(current_key_status())
 }
 
+/* ------------------------------- harnesses -------------------------------- */
+
+/// The four harness probes, cached in `adapters.json` and refreshed when a binary changes.
+/// Missing binaries come back as `installed: false` with an install hint, never as an error.
+#[tauri::command]
+fn harness_probe(force: bool) -> Result<Vec<rigel_adapters::HarnessInfo>, String> {
+    let path = index_dir().join(rigel_adapters::registry::CACHE_FILE);
+    let cache = tauri::async_runtime::block_on(rigel_adapters::probe_cached(
+        &path,
+        &credentials::KeychainCredentialStore,
+        force,
+    ))
+    .map_err(message)?;
+    Ok(cache.infos())
+}
+
 /* ------------------------------- omniroute -------------------------------- */
 
 /// Whether the local router answers, and where it lives. This is a short health probe, not a
@@ -738,6 +754,7 @@ pub fn run() {
             key_status,
             key_set,
             key_delete,
+            harness_probe,
             omniroute_status,
             omniroute_start,
             settings_get,

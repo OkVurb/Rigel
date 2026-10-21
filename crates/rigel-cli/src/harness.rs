@@ -9,6 +9,7 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 use clap::Subcommand;
+use rigel_adapters::registry::{self, CACHE_FILE};
 use rigel_adapters::{Adapter, AdapterError, CodexAdapter, CodexConfig, CodexEvent, Transport};
 use rigel_core::credentials::KeychainCredentialStore;
 use serde_json::json;
@@ -43,6 +44,85 @@ pub enum CodexCommand {
         #[arg(long)]
         json: bool,
     },
+}
+
+#[derive(Subcommand)]
+pub enum HarnessCommand {
+    /// Probe all four harnesses, refresh `adapters.json`, and print what was found.
+    Probe {
+        #[arg(long)]
+        json: bool,
+        /// Ignore a still-accurate cache and probe again.
+        #[arg(long)]
+        refresh: bool,
+    },
+}
+
+pub async fn run_harness(command: HarnessCommand) -> ExitCode {
+    match command {
+        HarnessCommand::Probe { json, refresh } => probe_harnesses(json, refresh).await,
+    }
+}
+
+async fn probe_harnesses(as_json: bool, refresh: bool) -> ExitCode {
+    let path = rigel_core::default_index_dir().join(CACHE_FILE);
+    let cache = match rigel_adapters::probe_cached(&path, &KeychainCredentialStore, refresh).await {
+        Ok(cache) => cache,
+        Err(error) => {
+            eprintln!("rigel: could not write {}: {error}", path.display());
+            return ExitCode::from(2);
+        }
+    };
+
+    if as_json {
+        println!(
+            "{}",
+            json!({
+                "ok": true,
+                "path": path,
+                "probed_at": cache.probed_at,
+                "harnesses": cache.infos(),
+            })
+        );
+        return ExitCode::SUCCESS;
+    }
+
+    for info in cache.infos() {
+        let name = registry::display_name(info.harness);
+        match (info.installed, info.version.as_deref()) {
+            (true, Some(version)) => println!(
+                "{name:<12} {version:<10} {:<13} {}",
+                auth_label(info.auth_mode),
+                info.path
+                    .map(|path| path.display().to_string())
+                    .unwrap_or_default()
+            ),
+            (true, None) => println!(
+                "{name:<12} {:<10} {:<13} {}",
+                "unknown",
+                auth_label(info.auth_mode),
+                info.path
+                    .map(|path| path.display().to_string())
+                    .unwrap_or_default()
+            ),
+            (false, _) => println!(
+                "{name:<12} {:<10} {:<13} install: {}",
+                "missing",
+                auth_label(info.auth_mode),
+                info.install_hint.unwrap_or_default()
+            ),
+        }
+    }
+    println!("\n  cached in {}", path.display());
+    ExitCode::SUCCESS
+}
+
+fn auth_label(mode: rigel_adapters::AuthMode) -> &'static str {
+    match mode {
+        rigel_adapters::AuthMode::ApiKey => "api key",
+        rigel_adapters::AuthMode::Subscription => "subscription",
+        rigel_adapters::AuthMode::None => "no key",
+    }
 }
 
 pub async fn run_codex(command: CodexCommand) -> ExitCode {

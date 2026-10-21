@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 
 import {
   api,
+  type HarnessInfo,
   type KeyStatus,
   type OmnirouteStatus,
   type Settings,
@@ -37,6 +38,7 @@ const HARNESS_KEYS = [
     name: "OpenAI",
     env: "OPENAI_API_KEY",
     placeholder: "sk-…",
+    note: "Direct Codex only; on the local router Codex uses the OmniRoute entry.",
   },
   {
     id: "anthropic",
@@ -44,6 +46,7 @@ const HARNESS_KEYS = [
     name: "Anthropic",
     env: "ANTHROPIC_API_KEY",
     placeholder: "sk-ant-…",
+    note: "Claude Code receives this key at spawn.",
   },
   {
     id: "cursor",
@@ -51,10 +54,59 @@ const HARNESS_KEYS = [
     name: "Cursor",
     env: "CURSOR_API_KEY",
     placeholder: "key-…",
+    note: "The Cursor CLI receives this key at spawn.",
   },
 ] as const;
 
 type HarnessKey = (typeof HARNESS_KEYS)[number];
+
+const HARNESS_LABELS: Record<HarnessInfo["harness"], string> = {
+  native: "Rigel",
+  codex: "Codex",
+  claude: "Claude Code",
+  cursor: "Cursor",
+  cline: "Cline",
+};
+
+/**
+ * The auth line the handoff requires: a harness that is not on an API key says so, and names the
+ * keychain entry that would fix it. A subscription is never presented as usable (D21).
+ */
+function authCopy(info: HarnessInfo): string {
+  if (info.auth_mode === "api_key") {
+    return info.provider ? `API key · ${info.provider}` : "API key";
+  }
+  if (info.auth_mode === "subscription") {
+    return info.provider
+      ? `Needs API key · ${info.provider} — the vendor login is never reused`
+      : "Needs API key — the vendor login is never reused";
+  }
+  if (info.provider) return `Needs API key · ${info.provider}`;
+  return "Provider keys arrive with the Cline adapter (P4.4)";
+}
+
+function HarnessRow({ info }: { info: HarnessInfo }) {
+  return (
+    <div className="harness-row">
+      <div className="harness-row-head">
+        <strong>{HARNESS_LABELS[info.harness]}</strong>
+        <span className={`pill ${info.installed ? "completed" : "cancelled"}`}>
+          {info.installed ? (info.version ?? "installed") : "not installed"}
+        </span>
+      </div>
+      {info.installed ? (
+        <code className="harness-path">{info.path ?? "on PATH"}</code>
+      ) : (
+        <p className="fine">
+          Install: <code>{info.install_hint ?? "not on PATH"}</code>
+        </p>
+      )}
+      <p className={`fine ${info.auth_mode === "api_key" ? "" : "needs-key"}`}>
+        {authCopy(info)}
+      </p>
+    </div>
+  );
+}
 
 function HarnessKeyRow({
   item,
@@ -154,6 +206,8 @@ function HarnessKeyRow({
         ) : (
           <>
             Write-only entry <code>rigel/{item.id}</code>. Headless: <code>{item.env}</code>.
+            <br />
+            {item.note}
           </>
         )}
       </p>
@@ -176,6 +230,8 @@ export default function SettingsView({ keys, onKeys, onNotice }: Props) {
   const [settings, setSettings] = useState<Settings | null>(null);
   const [server, setServer] = useState<OmnirouteStatus | null>(null);
   const [serverBusy, setServerBusy] = useState(false);
+  const [harnesses, setHarnesses] = useState<HarnessInfo[] | null>(null);
+  const [probing, setProbing] = useState(false);
 
   const provider = settings?.provider ?? "omniroute";
   const providerInfo = PROVIDERS.find((item) => item.id === provider) ?? PROVIDERS[0];
@@ -191,10 +247,32 @@ export default function SettingsView({ keys, onKeys, onNotice }: Props) {
       .omnirouteStatus()
       .then((next) => live && setServer(next))
       .catch(() => live && setServer(null));
+    api
+      .harnessProbe(false)
+      .then((next) => live && setHarnesses(next))
+      .catch(() => live && setHarnesses(null));
     return () => {
       live = false;
     };
   }, []);
+
+  const refreshHarnesses = async (force = false) => {
+    setProbing(force);
+    try {
+      setHarnesses(await api.harnessProbe(force));
+    } catch {
+      setHarnesses(null);
+    } finally {
+      setProbing(false);
+    }
+  };
+
+  // A stored or deleted key changes the auth line immediately; the probe only needs to
+  // re-classify, not re-run the binaries.
+  const applyKeys = (status: KeyStatus) => {
+    onKeys(status);
+    void refreshHarnesses();
+  };
 
   const choose = async (id: string) => {
     if (!settings || settings.provider === id) return;
@@ -435,6 +513,32 @@ export default function SettingsView({ keys, onKeys, onNotice }: Props) {
 
         <section className="settings-section">
           <div className="settings-head">
+            <h3>Harnesses</h3>
+            <button
+              className="chip"
+              onClick={() => void refreshHarnesses(true)}
+              disabled={probing}
+            >
+              {probing ? "Probing\u2026" : "Probe again"}
+            </button>
+          </div>
+          <p className="fine">
+            Detected from <code>--version</code> and cached in <code>adapters.json</code>, which is
+            re-probed when a binary changes.
+          </p>
+          {harnesses ? (
+            <div className="harness-list">
+              {harnesses.map((info) => (
+                <HarnessRow key={info.harness} info={info} />
+              ))}
+            </div>
+          ) : (
+            <p className="fine">The probe is unavailable in this window.</p>
+          )}
+        </section>
+
+        <section className="settings-section">
+          <div className="settings-head">
             <h3>Harness keys</h3>
             <span className="pill cancelled">API keys only</span>
           </div>
@@ -448,7 +552,7 @@ export default function SettingsView({ keys, onKeys, onNotice }: Props) {
                 key={item.id}
                 item={item}
                 present={keys?.[item.id] ?? false}
-                onKeys={onKeys}
+                onKeys={applyKeys}
                 onNotice={onNotice}
               />
             ))}
