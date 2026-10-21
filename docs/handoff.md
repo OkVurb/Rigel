@@ -411,7 +411,7 @@ requires.
 PRAGMA journal_mode = WAL;
 PRAGMA foreign_keys = ON;
 
-CREATE TABLE schema_migrations (
+CREATE TABLE IF NOT EXISTS schema_migrations (
   version    INTEGER PRIMARY KEY,
   name       TEXT NOT NULL,
   applied_at INTEGER NOT NULL
@@ -997,13 +997,13 @@ Approvals are bound to an `approval_id` issued by the harness, not to text in th
 
 ## 11. The plan
 
-**State as of 20 Oct 2026:** Phase 0 complete; Phases 1–7 unstarted.
+**State as of 20 Oct 2026:** Phase 0 complete; Phase 1 in progress (4/10); Phases 2–7 unstarted.
 Run `node scripts/handoff-status.mjs` for live counts; this table is the summary.
 
 | Phase | Scope | State | Items |
 |---|---|---|---|
 | 0 | Prototype | **complete** | 9/9 |
-| 1 | Rust skeleton and storage | not started | 0/10 |
+| 1 | Rust skeleton and storage | in progress | 4/10 |
 | 2 | The shelf, real | not started | 0/11 |
 | 3 | Native agent, chat and the bill | not started | 0/11 |
 | 4 | Harness adapters | not started | 0/12 |
@@ -1030,10 +1030,10 @@ Phases are sequential. Every item has an ID; tick it in the commit that finishes
 **Goal:** a Tauri app that opens, creates a project, stores a session and reads it back — with the test
 harness every later phase depends on.
 
-- [ ] **P1.1** Cargo workspace: `rigel-core`, `rigel-adapters`, `rigel-mcp`, `rigel-cli`, `rigel-app`; empty traits compile
-- [ ] **P1.2** `sqlx` pool, numbered migration runner, `schema_migrations` written transactionally
-- [ ] **P1.3** Project database at `0001_init.sql` exactly as §6.2
-- [ ] **P1.4** Index database at `0001_init.sql` as §6.3, including FTS5 triggers
+- [x] **P1.1** Cargo workspace: `rigel-core`, `rigel-adapters`, `rigel-mcp`, `rigel-cli`, `rigel-app`; empty traits compile — `af50117`
+- [x] **P1.2** `sqlx` pool, numbered migration runner, `schema_migrations` written transactionally — `af50117`
+- [x] **P1.3** Project database at `0001_init.sql` exactly as §6.2 — `af50117`
+- [x] **P1.4** Index database at `0001_init.sql` as §6.3, including FTS5 triggers — `af50117`
 - [ ] **P1.5** `SessionService`: create, list, end, append turn/item, write checkpoint
 - [ ] **P1.6** Tauri commands `project.open`, `session.start`, `session.list`, `settings.get/set`
 - [ ] **P1.7** UI shell ported to `ui/`: rail, status bar skeleton, Shelf on `MockSkillSource`
