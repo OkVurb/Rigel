@@ -152,6 +152,23 @@ async fn a_subscription_identity_is_killed_at_the_first_event() {
 }
 
 #[tokio::test]
+async fn an_init_without_a_key_source_is_refused() {
+    let dir = tempfile::tempdir().unwrap();
+    let error = run(with_mode(config(dir.path()), "missing-source"), None)
+        .await
+        .expect_err("a missing source must not be treated as an API key");
+    assert!(
+        matches!(
+            error,
+            AdapterError::RequiresApiKey {
+                harness: Harness::Claude
+            }
+        ),
+        "unexpected: {error}"
+    );
+}
+
+#[tokio::test]
 async fn the_key_never_reaches_an_event() {
     let dir = tempfile::tempdir().unwrap();
     let seen = Arc::new(Mutex::new(Vec::new()));

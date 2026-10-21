@@ -241,20 +241,28 @@ impl ClaudeAdapter {
                     model,
                     api_key_source,
                 } => {
-                    if let Some(source) = api_key_source.as_deref()
-                        && source != ACCEPTED_KEY_SOURCE
-                    {
+                    // Only the documented source is acceptable. Absent counts as unacceptable:
+                    // with `--bare` the CLI always reports one, and a silent absence would be
+                    // indistinguishable from a subscription turn (D21).
+                    if api_key_source.as_deref() != Some(ACCEPTED_KEY_SOURCE) {
                         let _ = child.kill().await;
-                        let _ = child.wait().await;
+                        let _ = wait_bounded(&mut child).await;
                         return Err(AdapterError::RequiresApiKey {
                             harness: Harness::Claude,
                         });
                     }
-                    session_id = Some(crate::redact(&id, &secrets));
-                    on_event(ClaudeEvent::Started {
-                        session_id: crate::redact(&id, &secrets),
-                        model,
-                    });
+                    if !id.is_empty() {
+                        session_id = Some(crate::redact(&id, &secrets));
+                        on_event(ClaudeEvent::Started {
+                            session_id: crate::redact(&id, &secrets),
+                            model,
+                        });
+                    } else {
+                        on_event(ClaudeEvent::Started {
+                            session_id: String::new(),
+                            model,
+                        });
+                    }
                 }
                 Step::Delta(delta) => {
                     emitted = true;
@@ -463,21 +471,23 @@ enum Step {
 fn classify(value: &Value) -> Step {
     match value.get("type").and_then(Value::as_str) {
         Some("system") => match value.get("subtype").and_then(Value::as_str) {
-            Some("init") => value
-                .get("session_id")
-                .and_then(Value::as_str)
-                .map(|session_id| Step::Init {
-                    session_id: session_id.to_string(),
-                    model: value
-                        .get("model")
-                        .and_then(Value::as_str)
-                        .map(str::to_string),
-                    api_key_source: value
-                        .get("apiKeySource")
-                        .and_then(Value::as_str)
-                        .map(str::to_string),
-                })
-                .unwrap_or(Step::Ignore),
+            // Even a malformed init still carries the auth source, so it is classified rather
+            // than dropped: a missing field must not become a licence to use the vendor login.
+            Some("init") => Step::Init {
+                session_id: value
+                    .get("session_id")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_string(),
+                model: value
+                    .get("model")
+                    .and_then(Value::as_str)
+                    .map(str::to_string),
+                api_key_source: value
+                    .get("apiKeySource")
+                    .and_then(Value::as_str)
+                    .map(str::to_string),
+            },
             Some("status") => {
                 let message = value
                     .get("message")

@@ -32,6 +32,16 @@ impl Approver for Recorded {
     }
 }
 
+/// An approver that never answers, standing in for a UI that has not rendered the prompt yet.
+struct NeverAnswers;
+
+#[async_trait]
+impl Approver for NeverAnswers {
+    async fn approve(&self, _request: &ApprovalRequest) -> ApprovalDecision {
+        std::future::pending().await
+    }
+}
+
 fn config(cwd: &Path, mode: Option<&str>) -> AcpConfig {
     let mut config = AcpConfig::cursor(cwd);
     config.exe = fake_path();
@@ -191,6 +201,33 @@ async fn a_turn_that_hangs_is_cancelled_and_reported() {
         recorded(dir.path()).contains("cancel=received"),
         "the agent must be told to stop: {}",
         recorded(dir.path())
+    );
+}
+
+#[tokio::test]
+async fn a_cancelled_turn_answers_its_pending_permission() {
+    let dir = tempfile::tempdir().unwrap();
+    let approver: Arc<dyn Approver> = Arc::new(NeverAnswers);
+    let mut config = config(dir.path(), Some("permission-hang"));
+    config.timeout = Duration::from_millis(600);
+    let mut client = AcpClient::spawn(config, approver)
+        .await
+        .expect("the agent should initialize");
+    client.new_session().await.unwrap();
+    let error = client
+        .prompt("delete build", |_| {})
+        .await
+        .expect_err("the permission request never resolves");
+
+    assert!(
+        error.to_string().contains("timed out and was cancelled"),
+        "unexpected: {error}"
+    );
+    let record = recorded(dir.path());
+    assert!(record.contains("cancel=received"), "{record}");
+    assert!(
+        record.contains(r#"outcome={"outcome":"cancelled"}"#),
+        "the pending request must be answered with cancelled: {record}"
     );
 }
 

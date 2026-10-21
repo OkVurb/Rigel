@@ -9,6 +9,7 @@
 //!   must kill it);
 //! - `echo-key`: the answer contains the injected key, to prove redaction;
 //! - `error`: a `result` with `is_error`, the way a blocked tool call reports;
+//! - `missing-source`: an init line with no `apiKeySource` at all;
 //! - `silent`: print nothing and exit 3;
 //! - `partial`: an answer, then exit 0 without the closing `result` line.
 //!
@@ -36,6 +37,7 @@ fn main() {
         "subscription" => subscription(),
         "echo-key" => echo_key(),
         "error" => error(),
+        "missing-source" => missing_source(),
         "silent" => std::process::exit(3),
         // A truncated stream: an answer, then exit 0 with no `result` line.
         "partial" => {
@@ -102,6 +104,18 @@ fn ok() {
 fn subscription() {
     init("none");
     std::thread::sleep(std::time::Duration::from_secs(30));
+}
+
+fn missing_source() {
+    emit(json!({
+        "type": "system",
+        "subtype": "init",
+        "session_id": "cs-1",
+        "model": "free-stack"
+    }));
+    delta("po");
+    assistant("pong");
+    result("pong");
 }
 
 fn echo_key() {

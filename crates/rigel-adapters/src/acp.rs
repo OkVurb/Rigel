@@ -22,12 +22,12 @@
 //! surface. Unrecognised session updates surface as [`AcpEvent::Unmapped`] rather than being
 //! dropped — the hook P4.8 builds its ten-item normalisation on.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 use std::fmt;
 use std::path::PathBuf;
 use std::process::Stdio;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
@@ -283,8 +283,13 @@ pub struct AcpClient {
     secrets: Vec<Secret>,
     timeout: Duration,
     session_id: Option<String>,
+    /// Permission requests awaiting an answer, so a cancel can answer them as ACP requires.
+    pending: Pending,
     finished: bool,
 }
+
+/// Ids of `session/request_permission` requests that have no response yet.
+type Pending = Arc<Mutex<HashSet<u64>>>;
 
 impl fmt::Debug for AcpClient {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -354,6 +359,7 @@ impl AcpClient {
 
         let (outbound, outbound_rx) = mpsc::unbounded_channel();
         let (incoming_tx, incoming) = mpsc::unbounded_channel();
+        let pending: Pending = Arc::new(Mutex::new(HashSet::new()));
         tokio::spawn(writer(stdin, outbound_rx));
         tokio::spawn(reader(
             stdout,
@@ -361,6 +367,7 @@ impl AcpClient {
             outbound.clone(),
             approver,
             secrets.clone(),
+            pending.clone(),
         ));
 
         let mut client = Self {
@@ -373,6 +380,7 @@ impl AcpClient {
             secrets,
             timeout: config.timeout,
             session_id: None,
+            pending,
             finished: false,
         };
 
@@ -555,6 +563,20 @@ impl AcpClient {
                 "params": { "sessionId": session_id }
             }));
         }
+        // ACP requires every pending permission request to be answered with `cancelled`. Draining
+        // first also stops a late approver task from sending a second, conflicting answer.
+        let pending: Vec<u64> = self
+            .pending
+            .lock()
+            .map(|mut pending| pending.drain().collect())
+            .unwrap_or_default();
+        for id in pending {
+            let _ = self.send(json!({
+                "jsonrpc": "2.0",
+                "id": id,
+                "result": { "outcome": { "outcome": "cancelled" } }
+            }));
+        }
     }
 
     pub async fn kill(&mut self) {
@@ -642,7 +664,9 @@ impl AcpClient {
                     .get("status")
                     .and_then(Value::as_str)
                     .map(str::to_string),
-                raw_input: update.get("rawInput").cloned(),
+                raw_input: update
+                    .get("rawInput")
+                    .map(|raw| redact_json(raw, &self.secrets)),
             }),
             "tool_call_update" => Some(AcpEvent::ToolCallUpdate {
                 tool_call_id: update
@@ -760,6 +784,26 @@ impl Adapter for AcpConfig {
     }
 }
 
+/// Redact a JSON value's strings in place. Tool arguments reach the approval UI and the
+/// transcript, so they get the same treatment as message text.
+fn redact_json(value: &Value, secrets: &[Secret]) -> Value {
+    match value {
+        Value::String(text) => Value::String(crate::redact(text, secrets)),
+        Value::Array(items) => Value::Array(
+            items
+                .iter()
+                .map(|item| redact_json(item, secrets))
+                .collect(),
+        ),
+        Value::Object(map) => Value::Object(
+            map.iter()
+                .map(|(key, value)| (key.clone(), redact_json(value, secrets)))
+                .collect(),
+        ),
+        other => other.clone(),
+    }
+}
+
 fn content_text(content: &Value) -> Option<String> {
     let blocks = content.as_array()?;
     let texts: Vec<String> = blocks
@@ -794,6 +838,7 @@ async fn reader(
     outbound: mpsc::UnboundedSender<String>,
     approver: Arc<dyn Approver>,
     secrets: Vec<Secret>,
+    pending: Pending,
 ) {
     let mut lines = BufReader::new(stdout).lines();
     while let Ok(Some(line)) = lines.next_line().await {
@@ -821,8 +866,14 @@ async fn reader(
                 let request = approval_from(&params, &secrets);
                 let approver = approver.clone();
                 let outbound = outbound.clone();
+                let pending = pending.clone();
+                pending.lock().expect("pending lock").insert(id);
                 tokio::spawn(async move {
                     let decision = approver.approve(&request).await;
+                    // `cancel()` may have answered this request already; never answer twice.
+                    if !pending.lock().expect("pending lock").remove(&id) {
+                        return;
+                    }
                     let outcome = outcome_for(&request.options, decision);
                     let response = json!({
                         "jsonrpc": "2.0",
@@ -877,7 +928,9 @@ fn approval_from(params: &Value, secrets: &[Secret]) -> ApprovalRequest {
             .get("kind")
             .and_then(Value::as_str)
             .map(str::to_string),
-        raw_input: tool_call.get("rawInput").cloned(),
+        raw_input: tool_call
+            .get("rawInput")
+            .map(|raw| redact_json(raw, secrets)),
         options: params["options"]
             .as_array()
             .map(|options| {

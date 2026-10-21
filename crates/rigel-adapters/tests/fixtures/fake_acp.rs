@@ -5,7 +5,9 @@
 //!   tool call, wait for the decision, then finish with `end_turn`;
 //! - `reject-only`: offer only `reject_once`, which the client must answer with `cancelled`;
 //! - `wrong-version`: answer with protocol version 99, which the client must refuse;
-//! - `wait-cancel`: stream one chunk, then wait for `session/cancel` and answer `cancelled`.
+//! - `wait-cancel`: stream one chunk, then wait for `session/cancel` and answer `cancelled`;
+//! - `permission-hang`: ask permission and never resolve it, so the client's cancel must answer
+//!   the pending request with `cancelled`.
 //!
 //! `FAKE_ACP_RECORD` names a file that receives what the client sent: its argv, whether the
 //! injected key was visible, and the permission outcome it received.
@@ -99,6 +101,48 @@ fn main() {
                                     == Some("session/cancel")
                                 {
                                     record(&record_path, "cancel=received");
+                                    respond_value(&prompt_id, json!({ "stopReason": "cancelled" }));
+                                    return;
+                                }
+                            }
+                            _ => return,
+                        }
+                    }
+                }
+                if mode == "permission-hang" {
+                    update(
+                        "agent_message_chunk",
+                        json!({ "content": { "type": "text", "text": "waiting for consent" } }),
+                    );
+                    emit(json!({
+                        "jsonrpc": "2.0",
+                        "id": 901,
+                        "method": "session/request_permission",
+                        "params": {
+                            "sessionId": "sess-1",
+                            "toolCall": { "toolCallId": "call-2", "title": "Delete build", "kind": "delete" },
+                            "options": [
+                                { "optionId": "allow", "name": "Allow", "kind": "allow_once" },
+                                { "optionId": "deny", "name": "Deny", "kind": "reject_once" }
+                            ]
+                        }
+                    }));
+                    loop {
+                        match lines.next() {
+                            Some(Ok(line)) => {
+                                let Ok(message) = serde_json::from_str::<Value>(&line) else {
+                                    continue;
+                                };
+                                if message.get("method").and_then(Value::as_str)
+                                    == Some("session/cancel")
+                                {
+                                    record(&record_path, "cancel=received");
+                                }
+                                if message.get("id").and_then(Value::as_u64) == Some(901) {
+                                    record(
+                                        &record_path,
+                                        &format!("outcome={}", message["result"]["outcome"]),
+                                    );
                                     respond_value(&prompt_id, json!({ "stopReason": "cancelled" }));
                                     return;
                                 }
