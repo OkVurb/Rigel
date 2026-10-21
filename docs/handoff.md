@@ -207,6 +207,7 @@ replace the localStorage notes above.
 | D38 | A pre-destructive snapshot is a **git object plus a file copy, not a restore point**: `git stash create` captures tracked changes without touching the index or the worktree, untracked non-ignored files are copied, and `rigel snapshot restore <id>` rebuilds the tree. A Windows restore point is rejected — it rolls back system files and registry and explicitly leaves personal files alone, so it would protect everything except the work at risk. | §15.5 |
 | D39 | Codex's upstream is the **router**, confirmed by probe on 21 Oct (both `exec --json` and app-server passed with `wire_api="responses"`). Rigel writes the `-c` provider overrides itself — never `omniroute run`/`launch-codex`, which is broken here — and `codex.upstream` (`router` or `openai`) is a per-agent setting with **no silent fallback**: a down upstream refuses with a fix-it message (D27). | §15.5 |
 | D40 | Agent visibility is a **roster plus one split pane**: the roster lists every agent with spend and claims, and at most two transcripts sit side by side. No grids, no tabs. | §15.5 |
+| D41 | **SQLite locking is explicit.** WAL is set **once per file** when the store opens, never as a per-connection pragma: sqlx re-applies requested pragmas on every connection, and the journal-mode pragma takes an exclusive lock that `busy_timeout` cannot wait for — so a second opener fails at connect, and the attempt can invalidate a read snapshot mid-transaction. Any transaction that **reads before it writes** opens with `BEGIN IMMEDIATE`; a write-first transaction may stay deferred. | 21 Oct, storage audit |
 
 ### 3.2 Stack
 
@@ -485,6 +486,13 @@ distilled, reviewed artifact that should travel. This is the interpretation of Q
 requires.
 
 ### 6.2 Project database (DDL, migration 0001)
+
+**Locking (D41).** WAL is a property of the file, not of a connection. `Store::open` sets it once
+and retries if another process is holding the file; it is never requested through the connect
+options, because sqlx applies requested pragmas on every connection it opens and that pragma
+takes a lock `busy_timeout` cannot wait for. Migrations and `BudgetService::account` — both of
+which read before they write — open with `BEGIN IMMEDIATE`, so a competing writer waits instead
+of invalidating their snapshot.
 
 ```sql
 PRAGMA journal_mode = WAL;
