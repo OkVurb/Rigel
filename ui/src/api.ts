@@ -16,6 +16,7 @@ export interface Session {
   status: "active" | "idle" | "interrupted" | "ended";
   budget_cents: number | null;
   spend_cents: number;
+  spend_micros: number;
   interventions: number;
   tasks_done: number;
   created_at: number;
@@ -32,7 +33,184 @@ export interface Settings {
   theme: string;
   default_budget_cents: number;
   unattended_default: boolean;
+  /** `omniroute` (local router) or `openrouter`. */
+  provider: string;
+  model: string;
 }
+
+/** Live state of the local OmniRoute router. `origin` is where it listens. */
+export interface OmnirouteStatus {
+  running: boolean;
+  origin: string;
+  base_url: string;
+}
+
+export interface Agent {
+  id: string;
+  session_id: string;
+  harness: string;
+  role: string | null;
+  model: string | null;
+  status: "starting" | "running" | "idle" | "exited" | "failed" | string;
+  started_at: number;
+  spend_cents: number;
+  spend_micros: number;
+  tokens_in: number;
+  tokens_out: number;
+}
+
+export interface Usage {
+  input_tokens: number;
+  cached_input_tokens: number;
+  output_tokens: number;
+  reasoning_tokens: number;
+  /** Micro-dollars. This is the bill; cents are only for display. */
+  cost_micros: number;
+  provider_micros: number | null;
+  source: "provider" | "estimated";
+}
+
+export interface Turn {
+  id: string;
+  agent_id: string;
+  /** Set when a subagent ran this turn on behalf of a parent turn. */
+  parent_turn_id: string | null;
+  seq: number;
+  status: "running" | "completed" | "failed" | "cancelled" | string;
+  prompt: string | null;
+  started_at: number;
+  completed_at: number | null;
+  usage: Usage | null;
+  stop_reason: string | null;
+}
+
+export interface Item {
+  id: string;
+  turn_id: string;
+  seq: number;
+  kind: "message" | "reasoning" | "command" | "file_change" | "mcp_call" | "web_search" | "plan" | "approval" | "usage" | "error" | string;
+  status: string;
+  body: Record<string, unknown>;
+  created_at: number;
+  raw?: unknown;
+}
+
+export interface TurnTranscript {
+  turn: Turn;
+  items: Item[];
+}
+
+export interface BudgetSnapshot {
+  session_id: string;
+  agent_id: string;
+  session_micros: number;
+  agent_micros: number;
+  cap_micros: number | null;
+  remaining_micros: number | null;
+  session_cents: number;
+  agent_cents: number;
+  cap_cents: number | null;
+  remaining_cents: number | null;
+}
+
+export interface Patch {
+  id: string;
+  session_id: string;
+  agent_id: string;
+  path: string;
+  base_hash: string;
+  result_hash: string;
+  diff: string;
+  status: "proposed" | "applied" | "reverted" | "conflicted" | string;
+  created_at: number;
+  applied_at: number | null;
+  reverted_at: number | null;
+}
+
+export interface Recovery {
+  patch_id: string;
+  path: string;
+  state: "applied" | "pending" | "conflicted";
+}
+
+export interface ResumeOutcome {
+  session: Session;
+  clean: boolean;
+  tree_hash: string;
+  checkpoint: { id: string; tree_hash: string; created_at: number } | null;
+  closed_turns: Turn[];
+  patches: Recovery[];
+  reconcile: {
+    session_id: string;
+    session_recorded_micros: number;
+    session_summed_micros: number;
+    ok: boolean;
+  };
+}
+
+export interface TurnReply {
+  turn: Turn;
+  budget_cents: number | null;
+}
+
+/**
+ * A pre-turn estimate from Rust: what the first model call should cost, and the headroom.
+ * Advisory — `reserve` and the cap remain the authority.
+ */
+export interface TurnQuote {
+  model: string;
+  input_tokens: number;
+  output_tokens: number;
+  first_step_micros: number;
+  spend_micros: number;
+  cap_micros: number | null;
+  remaining_micros: number | null;
+  over_remaining: boolean;
+  reserve_micros: number;
+}
+
+/**
+ * Browser-preview prices only. The desktop app asks Rust, where `agent/pricing.rs` owns the
+ * table; these numbers exist so the composer can be inspected without a Tauri host.
+ */
+const PREVIEW_PRICE = { input: 3, output: 15 }; // anthropic/claude-sonnet-4.5
+const PREVIEW_CONTEXT_CHARS = 1_800; // system prompt + tool schemas, roughly
+
+function previewQuote(prompt: string, spendMicros: number, capMicros: number | null): TurnQuote {
+  const inputTokens = Math.ceil((PREVIEW_CONTEXT_CHARS + prompt.length) / 4);
+  const outputTokens = Math.min(2_048, Math.max(256, Math.floor(inputTokens / 2)));
+  const firstStep = Math.round(inputTokens * PREVIEW_PRICE.input + outputTokens * PREVIEW_PRICE.output);
+  const remaining = capMicros === null ? null : capMicros - spendMicros;
+  return {
+    model: "anthropic/claude-sonnet-4.5",
+    input_tokens: inputTokens,
+    output_tokens: outputTokens,
+    first_step_micros: firstStep,
+    spend_micros: spendMicros,
+    cap_micros: capMicros,
+    remaining_micros: remaining,
+    over_remaining: remaining !== null && firstStep > remaining,
+    reserve_micros: 10_000,
+  };
+}
+
+export interface KeyStatus {
+  openrouter: boolean;
+  omniroute: boolean;
+}
+
+/** The serialised `AgentEvent`; `type` is the discriminator. */
+export type AgentEvent =
+  | { type: "turn_started"; session_id: string; agent_id: string; turn_id: string; seq: number; prompt: string | null }
+  | { type: "delta"; turn_id: string; kind: string; text: string }
+  | { type: "item"; item: Item }
+  | { type: "turn_finished"; turn_id: string; status: string; stop: string; usage: Usage; session_spend_micros: number; cap_micros: number | null }
+  | { type: "budget_warning"; session_id: string; spend_micros: number; cap_micros: number; remaining_micros: number }
+  | { type: "budget_exceeded"; session_id: string; spend_micros: number; cap_micros: number }
+  | { type: "approval_requested"; approval_id: string; kind: string; detail: unknown }
+  | { type: "approval_resolved"; approval_id: string; decision: string }
+  | { type: "session_updated"; session: Session }
+  | { type: "error"; turn_id: string | null; message: string };
 
 export type Grade = "A" | "B" | "C" | "D" | "F";
 
@@ -148,16 +326,146 @@ export const api = {
     return call<Session[]>("session_list", { project });
   },
 
-  async startSession(project: string, title?: string): Promise<Session> {
+  async startSession(project: string, title?: string, budgetCents?: number | null): Promise<Session> {
     if (!isTauri()) throw new Error("Start a session from the desktop app, not the browser preview.");
-    return call<Session>("session_start", { project, title: title ?? null, budgetCents: null });
+    return call<Session>("session_start", {
+      project,
+      title: title ?? null,
+      budgetCents: budgetCents ?? null,
+    });
+  },
+
+  async getSession(project: string, id: string): Promise<Session> {
+    return call<Session>("session_get", { project, id });
+  },
+
+  async transcript(project: string, id: string): Promise<TurnTranscript[]> {
+    return call<TurnTranscript[]>("session_transcript", { project, id });
+  },
+
+  async resumeSession(project: string, id: string, force: boolean): Promise<ResumeOutcome> {
+    return call<ResumeOutcome>("session_resume", { project, id, force });
+  },
+
+  async listAgents(project: string, session: string): Promise<Agent[]> {
+    return call<Agent[]>("agent_list", { project, session });
+  },
+
+  async spawnAgent(
+    project: string,
+    session: string,
+    role?: string,
+    model?: string,
+  ): Promise<Agent> {
+    return call<Agent>("agent_spawn", {
+      project,
+      session,
+      harness: "native",
+      role: role ?? null,
+      model: model ?? null,
+    });
+  },
+
+  async stopAgent(project: string, agent: string): Promise<void> {
+    return call<void>("agent_stop", { project, agent });
+  },
+
+  async sendTurn(
+    project: string,
+    session: string,
+    agent: string,
+    prompt: string,
+  ): Promise<TurnReply> {
+    return call<TurnReply>("turn_send", { project, session, agent, prompt, model: null });
+  },
+
+  async cancelTurn(turn: string): Promise<void> {
+    return call<void>("turn_cancel", { turn });
+  },
+
+  /**
+   * Price the first step of a turn before it is sent. In the browser this is a local
+   * heuristic over sample prices; in the app the quote comes from Rust, priced with the
+   * same table that bills the step once it lands.
+   */
+  async quoteTurn(
+    project: string,
+    session: string,
+    prompt: string,
+    spendMicros: number,
+    capMicros: number | null,
+  ): Promise<TurnQuote> {
+    if (!isTauri()) return previewQuote(prompt, spendMicros, capMicros);
+    return call<TurnQuote>("turn_estimate", { project, session, prompt, model: null });
+  },
+
+  async getBudget(project: string, agent: string): Promise<BudgetSnapshot> {
+    return call<BudgetSnapshot>("budget_get", { project, agent });
+  },
+
+  async setBudget(project: string, session: string, capCents: number | null): Promise<Session> {
+    return call<Session>("budget_set", { project, session, capCents });
+  },
+
+  async raiseBudget(project: string, session: string, capCents: number): Promise<Session> {
+    return call<Session>("budget_raise", { project, session, capCents });
+  },
+
+  async listPatches(project: string, session: string): Promise<Patch[]> {
+    return call<Patch[]>("patch_list", { project, session });
+  },
+
+  async revertPatch(id: string): Promise<Patch> {
+    return call<Patch>("patch_revert", { id });
+  },
+
+  async keyStatus(): Promise<KeyStatus> {
+    if (!isTauri()) return { openrouter: false, omniroute: false };
+    return call<KeyStatus>("key_status");
+  },
+
+  async setKey(provider: string, value: string): Promise<KeyStatus> {
+    if (!isTauri()) return { openrouter: true, omniroute: true };
+    return call<KeyStatus>("key_set", { provider, value });
+  },
+
+  async deleteKey(provider: string): Promise<KeyStatus> {
+    if (!isTauri()) return { openrouter: false, omniroute: false };
+    return call<KeyStatus>("key_delete", { provider });
+  },
+
+  async omnirouteStatus(): Promise<OmnirouteStatus> {
+    if (!isTauri()) {
+      return { running: true, origin: "http://127.0.0.1:20128", base_url: "(browser preview)" };
+    }
+    return call<OmnirouteStatus>("omniroute_status");
+  },
+
+  async omnirouteStart(): Promise<OmnirouteStatus> {
+    if (!isTauri()) throw new Error("Start OmniRoute from the desktop app, not the browser preview.");
+    return call<OmnirouteStatus>("omniroute_start");
+  },
+
+  async usage(project: string, session: string): Promise<Usage> {
+    return call<Usage>("usage_summary", { project, session });
   },
 
   async getSettings(): Promise<Settings> {
     if (!isTauri()) {
-      return { theme: "dark", default_budget_cents: 500, unattended_default: false };
+      return {
+        theme: "dark",
+        default_budget_cents: 500,
+        unattended_default: false,
+        provider: "omniroute",
+        model: "gpt-5.6-sol-medium",
+      };
     }
     return call<Settings>("settings_get");
+  },
+
+  async saveSettings(settings: Settings): Promise<Settings> {
+    if (!isTauri()) return settings;
+    return call<Settings>("settings_set", { settings });
   },
 };
 

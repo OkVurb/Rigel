@@ -6,6 +6,7 @@ import {
   isTauri,
   when,
   TauriSkillSource,
+  type KeyStatus,
   type ProjectInfo,
   type Session,
   type SkillDetail,
@@ -15,6 +16,8 @@ import {
 } from "./api";
 import { RigelMark } from "./mark";
 import { PreviewSkillSource } from "./mock";
+import SessionView from "./session";
+import SettingsView from "./settings";
 
 const ICONS = {
   shelf: "M10 2.5 17 6.5v7l-7 4-7-4v-7l7-4ZM3 6.5l7 4 7-4M10 10.5v7",
@@ -59,12 +62,35 @@ export default function App() {
   const [projectPath, setProjectPath] = useState("");
   const [project, setProject] = useState<ProjectInfo | null>(null);
   const [sessions, setSessions] = useState<Session[]>([]);
+  const [activeSession, setActiveSession] = useState<Session | null>(null);
+  const [keys, setKeys] = useState<KeyStatus | null>(null);
+  const [keyPromptDismissed, setKeyPromptDismissed] = useState(false);
+
+  const setActive = useCallback((next: Session | null) => setActiveSession(next), []);
+  const noticeFromSession = useCallback((next: string) => setNotice(next), []);
 
   const [repoInput, setRepoInput] = useState("");
   const [indexing, setIndexing] = useState(false);
   const searchRef = useRef<HTMLInputElement | null>(null);
 
   /* ----------------------------- data ----------------------------- */
+
+  // The startup check: does a key exist? It asks the keychain, not the network, and the
+  // answer is a boolean — the window never receives the key itself.
+  useEffect(() => {
+    if (!isTauri()) {
+      setKeys({ openrouter: false, omniroute: false });
+      return;
+    }
+    let live = true;
+    api
+      .keyStatus()
+      .then((next) => live && setKeys(next))
+      .catch(() => live && setKeys({ openrouter: false, omniroute: false }));
+    return () => {
+      live = false;
+    };
+  }, []);
 
   useEffect(() => {
     let live = true;
@@ -188,8 +214,14 @@ export default function App() {
   const neverIndexed = isTauri() && statuses.length === 0 && rows.length === 0;
   const stale = statuses.filter((s) => s.state === "stale" && s.last_sync_at);
 
+  const sessionProject = project?.root ?? (isTauri() ? "" : "/preview/rigel");
+
   return (
-    <div className="shell">
+    <div
+      className={`shell${view === "session" ? " session" : ""}${
+        view === "settings" ? " settings" : ""
+      }`}
+    >
       <nav className="rail" aria-label="Primary">
         <div className="rail-brand" title="Rigel">
           <RigelMark />
@@ -229,6 +261,37 @@ export default function App() {
         </div>
       </nav>
 
+      {isTauri() && keys && !keys.openrouter && !keys.omniroute && !keyPromptDismissed ? (
+        <div className="key-banner" role="status">
+          <span>
+            No provider key yet. The agent can price a turn, but it cannot send one.
+          </span>
+          <button className="chip warn" onClick={() => setView("settings")}>
+            Add key
+          </button>
+          <button
+            className="key-banner-close"
+            aria-label="Dismiss"
+            title="Dismiss"
+            onClick={() => setKeyPromptDismissed(true)}
+          >
+            ×
+          </button>
+        </div>
+      ) : null}
+
+      {view === "session" ? (
+        <SessionView
+          project={sessionProject}
+          onSessions={setSessions}
+          onActive={setActive}
+          onNotice={noticeFromSession}
+          onOpenSettings={() => setView("settings")}
+        />
+      ) : view === "settings" ? (
+        <SettingsView keys={keys} onKeys={setKeys} onNotice={setNotice} />
+      ) : (
+      <>
       <aside className="list-pane">
         <div className="list-head">
           <div className="list-title">
@@ -323,11 +386,7 @@ export default function App() {
             ) : null}
           </div>
         ) : (
-          <p className="empty">
-            {view === "session"
-              ? "Sessions live here from P3. Phase 1 wired the database behind it."
-              : "This surface arrives later in the plan."}
-          </p>
+          <p className="empty">This surface arrives later in the plan.</p>
         )}
       </aside>
 
@@ -531,16 +590,41 @@ export default function App() {
           </>
         ) : null}
       </main>
+      </>
+      )}
 
       <footer className="status" aria-label="Status">
-        <span className="status-model">rigel {isTauri() ? "desktop" : "browser"}</span>
+        <span className="status-model">
+          rigel {isTauri() ? "desktop" : "browser"}
+          {view === "session" && activeSession ? " · native" : ""}
+        </span>
         <span className="sep">·</span>
-        <span className="mono">$0.00 · 0 tok</span>
+        <span className="mono">
+          {view === "session" && activeSession
+            ? `$${(activeSession.spend_micros / 1_000_000).toFixed(4)}`
+            : "$0.00 · 0 tok"}
+        </span>
         <span className="sep">·</span>
-        <span>{rows.length} skills</span>
+        <span>
+          {view === "session" && activeSession
+            ? `session ${activeSession.id.slice(0, 8)}`
+            : `${rows.length} skills`}
+        </span>
         <span className="sep">·</span>
         <span>
           {sessions.length} session{sessions.length === 1 ? "" : "s"}
+        </span>
+        <span className="sep">·</span>
+        <span className="mono" title="Provider key in the OS keychain">
+          {isTauri()
+            ? keys
+              ? keys.omniroute
+                ? "omniroute key"
+                : keys.openrouter
+                  ? "openrouter key"
+                  : "no provider key"
+              : "checking key"
+            : "preview key"}
         </span>
         <span className="sep">·</span>
         <span className="mono" title={`source: ${source.label}`}>
@@ -552,7 +636,9 @@ export default function App() {
         </span>
         <span className="grow" />
         <span className="metric" title="Interventions per completed task — the product metric (D17)">
-          0/0 interventions/tasks
+          {activeSession
+            ? `${activeSession.interventions}/${activeSession.tasks_done} interventions/tasks`
+            : "0/0 interventions/tasks"}
         </span>
       </footer>
     </div>

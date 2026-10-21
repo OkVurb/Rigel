@@ -32,7 +32,8 @@ pub enum StorageError {
     Database(#[from] sqlx::Error),
 }
 
-/// An open, migrated database.
+/// An open, migrated database. Cloning shares the pool.
+#[derive(Clone)]
 pub struct Store {
     pool: SqlitePool,
     path: PathBuf,

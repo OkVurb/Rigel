@@ -14,6 +14,12 @@ use rigel_core::{
 };
 use serde_json::json;
 
+mod harness;
+mod phase3;
+
+use harness::CodexCommand;
+use phase3::{AgentCommand, KeyCommand, MemoryCommand, PatchCommand};
+
 #[derive(Parser)]
 #[command(name = "rigel", version, about = "Rigel — an agent workspace")]
 struct Cli {
@@ -50,6 +56,46 @@ enum Command {
         #[command(subcommand)]
         command: SkillCommand,
     },
+
+    /// The native agent: one turn, billed to the session.
+    Agent {
+        #[command(subcommand)]
+        command: AgentCommand,
+    },
+
+    /// Proposed and applied file patches.
+    Patch {
+        #[command(subcommand)]
+        command: PatchCommand,
+    },
+
+    /// Committed memory for one agent.
+    Memory {
+        #[command(subcommand)]
+        command: MemoryCommand,
+    },
+
+    /// Provider keys in the OS keychain.
+    Keys {
+        #[command(subcommand)]
+        command: KeyCommand,
+    },
+
+    /// The Codex harness: probe it, or run one turn through it.
+    Codex {
+        #[command(subcommand)]
+        command: CodexCommand,
+    },
+
+    /// Run the stdio MCP server an adapter injects into an agent.
+    Mcp {
+        #[arg(long, value_name = "PATH", default_value = ".")]
+        project: PathBuf,
+        #[arg(long)]
+        session: String,
+        #[arg(long)]
+        agent: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -78,6 +124,19 @@ enum SessionCommand {
         project: PathBuf,
         #[arg(long)]
         id: String,
+    },
+
+    /// Reconcile a session with the tree and the patch journal after a kill.
+    Resume {
+        #[arg(long, value_name = "PATH", default_value = ".")]
+        project: PathBuf,
+        #[arg(long)]
+        id: String,
+        /// Continue on a tree that no longer matches the checkpoint (recorded as an intervention).
+        #[arg(long)]
+        force: bool,
+        #[arg(long)]
+        json: bool,
     },
 }
 
@@ -234,6 +293,22 @@ async fn main() -> ExitCode {
         Command::Session { command } => run_session(command).await,
 
         Command::Skills { command } => run_skills(&dir, command).await,
+
+        Command::Agent { command } => phase3::run_agent(&dir, command).await,
+
+        Command::Patch { command } => phase3::run_patch(command).await,
+
+        Command::Memory { command } => phase3::run_memory(command).await,
+
+        Command::Keys { command } => phase3::run_keys(command),
+
+        Command::Codex { command } => harness::run_codex(command).await,
+
+        Command::Mcp {
+            project,
+            session,
+            agent,
+        } => phase3::run_mcp(&dir, project, session, agent).await,
     }
 }
 
@@ -688,6 +763,69 @@ async fn run_session(command: SessionCommand) -> ExitCode {
                     ExitCode::SUCCESS
                 }
                 Err(error) => fail(error),
+            },
+            Err(error) => fail(error),
+        },
+
+        SessionCommand::Resume {
+            project,
+            id,
+            force,
+            json: as_json,
+        } => match SessionService::open(&project).await {
+            Ok(service) => match rigel_core::resume::resume(&service, &project, &id, force).await {
+                Ok(outcome) => {
+                    if as_json {
+                        println!(
+                            "{}",
+                            serde_json::to_string_pretty(&outcome).unwrap_or_default()
+                        );
+                    } else {
+                        println!(
+                            "{}  {}  tree {}",
+                            &outcome.session.id[..8.min(outcome.session.id.len())],
+                            if outcome.clean {
+                                "clean"
+                            } else {
+                                "interrupted"
+                            },
+                            &outcome.tree_hash[..12.min(outcome.tree_hash.len())]
+                        );
+                        for turn in &outcome.closed_turns {
+                            println!(
+                                "  closed turn {} ({})",
+                                turn.seq,
+                                turn.stop_reason.clone().unwrap_or_default()
+                            );
+                        }
+                        for patch in &outcome.patches {
+                            println!(
+                                "  patch {} {} {}",
+                                patch.patch_id,
+                                patch.path,
+                                format!("{:?}", patch.state).to_lowercase()
+                            );
+                        }
+                        if !outcome.reconcile.ok {
+                            println!(
+                                "  budget mismatch: recorded {}µ$ summed {}µ$",
+                                outcome.reconcile.session_recorded_micros,
+                                outcome.reconcile.session_summed_micros
+                            );
+                        }
+                    }
+                    if !outcome.clean && !force {
+                        // §7.2: a resumed session that cannot continue cleanly is a failed
+                        // precondition, not an error.
+                        ExitCode::from(2)
+                    } else {
+                        ExitCode::SUCCESS
+                    }
+                }
+                Err(error) => {
+                    eprintln!("rigel: {error}");
+                    ExitCode::from(2)
+                }
             },
             Err(error) => fail(error),
         },

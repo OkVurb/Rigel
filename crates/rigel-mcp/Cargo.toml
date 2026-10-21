@@ -6,5 +6,11 @@ rust-version.workspace = true
 license.workspace = true
 
 [dependencies]
+rigel-core = { path = "../rigel-core" }
 serde = { workspace = true }
 serde_json = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }

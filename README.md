@@ -10,9 +10,12 @@ one made things worse. Star counts and install numbers surface none of that.
 
 ## Status
 
-Phase 0 and Phase 1 are complete; **Phase 2 — the shelf, real — is complete**. The desktop shell
-searches a local SQLite index over skill bodies stored as content-addressed files, and works with the
-network off. See the ticked checklist in [handoff.md](docs/handoff.md) for what each item means.
+Phase 0 through **Phase 3 — the native agent, chat and the bill — are complete**. The desktop shell
+searches a local SQLite index over skill bodies stored as content-addressed files and works with the
+network off; the Session surface runs a native agent with streamed tool calls, a persisted transcript,
+replay, a compare-and-swap patch journal, a pre-turn cost estimate and a cap that stops work
+within one turn. See the ticked
+checklist in [handoff.md](docs/handoff.md) for what each item means.
 
 The index is not the endpoint. The direction, settled in the interview: **one place where several
 agents work on the same code together**, with this catalogue as the capability layer they call into.
@@ -47,6 +50,14 @@ cargo run -q -p rigel-cli -- skills index anthropics/skills
 cargo run -q -p rigel-cli -- skills search "pdf" --json
 cargo run -q -p rigel-cli -- skills get github:anthropics/skills:skills/pdf/SKILL.md
 cargo run -q -p rigel-cli -- skills status
+
+# the native agent: one turn, billed to the session
+# OmniRoute is the default provider; a turn starts `omniroute serve` if it is down.
+printf '%s' "$OMNIROUTE_KEY" | cargo run -q -p rigel-cli -- keys set omniroute
+cargo run -q -p rigel-cli -- session start --project . --budget-cents 25
+cargo run -q -p rigel-cli -- agent run --project . --prompt "read README and fix the typo"
+cargo run -q -p rigel-cli -- patch list --project .
+cargo run -q -p rigel-cli -- session resume --project . --id <session-id>
 
 cd ui && npm install && npm run dev   # renderer in a browser, sample rows
 cargo run -p rigel-app                 # desktop shell; builds ui/dist first
@@ -85,14 +96,25 @@ The prototype's Discover view talks to two marketplaces that send no CORS header
 | Duplicates | **real**: SimHash ≤ 3 bits, clusters computed after every ingest, variants listed under the row |
 | Evidence | **real**: advertised percentages from the description, `unmeasured` until a measurement exists |
 | CLI | `rigel skills search|get|index|status|sync|stats|import|gc`, all with `--json`, §7.2 exit codes |
+| Native agent | **real**: OmniRoute (local router, autostarted; default `gpt-5.6-sol-medium`) and OpenRouter streaming with retries, a deterministic scripted model, eight tools with path-checked reads and writes, skills pinned per session |
+| Subagents | **real**: `spawn_agents` runs up to 4 read-only children concurrently per turn on an eight-model cheap allowlist (GPT-5/5.4 nano, Gemini Flash-Lite/3 Flash, DeepSeek V4.1 Flash, Qwen3 Coder, Haiku 5.5, GPT-5.4 mini); each child is its own agent row and bill, nested under the parent turn |
+| The bill | **real**: micro-dollar accounting from provider usage, local price fallback, 80% warning, cap enforced within one turn, `reconcile` |
+| Session surface | **real**: roster, role-gutter transcript, streaming text, collapsed tool lines, patch diffs, raw/debug toggle, inline 80% prompt |
+| Patches | **real**: CAS check, write-ahead journal, fsync + rename, idempotent apply, revert once applied |
+| Resume | **real**: tree hash vs checkpoint, running turns closed as `cancelled`, journal reconciled without applying, forced continue is an intervention |
+| Memory | **real**: committed `MEMORY.md` + topics per agent, absolute-path/secret validator, index rebuild |
+| MCP | **real**: stdio server scoped to `--session` and `--agent`, sharing the same tools |
+| Codex harness | **real**: `rigel codex probe` and one turn through `codex app-server`, with `codex exec --json` as the tested fallback; Rigel writes the router `-c` overrides itself (verified against Codex 0.162.1) |
 | Prototype migration | `rigel skills import --from` + [the export snippet](docs/migrating-prototype-index.md) |
 | Discover / Targets / Dependencies (prototype) | still the Phase 0 browser app; Phase 6 ports them |
 
 ## Docs
 
 - [qa/p2.md](docs/qa/p2.md) — the Phase 2 exit test, with recorded results
+- [qa/p3.md](docs/qa/p3.md) — the Phase 3 exit test: killed turn, resume, idempotent patch, the cap
 - [migrating-prototype-index.md](docs/migrating-prototype-index.md) — moving the `skilldb:` rows into SQLite
 - [phase-0-teardown.md](docs/phase-0-teardown.md) — competitor analysis
+- [competitor-codebuff-docs.md](docs/competitor-codebuff-docs.md) — what Codebuff's docs reveal, and where Rigel beats it
 - [skill-intelligence.md](docs/skill-intelligence.md) — discovery, fingerprinting, safety, ranking
 - [design-prompt.md](docs/design-prompt.md) — the visual brief this UI follows
 - [handoff.md](docs/handoff.md) — **the build plan**: architecture, schemas, interfaces, and a tickable checklist (P0.1–P7.9)
@@ -106,6 +128,8 @@ The prototype's Discover view talks to two marketplaces that send no CORS header
 - `node scripts/verify-ecc.mjs` — verify ECC across every harness; non-zero on failure
 - `node scripts/fix-cursor-hooks.mjs` — repair Cursor's project-relative hook paths
 - `node scripts/handoff-status.mjs` — checklist progress per phase; fails if the §11 summary table is stale
+- `bash scripts/p3-exit-test.sh` — the Phase 3 exit test; needs a built `rigel` and `python`
+- `scripts/fixtures/p4-subagents.json` — a scripted parent that delegates to two cheap readers; `rigel agent run --script` prints their bills
 
 ## Limits, stated plainly
 
@@ -120,6 +144,23 @@ The prototype's Discover view talks to two marketplaces that send no CORS header
 - Skill bodies live on disk in `blobs/`, not in SQLite. Deleting that directory forces a re-fetch; the
   rows will report `body: not fetched` until one happens. `rigel skills gc` only removes blobs no row
   or cache entry names.
+- **Subagents are cheap, read-only and concurrent.** The allowlist is eight models, all at
+  $5/M output or less: `openai/gpt-5-nano` (default), `openai/gpt-5.4-nano`,
+  `google/gemini-2.5-flash-lite`, `deepseek/deepseek-v4.1-flash`,
+  `qwen/qwen3-coder-30b-a3b-instruct`, `anthropic/claude-haiku-5.5`,
+  `google/gemini-3-flash-preview` and `openai/gpt-5.4-mini`. A parent cannot name anything outside
+  it, so it cannot point a child at an expensive model to dodge its own cap. Prices and context
+  windows were read from OpenRouter's live model list on 21 Oct 2026 and are mirrored in
+  `pricing.rs`, so a provider that omits cost is still billed. Children can read, list and search
+  but not write or spawn, so nesting is one level deep. Up to four children per turn run at the
+  same time: they are registered before any starts, then polled together, and their results come
+  back in the order the parent asked for them, not finish order. `BudgetService::account` takes a
+  writer lock, so two children reporting usage at once cannot lose a charge. A child's turn token
+  is a child of the parent's, so stopping the parent — or a budget kill — stops the whole fan-out;
+  a stop that lands mid-stream still charges the step and closes the turn `cancelled`. Four steps
+  each, and a child's turn is not counted as a task. The cap still ends a running child after the
+  step that crosses it, which means a fan-out near the cap can overshoot by one step per running
+  child.
 - Clustering uses one signal (content SimHash), not the three the design calls for. MinHash and tree
   signatures are still open.
 - `prototype/src/installed.json` contains the names of skills present on the machine that generated it.

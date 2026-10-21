@@ -38,7 +38,11 @@ async fn project_schema_applies_once_and_reopening_is_a_no_op() {
             .fetch_all(reopened.pool())
             .await
             .unwrap();
-    assert_eq!(versions, vec![(1,)]);
+    let expected: Vec<(i64,)> = PROJECT_MIGRATIONS
+        .iter()
+        .map(|migration| (migration.version,))
+        .collect();
+    assert_eq!(versions, expected);
 
     let applied = apply(reopened.pool(), PROJECT_MIGRATIONS).await.unwrap();
     assert!(applied.is_empty(), "an up-to-date database applies nothing");
@@ -61,6 +65,7 @@ async fn project_schema_has_every_table_the_plan_names() {
         "memory_index",
         "patches",
         "schema_migrations",
+        "session_skills",
         "sessions",
         "turns",
     ] {
@@ -69,6 +74,61 @@ async fn project_schema_has_every_table_the_plan_names() {
             "missing table {expected}"
         );
     }
+}
+
+/// Phase 3's schema: micro-dollar accounting needs its own column on both spenders, and a
+/// turn must be able to say how it ended even when that is not `completed`.
+async fn column_names(store: &Store, table: &str) -> Vec<String> {
+    // PRAGMA table_info is (cid, name, type, notnull, dflt_value, pk).
+    let rows: Vec<(i64, String)> = sqlx::query_as(&format!("PRAGMA table_info({table})"))
+        .fetch_all(store.pool())
+        .await
+        .unwrap();
+    rows.into_iter().map(|(_, name)| name).collect()
+}
+
+#[tokio::test]
+async fn spend_is_kept_in_micro_dollars_and_turns_record_their_stop() {
+    let tmp = TempDir::new().unwrap();
+    let store = open_project(tmp.path()).await;
+
+    assert!(
+        column_names(&store, "sessions")
+            .await
+            .contains(&"spend_micros".to_string())
+    );
+    assert!(
+        column_names(&store, "agents")
+            .await
+            .contains(&"spend_micros".to_string())
+    );
+    assert!(
+        column_names(&store, "turns")
+            .await
+            .contains(&"stop_reason".to_string())
+    );
+    assert!(
+        column_names(&store, "turns")
+            .await
+            .contains(&"parent_turn_id".to_string()),
+        "subagent turns must be attributable to a parent"
+    );
+
+    // A fresh row is free, not NULL: callers add to it without a COALESCE.
+    sqlx::query(
+        "INSERT INTO sessions (id, project_root, status, created_at) VALUES (?, ?, 'active', ?)",
+    )
+    .bind("s1")
+    .bind("/tmp/project")
+    .bind(1_i64)
+    .execute(store.pool())
+    .await
+    .unwrap();
+    let (spend,): (i64,) = sqlx::query_as("SELECT spend_micros FROM sessions WHERE id = 's1'")
+        .fetch_one(store.pool())
+        .await
+        .unwrap();
+    assert_eq!(spend, 0);
 }
 
 #[tokio::test]
@@ -206,7 +266,10 @@ async fn refuses_to_open_a_schema_newer_than_this_build() {
     match Store::open_project(tmp.path()).await {
         Err(StorageError::Migrate(MigrateError::NewerSchema { found, known })) => {
             assert_eq!(found, 99);
-            assert_eq!(known, 1);
+            assert_eq!(
+                known,
+                PROJECT_MIGRATIONS.last().map(|m| m.version).unwrap_or(0)
+            );
         }
         Err(other) => panic!("wrong error: {other}"),
         Ok(_) => panic!("a newer schema must not open silently"),
