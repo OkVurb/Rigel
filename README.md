@@ -54,15 +54,17 @@ instead.
 - [phase-0-teardown.md](docs/phase-0-teardown.md) — competitor analysis
 - [skill-intelligence.md](docs/skill-intelligence.md) — discovery, fingerprinting, safety, ranking
 - [design-prompt.md](docs/design-prompt.md) — the visual brief this UI follows
-- [phase-1-plan.md](docs/phase-1-plan.md) — SQLite, Rust indexer, CLI, dependency manager
-- [grilling-50.md](docs/grilling-50.md) — 66 questions to stress-test the plan
+- [handoff.md](docs/handoff.md) — **the build plan**: architecture, schemas, interfaces, and a tickable checklist (P0.1–P7.9)
 - [interview-answers.md](docs/interview-answers.md) — 60 answered questions, the contradictions, and the ChatGPT handoff
+- [phase-1-plan.md](docs/phase-1-plan.md) — the earlier index-only plan; superseded by the handoff
+- [grilling-50.md](docs/grilling-50.md) — 66 questions to stress-test the plan
 
 ## Scripts
 
 - `node scripts/export-installed-skills.mjs` — snapshot installed skill names into the prototype
 - `node scripts/verify-ecc.mjs` — verify ECC across every harness; non-zero on failure
 - `node scripts/fix-cursor-hooks.mjs` — repair Cursor's project-relative hook paths
+- `node scripts/handoff-status.mjs` — checklist progress per phase; fails if the §11 summary table is stale
 
 ## Limits, stated plainly
 
