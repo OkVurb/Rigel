@@ -81,18 +81,16 @@ button {
 }
 
 .rail-brand {
-  width: 24px;
-  height: 24px;
-  border-radius: 5px;
+  width: 26px;
+  height: 26px;
+  border-radius: 6px;
   background: var(--accent);
   color: #0b0c0e;
-  font-weight: 600;
-  font-size: 12px;
   display: grid;
   place-items: center;
   margin-bottom: 12px;
-  letter-spacing: -0.02em;
 }
+.rail-brand svg { display: block; }
 
 .rail-btn {
   width: 32px;
