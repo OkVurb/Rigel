@@ -1,4 +1,4 @@
-# Orion
+# Rigel
 
 A local index for agent skills: one catalogue across GitHub and the marketplaces, with duplicate
 detection, a static safety scan, an honest measured-vs-advertised column, and an install matrix per agent
@@ -12,6 +12,12 @@ one made things worse. Star counts and install numbers surface none of that.
 
 Phase 0 prototype. Browser-only React app with mock data for the package list, and **real** GitHub,
 SkillsMP and SkillHub fetching in the Discover view. No Tauri shell yet, no SQLite yet.
+
+The index is not the endpoint. The direction, settled in the interview: **one place where several
+agents work on the same code together**, with this catalogue as the capability layer they call into.
+That shifts the product's spine from grading an index to sandboxing what an agent actually invokes —
+see [interview-answers.md](docs/interview-answers.md) for the answers and the seven collisions they
+leave behind.
 
 ## Run it
 
@@ -50,6 +56,7 @@ instead.
 - [design-prompt.md](docs/design-prompt.md) — the visual brief this UI follows
 - [phase-1-plan.md](docs/phase-1-plan.md) — SQLite, Rust indexer, CLI, dependency manager
 - [grilling-50.md](docs/grilling-50.md) — 66 questions to stress-test the plan
+- [interview-answers.md](docs/interview-answers.md) — 60 answered questions, the contradictions, and the ChatGPT handoff
 
 ## Scripts
 
@@ -66,5 +73,6 @@ instead.
 
 ## Naming
 
-Orion is the product. The internal storage keys still say `skilldb:` and the Phase 0 document is titled
-Skill Index — renaming keys would drop existing local data, so they stay until the SQLite migration.
+Rigel, named for the bright anchor star in the mark. The internal storage keys still say `skilldb:` and
+the Phase 0 document is titled Skill Index — renaming keys would drop existing local data, so they stay
+until the SQLite migration.

@@ -1,6 +1,6 @@
-# Orion — prototype
+# Rigel — prototype
 
-The Phase 0 interface for Orion. React 19 + TypeScript + Vite.
+The Phase 0 interface for Rigel. React 19 + TypeScript + Vite.
 
 ```bash
 npm install

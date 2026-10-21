@@ -1,5 +1,5 @@
 {
-  "name": "orion",
+  "name": "rigel",
   "private": true,
   "version": "0.0.0",
   "type": "module",
@@ -22,5 +22,5 @@
     "typescript": "~6.0.3",
     "vite": "^8.3.4"
   },
-  "description": "Orion — a local index for agent skills"
+  "description": "Rigel — a local index for agent skills"
 }

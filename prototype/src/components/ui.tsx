@@ -31,8 +31,8 @@ export function Kbd({ children }: { children: ReactNode }) {
   return <span className="kbd">{children}</span>;
 }
 
-/** Minimal Orion: the belt as a chain of stars, two bright anchors, one shoulder. */
-export function OrionMark({ size = 18 }: { size?: number }) {
+/** Rigel's mark: a chain of stars — three belt stars, two bright anchors, one shoulder. */
+export function RigelMark({ size = 18 }: { size?: number }) {
   return (
     <svg width={size} height={size} viewBox="0 0 24 24" fill="none" aria-hidden>
       <path

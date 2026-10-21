@@ -12,7 +12,7 @@ import { ImportDialog } from "./components/ImportDialog";
 import { targets } from "./targets";
 import type { Package } from "./data";
 import { loadCatalogue, saveCatalogue } from "./db";
-import { OrionMark } from "./components/ui";
+import { RigelMark } from "./components/ui";
 
 type View = "packages" | "discover" | "targets";
 
@@ -142,8 +142,8 @@ export default function App() {
   return (
     <div className="shell">
       <nav className="rail" aria-label="Primary">
-        <div className="rail-brand" title="Orion">
-          <OrionMark size={18} />
+        <div className="rail-brand" title="Rigel">
+          <RigelMark size={18} />
         </div>
         <RailButton d={ICONS.sessions} label="Sessions" />
         <RailButton d={ICONS.packages} label="Packages" active={view === "packages"} onClick={() => setView("packages")} />
