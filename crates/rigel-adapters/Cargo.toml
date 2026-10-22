@@ -10,12 +10,23 @@ name = "fake-codex"
 path = "tests/fixtures/fake_codex.rs"
 test = false
 
+[[bin]]
+name = "fake-acp"
+path = "tests/fixtures/fake_acp.rs"
+test = false
+
+[[bin]]
+name = "fake-claude"
+path = "tests/fixtures/fake_claude.rs"
+test = false
+
 [dependencies]
 async-trait = { workspace = true }
+rigel-core = { path = "../rigel-core" }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
-tokio = { workspace = true, features = ["process", "io-util", "time", "macros", "rt"] }
+tokio = { workspace = true, features = ["process", "io-util", "time", "macros", "rt", "sync"] }
 
 [dev-dependencies]
 tempfile = { workspace = true }

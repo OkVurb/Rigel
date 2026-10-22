@@ -17,6 +17,7 @@ path = "src/main.rs"
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
+rigel-adapters = { path = "../rigel-adapters" }
 rigel-core = { path = "../rigel-core" }
 serde = { workspace = true }
 serde_json = { workspace = true }

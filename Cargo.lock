@@ -2929,6 +2929,7 @@ name = "rigel-adapters"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "rigel-core",
  "serde",
  "serde_json",
  "tempfile",
@@ -2940,6 +2941,7 @@ dependencies = [
 name = "rigel-app"
 version = "0.1.0"
 dependencies = [
+ "rigel-adapters",
  "rigel-core",
  "serde",
  "serde_json",
@@ -2954,6 +2956,7 @@ dependencies = [
 name = "rigel-cli"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
  "clap",
  "rigel-adapters",
  "rigel-core",

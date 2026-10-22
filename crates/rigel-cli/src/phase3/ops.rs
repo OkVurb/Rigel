@@ -212,13 +212,9 @@ fn memory_failure(error: rigel_core::MemoryError, as_json: bool) -> ExitCode {
 pub fn run_keys(command: KeyCommand) -> ExitCode {
     match command {
         KeyCommand::Status { json: as_json } => {
-            let providers = [
-                credentials::OMNIROUTE,
-                credentials::OPENROUTER,
-                "openai",
-                "anthropic",
-            ];
-            let rows: Vec<_> = providers
+            // Every provider an adapter can ask for, so the key `rigel keys set` accepts is
+            // also one `rigel keys status` can report.
+            let rows: Vec<_> = credentials::PROVIDERS
                 .iter()
                 .map(|provider| {
                     json!({ "provider": provider, "present": credentials::present(provider) })

@@ -14,13 +14,15 @@ pub mod patches;
 pub mod resume;
 pub mod session;
 pub mod skills;
+pub mod snapshot;
 pub mod storage;
 pub mod tree;
-
 pub use agent::{
-    AgentError, Cancels, ChatMessage, ChatRequest, Coordinator, DEFAULT_MAX_STEPS, Delta, Model,
-    ModelError, OpenRouterModel, ScriptedModel, ServerStatus, StopReason, SubagentPolicy, ToolCall,
-    ToolOutcome, ToolSpec, Tools, TurnRun,
+    AgentError, Cancels, ChatMessage, ChatRequest, CommandApprover, CommandDecision,
+    CommandRequest, Coordinator, DEFAULT_MAX_STEPS, Deliberation, Deliberator, Delta, Finding,
+    Model, ModelDeliberator, ModelError, NoDeliberation, OpenRouterModel, OriginApprover,
+    OriginDecision, OriginRequest, POLICIES, Policy, Position, ScriptedModel, ServerStatus,
+    StopReason, SubagentPolicy, ToolCall, ToolOutcome, ToolSpec, Tools, TurnRun, classify,
 };
 pub use budget::{
     BudgetError, BudgetOutcome, BudgetService, BudgetSnapshot, InterruptSink, ReconcileReport,
@@ -38,5 +40,9 @@ pub use session::{
 pub use skills::{
     Capability, Evidence, EvidenceSummary, GitHubSource, IndexStats, IngestReport, SkillDetail,
     SkillIndex, SkillsError, Source, SourceState, SourceStatus, SyncPolicy, VariantRow,
+};
+pub use snapshot::{
+    FileEntry, MAX_SNAPSHOT_BYTES, MAX_SNAPSHOT_FILES, Manifest, RestoreReport, Snapshot,
+    SnapshotError, SnapshotKind, SnapshotService,
 };
 pub use storage::{StorageError, Store, default_index_dir};

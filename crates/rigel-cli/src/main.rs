@@ -18,7 +18,7 @@ mod harness;
 mod phase3;
 
 use harness::CodexCommand;
-use phase3::{AgentCommand, KeyCommand, MemoryCommand, PatchCommand};
+use phase3::{AgentCommand, KeyCommand, MemoryCommand, PatchCommand, SnapshotCommand};
 
 #[derive(Parser)]
 #[command(name = "rigel", version, about = "Rigel — an agent workspace")]
@@ -79,6 +79,12 @@ enum Command {
     Keys {
         #[command(subcommand)]
         command: KeyCommand,
+    },
+
+    /// Pre-destructive snapshots of uncommitted work.
+    Snapshot {
+        #[command(subcommand)]
+        command: SnapshotCommand,
     },
 
     /// The Codex harness: probe it, or run one turn through it.
@@ -235,6 +241,9 @@ async fn main() -> ExitCode {
                 Ok(stats) => stats,
                 Err(error) => return skills_failure(error, as_json),
             };
+            // P4.1: one probe for all four harnesses, cached in the data directory. It is a
+            // report, not a gate: `doctor` stays useful on a machine with none installed.
+            let harnesses = rigel_adapters::probe::refresh(&dir, Path::new(".")).await;
 
             if as_json {
                 println!(
@@ -251,6 +260,7 @@ async fn main() -> ExitCode {
                             "sources": stats.sources,
                         },
                         "checks": [],
+                        "harnesses": harnesses,
                     })
                 );
             } else {
@@ -273,6 +283,37 @@ async fn main() -> ExitCode {
                             .last_sync_at
                             .map(rigel_core::skills::fmt_time)
                             .unwrap_or_else(|| "never".to_string())
+                    );
+                }
+                for info in &harnesses {
+                    let name = rigel_adapters::registry::display_name(info.harness);
+                    if !info.installed {
+                        println!(
+                            "  harness {name}: not installed — {}",
+                            info.install_hint.as_deref().unwrap_or("no install hint")
+                        );
+                        continue;
+                    }
+                    let auth = match info.auth_mode {
+                        rigel_adapters::AuthMode::ApiKey => info
+                            .provider
+                            .as_deref()
+                            .map(|provider| format!("API key · {provider}"))
+                            .unwrap_or_else(|| "API key".to_string()),
+                        rigel_adapters::AuthMode::Subscription => info
+                            .provider
+                            .as_deref()
+                            .map(|provider| format!("Needs API key · {provider}"))
+                            .unwrap_or_else(|| "Needs API key".to_string()),
+                        rigel_adapters::AuthMode::None => "no key detected".to_string(),
+                    };
+                    println!(
+                        "  harness {name}: {} · {auth} · {}",
+                        info.version.as_deref().unwrap_or("unknown version"),
+                        info.path
+                            .as_ref()
+                            .map(|path| path.display().to_string())
+                            .unwrap_or_default()
                     );
                 }
             }
@@ -301,6 +342,8 @@ async fn main() -> ExitCode {
         Command::Memory { command } => phase3::run_memory(command).await,
 
         Command::Keys { command } => phase3::run_keys(command),
+
+        Command::Snapshot { command } => phase3::run_snapshot(command, dir),
 
         Command::Codex { command } => harness::run_codex(command).await,
 

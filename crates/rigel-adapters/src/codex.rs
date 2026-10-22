@@ -70,6 +70,18 @@ pub struct CodexConfig {
 }
 
 impl CodexConfig {
+    /// The credential this config authenticates with. The local OmniRoute router on its own port
+    /// (`20128`) means Rigel's router key; anything else — including another loopback service —
+    /// means a direct OpenAI key. Both reach Codex through `OPENAI_API_KEY`, which is the variable
+    /// Codex accepts for an OpenAI-compatible endpoint.
+    pub fn provider(&self) -> &'static str {
+        if is_local_omniroute(&self.base_url) {
+            rigel_core::credentials::OMNIROUTE
+        } else {
+            rigel_core::credentials::OPENAI
+        }
+    }
+
     /// The normal case: a project, the local router, the default model.
     pub fn router(cwd: impl Into<PathBuf>) -> Self {
         Self {
@@ -488,6 +500,8 @@ impl Adapter for CodexAdapter {
                 // Codex's item stream does not guarantee nested agent events (§4.2).
                 nested_agents: false,
             },
+            provider: Some(self.config.provider().to_string()),
+            install_hint: None,
         })
     }
 }
@@ -495,17 +509,25 @@ impl Adapter for CodexAdapter {
 /// How Codex proves who it is. Rigel always supplies an API key (D21); with the router that
 /// key is Rigel's own, and the router currently does not enforce it (see §10).
 fn auth_mode(config: &CodexConfig) -> AuthMode {
-    let key_in_env = ["OMNIROUTE_API_KEY", "OPENAI_API_KEY"].iter().any(|name| {
-        std::env::var(name)
-            .map(|value| !value.trim().is_empty())
-            .unwrap_or(false)
-    });
+    let key_in_env = rigel_core::credentials::provider_environment_variable(config.provider())
+        .is_some_and(|name| {
+            std::env::var(name)
+                .map(|value| !value.trim().is_empty())
+                .unwrap_or(false)
+        });
     let loopback = config.base_url.contains("127.0.0.1") || config.base_url.contains("localhost");
     if key_in_env || loopback {
         AuthMode::ApiKey
     } else {
         AuthMode::None
     }
+}
+
+/// The port OmniRoute serves its OpenAI-compatible surface on. Another loopback service on a
+/// different port is not the router, however local it is.
+fn is_local_omniroute(base_url: &str) -> bool {
+    let loopback = base_url.contains("127.0.0.1") || base_url.contains("localhost");
+    loopback && base_url.contains(":20128")
 }
 
 #[derive(Debug)]
@@ -870,6 +892,23 @@ mod tests {
         let mut direct = CodexConfig::router(".");
         direct.base_url = String::new();
         assert!(CodexAdapter::new(direct).overrides().is_empty());
+    }
+
+    #[test]
+    fn the_local_router_is_the_only_loopback_that_means_omniroute() {
+        assert_eq!(
+            CodexConfig::router(".").provider(),
+            rigel_core::credentials::OMNIROUTE
+        );
+        let mut other = CodexConfig::router(".");
+        other.base_url = "http://127.0.0.1:8080/v1".to_string();
+        assert_eq!(other.provider(), rigel_core::credentials::OPENAI);
+        let mut direct = CodexConfig::router(".");
+        direct.base_url = "https://api.openai.com/v1".to_string();
+        assert_eq!(direct.provider(), rigel_core::credentials::OPENAI);
+        let mut empty = CodexConfig::router(".");
+        empty.base_url = String::new();
+        assert_eq!(empty.provider(), rigel_core::credentials::OPENAI);
     }
 
     #[test]

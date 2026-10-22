@@ -79,14 +79,14 @@ export default function App() {
   // answer is a boolean — the window never receives the key itself.
   useEffect(() => {
     if (!isTauri()) {
-      setKeys({ openrouter: false, omniroute: false });
+      setKeys({ openrouter: false, omniroute: false, gemini: false });
       return;
     }
     let live = true;
     api
       .keyStatus()
       .then((next) => live && setKeys(next))
-      .catch(() => live && setKeys({ openrouter: false, omniroute: false }));
+      .catch(() => live && setKeys({ openrouter: false, omniroute: false, gemini: false }));
     return () => {
       live = false;
     };
@@ -261,7 +261,12 @@ export default function App() {
         </div>
       </nav>
 
-      {isTauri() && keys && !keys.openrouter && !keys.omniroute && !keyPromptDismissed ? (
+      {isTauri() &&
+      keys &&
+      !keys.openrouter &&
+      !keys.omniroute &&
+      !keys.gemini &&
+      !keyPromptDismissed ? (
         <div className="key-banner" role="status">
           <span>
             No provider key yet. The agent can price a turn, but it cannot send one.
@@ -622,7 +627,9 @@ export default function App() {
                 ? "omniroute key"
                 : keys.openrouter
                   ? "openrouter key"
-                  : "no provider key"
+                  : keys.gemini
+                    ? "gemini key"
+                    : "no provider key"
               : "checking key"
             : "preview key"}
         </span>

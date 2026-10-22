@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 
 import {
   api,
+  type HarnessInfo,
   type KeyStatus,
   type OmnirouteStatus,
   type Settings,
@@ -13,6 +14,13 @@ interface Props {
   onNotice: (notice: string) => void;
 }
 
+const HARNESS_NAMES: Record<HarnessInfo["harness"], string> = {
+  codex: "Codex",
+  claude: "Claude Code",
+  cursor: "Cursor",
+  cline: "Cline",
+};
+
 const PROVIDERS = [
   {
     id: "omniroute",
@@ -20,6 +28,7 @@ const PROVIDERS = [
     hint: "Local router · one key, any model",
     placeholder: "sk-…",
     env: "OMNIROUTE_API_KEY",
+    model: "gpt-5.6-sol-medium",
   },
   {
     id: "openrouter",
@@ -27,8 +36,25 @@ const PROVIDERS = [
     hint: "Hosted gateway",
     placeholder: "sk-or-v1-…",
     env: "OPENROUTER_API_KEY",
+    model: "openai/gpt-4.1-mini",
+  },
+  {
+    id: "gemini",
+    name: "Google Gemini",
+    hint: "Google AI Studio · Gemini 4 Argon",
+    placeholder: "AIza…",
+    env: "GEMINI_API_KEY",
+    model: "gemini-4-argon",
   },
 ] as const;
+
+function storedKey(keys: KeyStatus | null, provider: string): boolean {
+  if (!keys) return false;
+  if (provider === "omniroute") return keys.omniroute;
+  if (provider === "openrouter") return keys.openrouter;
+  if (provider === "gemini") return keys.gemini;
+  return false;
+}
 
 /**
  * Providers and keys. The renderer can store a key and ask whether one exists; it never
@@ -45,10 +71,12 @@ export default function SettingsView({ keys, onKeys, onNotice }: Props) {
   const [settings, setSettings] = useState<Settings | null>(null);
   const [server, setServer] = useState<OmnirouteStatus | null>(null);
   const [serverBusy, setServerBusy] = useState(false);
+  const [harnesses, setHarnesses] = useState<HarnessInfo[] | null>(null);
+  const [probing, setProbing] = useState(false);
 
   const provider = settings?.provider ?? "omniroute";
   const providerInfo = PROVIDERS.find((item) => item.id === provider) ?? PROVIDERS[0];
-  const present = keys ? (provider === "omniroute" ? keys.omniroute : keys.openrouter) : null;
+  const present = keys ? storedKey(keys, provider) : null;
 
   useEffect(() => {
     let live = true;
@@ -60,6 +88,10 @@ export default function SettingsView({ keys, onKeys, onNotice }: Props) {
       .omnirouteStatus()
       .then((next) => live && setServer(next))
       .catch(() => live && setServer(null));
+    api
+      .harnesses()
+      .then((next) => live && setHarnesses(next))
+      .catch(() => live && setHarnesses([]));
     return () => {
       live = false;
     };
@@ -67,7 +99,10 @@ export default function SettingsView({ keys, onKeys, onNotice }: Props) {
 
   const choose = async (id: string) => {
     if (!settings || settings.provider === id) return;
-    const next = { ...settings, provider: id };
+    // A model id belongs to one provider, so switching providers switches the default with
+    // it; otherwise `gemini` would be asked for `gpt-5.6-sol-medium`.
+    const entry = PROVIDERS.find((item) => item.id === id);
+    const next = { ...settings, provider: id, model: entry?.model ?? settings.model };
     setSettings(next);
     setValue("");
     setConfirmRemove(false);
@@ -102,6 +137,17 @@ export default function SettingsView({ keys, onKeys, onNotice }: Props) {
       await refreshServer();
     } finally {
       setServerBusy(false);
+    }
+  };
+
+  const probeHarnesses = async () => {
+    setProbing(true);
+    try {
+      setHarnesses(await api.harnesses());
+    } catch {
+      setHarnesses([]);
+    } finally {
+      setProbing(false);
     }
   };
 
@@ -151,11 +197,7 @@ export default function SettingsView({ keys, onKeys, onNotice }: Props) {
         </div>
         <div className="rows">
           {PROVIDERS.map((item) => {
-            const stored = keys
-              ? item.id === "omniroute"
-                ? keys.omniroute
-                : keys.openrouter
-              : false;
+            const stored = storedKey(keys, item.id);
             return (
               <button
                 key={item.id}
@@ -189,7 +231,9 @@ export default function SettingsView({ keys, onKeys, onNotice }: Props) {
             <p className="lede">
               {provider === "omniroute"
                 ? "The native agent talks to OmniRoute on this machine. The router is started automatically when a turn needs it."
-                : "The native agent talks to OpenRouter directly. The key is stored in the OS keychain and read only when a turn starts."}
+                : provider === "gemini"
+                  ? "The native agent talks to Google's Gemini API directly. The key stays in the OS keychain and is read only when a turn starts."
+                  : "The native agent talks to OpenRouter directly. The key is stored in the OS keychain and read only when a turn starts."}
             </p>
           </div>
         </header>
@@ -303,6 +347,55 @@ export default function SettingsView({ keys, onKeys, onNotice }: Props) {
         </section>
 
         <section className="settings-section">
+          <div className="settings-head">
+            <h3>Harnesses</h3>
+            <button className="chip" onClick={() => void probeHarnesses()} disabled={probing}>
+              {probing ? "Probing…" : "Probe again"}
+            </button>
+          </div>
+          <p className="fine">
+            Each external harness runs on its own API key, never a subscription login. The probe
+            is cached in <code>adapters.json</code> beside <code>index.db</code>.
+          </p>
+          <div className="rows">
+            {(harnesses ?? []).map((info) => {
+              const needsKey = info.installed && info.auth_mode !== "api_key";
+              return (
+                <div key={info.harness} className="row">
+                  <span className="row-text">
+                    <span className="row-name">{HARNESS_NAMES[info.harness]}</span>
+                    <span className="row-desc">
+                      {info.installed
+                        ? `${info.version ?? "unknown version"}${info.path ? ` · ${info.path}` : ""}`
+                        : (info.install_hint ?? "not installed")}
+                    </span>
+                  </span>
+                  <span
+                    className={`pill ${
+                      !info.installed ? "failed" : needsKey ? "cancelled" : "completed"
+                    }`}
+                  >
+                    {!info.installed
+                      ? "not installed"
+                      : needsKey
+                        ? `Needs API key · ${info.provider ?? "provider"}`
+                        : info.provider
+                          ? `API key · ${info.provider}`
+                          : "API key"}
+                  </span>
+                </div>
+              );
+            })}
+          </div>
+          {harnesses !== null && harnesses.length === 0 ? (
+            <p className="fine">
+              No harnesses reported. The probe needs the desktop app; the browser preview has no
+              Rust host to ask.
+            </p>
+          ) : null}
+        </section>
+
+        <section className="settings-section">
           <h3>Model</h3>
           <p className="fine">
             The native agent's default is <code>{settings?.model ?? "gpt-5.6-sol-medium"}</code>;
@@ -323,9 +416,9 @@ export default function SettingsView({ keys, onKeys, onNotice }: Props) {
         <div>
           <h3>Headless</h3>
           <p className="fine">
-            The CLI reads the same keychain entry: <code>rigel keys set omniroute</code> reads
-            from stdin and never echoes the value. <code>rigel agent run --provider</code>{" "}
-            switches between the router and OpenRouter.
+            The CLI reads the same keychain entry: <code>rigel keys set gemini</code> reads from
+            stdin and never echoes the value. <code>rigel agent run --provider</code>{" "}
+            switches between the router, OpenRouter and Gemini.
           </p>
         </div>
       </aside>

@@ -10,6 +10,7 @@ name = "rigel"
 path = "src/main.rs"
 
 [dependencies]
+async-trait = { workspace = true }
 clap = { workspace = true }
 rigel-adapters = { path = "../rigel-adapters" }
 rigel-core = { path = "../rigel-core" }
