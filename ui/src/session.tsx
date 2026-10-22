@@ -12,6 +12,7 @@ import {
   type Session,
   type Settings,
   type Turn,
+  type SwarmTarget,
   type TurnQuote,
   type TurnTranscript,
 } from "./api";
@@ -25,7 +26,10 @@ interface Props {
   onNotice: (notice: string) => void;
   onOpenSettings?: () => void;
   onChooseProject?: () => void;
-  onSwarm?: (task: string) => Promise<void>;
+  /** Swarm step one: who is online, or a refusal to show. Sends nothing. */
+  onSwarmPrepare?: () => Promise<SwarmTarget[]>;
+  /** Swarm step two: broadcast one task to the chosen agent names. */
+  onSwarm?: (task: string, names: string[]) => Promise<void>;
 }
 
 const money = (micros: number | null | undefined): string =>
@@ -63,6 +67,7 @@ export default function SessionView({
   onNotice,
   onOpenSettings,
   onChooseProject,
+  onSwarmPrepare,
   onSwarm,
 }: Props) {
   const tauri = isTauri();
@@ -85,6 +90,12 @@ export default function SessionView({
   const [starting, setStarting] = useState(false);
   const [defaults, setDefaults] = useState<Settings | null>(null);
   const [swarming, setSwarming] = useState(false);
+  const [preparing, setPreparing] = useState(false);
+  // The preflight is a list, not a question: the task text is frozen when it opens so the
+  // selection cannot drift from what will actually be sent.
+  const [swarmTask, setSwarmTask] = useState("");
+  const [swarmTargets, setSwarmTargets] = useState<SwarmTarget[] | null>(null);
+  const [swarmPicked, setSwarmPicked] = useState<string[]>([]);
 
   const spendMicros = budget?.session_micros ?? (session ? session.spend_cents * 10_000 : 0);
   const capMicros = budget?.cap_micros ?? (session?.budget_cents ? session.budget_cents * 10_000 : null);
@@ -507,24 +518,54 @@ export default function SessionView({
     }
   }, [text, session, busy, tauri, agents, project, model, effort]);
 
-  /** The swarm button hands the typed task to every available room agent. */
-  const swarm = useCallback(async () => {
-    if (!onSwarm) return;
+  /** Swarm, first press: freeze the task and ask the room who can take it. */
+  const prepareSwarm = useCallback(async () => {
+    if (!onSwarmPrepare) return;
     const task = text.trim();
     if (!task) {
       onNotice("Type the swarm task in the composer first.");
       return;
     }
+    setPreparing(true);
+    setError(null);
+    try {
+      const targets = await onSwarmPrepare();
+      setSwarmTask(task);
+      setSwarmTargets(targets);
+      setSwarmPicked(targets.map((target) => target.name));
+    } catch (problem) {
+      // Refusals (no room, unauthed room, nobody online) read the same as any other error.
+      setError(problem instanceof Error ? problem.message : String(problem));
+    } finally {
+      setPreparing(false);
+    }
+  }, [onSwarmPrepare, text, onNotice]);
+
+  const toggleSwarmTarget = useCallback((name: string) => {
+    setSwarmPicked((picked) =>
+      picked.includes(name) ? picked.filter((known) => known !== name) : [...picked, name],
+    );
+  }, []);
+
+  /** Swarm, second press: send to the agents that are still ticked, in roster order. */
+  const launchSwarm = useCallback(async () => {
+    if (!onSwarm || !swarmTargets) return;
+    const chosen = swarmTargets
+      .map((target) => target.name)
+      .filter((name) => swarmPicked.includes(name));
+    if (chosen.length === 0) return;
     setSwarming(true);
     setError(null);
     try {
-      await onSwarm(task);
+      await onSwarm(swarmTask, chosen);
+      setSwarmTargets(null);
+      setSwarmPicked([]);
     } catch (problem) {
       setError(problem instanceof Error ? problem.message : String(problem));
     } finally {
       setSwarming(false);
     }
-  }, [onSwarm, text, onNotice]);
+  }, [onSwarm, swarmTargets, swarmPicked, swarmTask]);
 
   const cancel = useCallback(async () => {
     if (!liveTurn) return;
@@ -848,14 +889,14 @@ export default function SessionView({
                 disabled={live}
               />
               <div className="composer-actions">
-                {onSwarm ? (
+                {onSwarmPrepare ? (
                   <button
                     className="chip swarm"
-                    title="Send this task to every available agent in the room"
-                    onClick={() => void swarm()}
-                    disabled={live || swarming || !text.trim()}
+                    title="Show which agents are online, then send to the ones you keep ticked"
+                    onClick={() => void prepareSwarm()}
+                    disabled={live || preparing || !text.trim() || swarmTargets !== null}
                   >
-                    {swarming ? "Waking…" : "Swarm"}
+                    {preparing ? "Waking…" : "Swarm"}
                   </button>
                 ) : null}
                 <button className="primary" onClick={() => void send()} disabled={live || !text.trim()}>
@@ -863,6 +904,54 @@ export default function SessionView({
                 </button>
               </div>
             </div>
+            {swarmTargets ? (
+              <div className="swarm-preflight" role="dialog" aria-label="Swarm preflight">
+                <div className="swarm-head">
+                  <strong>Send this task to</strong>
+                  <span className="fine">
+                    {swarmTargets.length} online · {swarmPicked.length} selected
+                  </span>
+                </div>
+                <ul>
+                  {swarmTargets.map((target) => (
+                    <li key={target.name}>
+                      <label>
+                        <input
+                          type="checkbox"
+                          checked={swarmPicked.includes(target.name)}
+                          onChange={() => toggleSwarmTarget(target.name)}
+                        />
+                        <span className="row-name">@{target.name}</span>
+                        {target.label !== target.name ? <span className="tag">{target.label}</span> : null}
+                        {target.role ? <span className="tag">{target.role}</span> : null}
+                      </label>
+                    </li>
+                  ))}
+                </ul>
+                <p className="fine">
+                  One @mention broadcast on #general. Every ticked agent gets the same task text.
+                </p>
+                <div className="swarm-actions">
+                  <button
+                    className="chip"
+                    onClick={() => {
+                      setSwarmTargets(null);
+                      setSwarmPicked([]);
+                    }}
+                    disabled={swarming}
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    className="primary"
+                    onClick={() => void launchSwarm()}
+                    disabled={swarming || swarmPicked.length === 0}
+                  >
+                    {swarming ? "Sending…" : `Send to ${swarmPicked.length}`}
+                  </button>
+                </div>
+              </div>
+            ) : null}
             {text.trim() && quote ? (
               <p
                 className={`composer-quote${quoteWarning ? " over" : ""}`}

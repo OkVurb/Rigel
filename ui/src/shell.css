@@ -1444,6 +1444,57 @@ input {
   border-color: var(--accent);
 }
 
+/* Swarm preflight: the roster, ticked, before one broadcast leaves the window. */
+.swarm-preflight {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin: 8px 16px 0;
+  padding: 10px 12px;
+  border: 1px solid var(--hairline);
+  border-radius: 8px;
+  background: var(--surface);
+}
+
+.swarm-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  font-size: 12px;
+}
+
+.swarm-preflight ul {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.swarm-preflight li label {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.swarm-preflight li input {
+  accent-color: var(--amber, #e9a23b);
+}
+
+.swarm-preflight .fine {
+  margin: 0;
+}
+
+.swarm-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
 .composer-quote {
   flex: 0 0 auto;
   margin: 0 0 10px;

@@ -241,6 +241,13 @@ export interface AgentChatProcess {
   pid: number;
 }
 
+/** One agent a swarm can be sent to, as offered in the preflight. */
+export interface SwarmTarget {
+  name: string;
+  label: string;
+  role: string | null;
+}
+
 /** One harness the chat checkout configures; `ready` means its CLI/key is present. */
 export interface AgentChatHarness {
   name: string;

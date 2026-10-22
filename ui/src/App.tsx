@@ -13,6 +13,7 @@ import {
   type SkillRow,
   type SkillSource,
   type SourceStatus,
+  type SwarmTarget,
 } from "./api";
 import ChatView from "./agentchat";
 import { RigelMark } from "./mark";
@@ -295,54 +296,55 @@ export default function App() {
     }
   }, [newName, newBusy, adoptProject]);
 
-  /** Swarm: hand one task to every available agent in the project's chat room. */
-  const swarm = useCallback(
-    async (task: string) => {
-      const target = project?.root ?? (isTauri() ? "" : "/preview/rigel");
-      if (!target) {
-        setSwarmNotice("Open a project before starting a swarm.");
-        setView("chat");
-        return;
-      }
-      setSwarmNotice("Waking the room…");
-      try {
-        const status = await api.agentChat.start(target);
-        if (!status.authed) {
-          setView("chat");
-          setSwarmNotice(
-            "The room is running outside Rigel. Close that server, then restart it from the Chat tab to let a swarm in.",
-          );
-          return;
-        }
-        const roster = await api.agentChat.agents();
-        const names = Object.entries(roster)
-          .filter(([, agent]) => agent.available)
-          .map(([name]) => name);
-        if (names.length === 0) {
-          setView("chat");
-          setSwarmNotice(
-            "No agent is online in the room yet. Start an agent terminal so it joins, then press Swarm again.",
-          );
-          return;
-        }
-        const mentions = names.map((name) => `@${name}`).join(" ");
-        await api.agentChat.send(
-          "general",
-          `${mentions} — swarm task. Work on this in parallel in the current project; coordinate here so you do not duplicate or overwrite each other.\n\n${task}`,
-        );
-        setView("chat");
-        setSwarmNotice(
-          `Swarm sent to ${names.length} agent${names.length === 1 ? "" : "s"}: ${names.join(
-            ", ",
-          )}. Watch #general.`,
-        );
-      } catch (problem) {
-        setView("chat");
-        setSwarmNotice(problem instanceof Error ? problem.message : String(problem));
-      }
-    },
-    [project],
-  );
+  /** Swarm step one: boot the room and list who is online. Sends nothing yet. */
+  const prepareSwarm = useCallback(async (): Promise<SwarmTarget[]> => {
+    const refuse = (message: string) => {
+      setSwarmNotice(message);
+      setView("chat");
+      return new Error(message);
+    };
+    const target = project?.root ?? (isTauri() ? "" : "/preview/rigel");
+    if (!target) throw refuse("Open a project before starting a swarm.");
+    setSwarmNotice("Waking the room…");
+    const status = await api.agentChat.start(target);
+    if (!status.authed) {
+      throw refuse(
+        "The room is running outside Rigel. Close that server, then restart it from the Chat tab to let a swarm in.",
+      );
+    }
+    const roster = await api.agentChat.agents();
+    const targets = Object.entries(roster)
+      .filter(([, agent]) => agent.available)
+      .map(([name, agent]) => ({
+        name,
+        label: agent.label || name,
+        role: agent.role ?? null,
+      }));
+    if (targets.length === 0) {
+      throw refuse(
+        "No agent is online in the room yet. Start an agent so it joins, then press Swarm again.",
+      );
+    }
+    return targets;
+  }, [project]);
+
+  /** Swarm step two: broadcast the task to the agents the preflight left ticked. */
+  const sendSwarm = useCallback(async (task: string, names: string[]) => {
+    if (names.length === 0) return;
+    const mentions = names.map((name) => `@${name}`).join(" ");
+    await api.agentChat.send(
+      "general",
+      `${mentions} — swarm task. Work on this in parallel in the current project; coordinate here so you do not duplicate or overwrite each other.
+
+${task}`,
+    );
+    setView("chat");
+    setSwarmNotice(
+      `Swarm sent to ${names.length} agent${names.length === 1 ? "" : "s"}: ${names.join(
+        ", ",
+      )}. Watch #general.`,
+    );
+  }, []);
 
   const indexRepo = useCallback(async () => {
     const repo = repoInput.trim();
@@ -491,7 +493,8 @@ export default function App() {
           onNotice={noticeFromSession}
           onOpenSettings={() => setView("settings")}
           onChooseProject={() => void chooseFolder()}
-          onSwarm={swarm}
+          onSwarmPrepare={prepareSwarm}
+          onSwarm={sendSwarm}
         />
       ) : view === "chat" ? (
         <ChatView
