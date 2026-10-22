@@ -312,11 +312,16 @@ async fn codex_fixtures_replay_through_the_adapter() {
                     })
                     .collect();
                 assert_eq!(asked.len(), 1, "{scenario}: one question, one answer");
-                assert_eq!(asked[0].0.title, "git push --force origin main", "{scenario}");
+                assert_eq!(
+                    asked[0].0.title, "git push --force origin main",
+                    "{scenario}"
+                );
                 assert_eq!(asked[0].0.tool_call_id, "c2", "{scenario}");
                 assert_eq!(asked[0].1, ApprovalDecision::RejectOnce, "{scenario}");
                 assert!(
-                    !events.iter().any(|event| matches!(event, CodexEvent::Item(_))),
+                    !events
+                        .iter()
+                        .any(|event| matches!(event, CodexEvent::Item(_))),
                     "{scenario}: nothing ran, so there is no command item"
                 );
             }

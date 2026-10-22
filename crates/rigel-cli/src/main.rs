@@ -14,6 +14,7 @@ use rigel_core::{
 };
 use serde_json::json;
 
+mod claims;
 mod harness;
 mod phase3;
 
@@ -85,6 +86,12 @@ enum Command {
     Snapshot {
         #[command(subcommand)]
         command: SnapshotCommand,
+    },
+
+    /// Advisory file claims: who holds what, and release one by hand.
+    Claim {
+        #[command(subcommand)]
+        command: claims::ClaimCommand,
     },
 
     /// The Codex harness: probe it, or run one turn through it.
@@ -371,6 +378,8 @@ async fn main() -> ExitCode {
         Command::Keys { command } => phase3::run_keys(command),
 
         Command::Snapshot { command } => phase3::run_snapshot(command, dir),
+
+        Command::Claim { command } => claims::run_claim(command).await,
 
         Command::Codex { command } => harness::run_codex(command).await,
 

@@ -18,6 +18,7 @@ import {
 import ChatView from "./agentchat";
 import { RigelMark } from "./mark";
 import { PreviewSkillSource } from "./mock";
+import DiffView from "./diff";
 import SessionView from "./session";
 import SettingsView from "./settings";
 
@@ -496,6 +497,8 @@ ${task}`,
           onSwarmPrepare={prepareSwarm}
           onSwarm={sendSwarm}
         />
+      ) : view === "diff" ? (
+        <DiffView project={sessionProject} session={activeSession?.id ?? null} />
       ) : view === "chat" ? (
         <ChatView
           project={sessionProject}
@@ -510,7 +513,7 @@ ${task}`,
       <aside className="list-pane">
         <div className="list-head">
           <div className="list-title">
-            <h1>{view === "shelf" ? "Shelf" : view[0].toUpperCase() + view.slice(1)}</h1>
+            <h1>{VIEWS.find((item) => item.id === view)?.label ?? "Rigel"}</h1>
             <span>
               {view === "shelf"
                 ? total === null

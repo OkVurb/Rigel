@@ -147,6 +147,12 @@ export default function SessionView({
     };
   }, [project, session?.id]);
 
+  // The window's watcher follows the project the session belongs to, so a write by another
+  // agent becomes a conflict row while the turn is still running.
+  useEffect(() => {
+    if (tauri && session) void api.watchProject(project);
+  }, [tauri, project, session?.id]);
+
   const answer = async (pending: PendingApproval, scope: ApprovalAnswer) => {
     // The row disappears as soon as it is answered, whatever the answer: a question that has
     // been decided must never look open.
@@ -820,9 +826,9 @@ export default function SessionView({
               instead of rendering an empty column that would read as "nobody holds any files". */}
           <span
             className="claim-state"
-            title="File claims arrive with the coordinator's claim ledger (Phase 8). Until then there is nothing to show, which is not the same as no claims."
+            title="Advisory claims are in the ledger; the Diff tab shows who holds what, and who wrote a file they did not claim."
           >
-            claims not tracked yet
+            claims on the Diff tab
           </span>
           <span className="mono">{compact(agents.reduce((n, a) => n + a.tokens_in + a.tokens_out, 0))} tok</span>
         </div>

@@ -11,11 +11,11 @@
 use std::io;
 use std::path::PathBuf;
 
-use rigel_core::Scopes;
 use rigel_core::agent::approval::{ApprovalBus, PendingApproval};
 use rigel_core::budget::BudgetService;
 use rigel_core::memory::{MemoryService, WriteMode};
 use rigel_core::patches::{PatchError, PatchPipeline};
+use rigel_core::{ClaimService, Scopes};
 use rigel_core::{SessionService, SkillIndex};
 use serde_json::{Value, json};
 use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncWrite, AsyncWriteExt};
@@ -41,6 +41,9 @@ pub const TOOL_NAMES: &[&str] = &[
 ];
 
 pub const ADVERTISED_TOOLS: &[&str] = &[
+    "rigel_claim",
+    "rigel_release",
+    "rigel_who",
     "rigel_approve",
     "rigel_skills_search",
     "rigel_skill_load",
@@ -189,6 +192,107 @@ async fn call(ctx: &McpContext, name: &str, args: Value) -> Result<Value, Value>
     let budget = BudgetService::with_null_interrupt(service.pool().clone());
 
     match name {
+        // The claim tools are advisory (D5): they never block a write and never say "locked".
+        // A path someone else already holds comes back with `held_by`, and the caller decides.
+        "rigel_claim" => {
+            let paths = args
+                .get("paths")
+                .and_then(Value::as_array)
+                .map(|paths| {
+                    paths
+                        .iter()
+                        .filter_map(Value::as_str)
+                        .map(str::to_string)
+                        .collect::<Vec<_>>()
+                })
+                .ok_or_else(|| failure("BAD_ARGUMENTS", "paths is required"))?;
+            if paths.is_empty() || paths.len() > 50 {
+                return Err(failure(
+                    "BAD_ARGUMENTS",
+                    "claim between 1 and 50 paths at a time",
+                ));
+            }
+            let reason = args
+                .get("reason")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            let claims = ClaimService::new(service.pool().clone(), &ctx.project_root);
+            match claims.acquire(&ctx.agent_id, &paths, reason).await {
+                Ok(results) => Ok(json!({
+                    "ok": true,
+                    "claims": results.iter().map(|result| json!({
+                        "path": result.path,
+                        "held": result.held,
+                        "held_by": result.held_by.as_ref().map(|claim| json!({
+                            "agent": claim.agent_id,
+                            "name": claim.agent,
+                            "harness": claim.harness,
+                            "since": claim.acquired_at,
+                            "stale": claim.stale,
+                        })),
+                        "error": result.error,
+                    })).collect::<Vec<_>>(),
+                    "note": "Claims are advisory. Another agent may still write; Rigel records the conflict rather than blocking.",
+                })),
+                Err(error) => Err(failure("CLAIM", error.to_string())),
+            }
+        }
+
+        "rigel_release" => {
+            let paths = args
+                .get("paths")
+                .and_then(Value::as_array)
+                .map(|paths| {
+                    paths
+                        .iter()
+                        .filter_map(Value::as_str)
+                        .map(str::to_string)
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default();
+            let reason = args
+                .get("reason")
+                .and_then(Value::as_str)
+                .unwrap_or("released");
+            let claims = ClaimService::new(service.pool().clone(), &ctx.project_root);
+            match claims.release(&ctx.agent_id, &paths, reason).await {
+                Ok(released) => Ok(json!({ "ok": true, "released": released })),
+                Err(error) => Err(failure("CLAIM", error.to_string())),
+            }
+        }
+
+        "rigel_who" => {
+            let path = args.get("path").and_then(Value::as_str);
+            let prefix = args.get("prefix").and_then(Value::as_str);
+            let claims = ClaimService::new(service.pool().clone(), &ctx.project_root);
+            match claims.held(path.or(prefix)).await {
+                Ok(held) => {
+                    let unverified = claims.unverified().await.unwrap_or_default();
+                    Ok(json!({
+                        "ok": true,
+                        "claims": held.iter().map(|claim| json!({
+                            "path": claim.path,
+                            "agent": claim.agent_id,
+                            "name": claim.agent,
+                            "harness": claim.harness,
+                            "since": claim.acquired_at,
+                            "stale": claim.stale,
+                            "held": claim.held,
+                        })).collect::<Vec<_>>(),
+                        "unverified_changes": unverified.iter()
+                            .filter(|change| path.map_or(true, |path| change.path == path))
+                            .map(|change| json!({
+                                "path": change.path,
+                                "agent": change.agent,
+                                "claimant": change.claimant,
+                                "ambiguous": change.ambiguous,
+                            })).collect::<Vec<_>>(),
+                    }))
+                }
+                Err(error) => Err(failure("CLAIM", error.to_string())),
+            }
+        }
+
         // Claude Code's `--permission-prompt-tool` contract: the tool result's text is JSON
         // with a `behavior` of `allow` or `deny` (P4.10). Rigel answers from its scope store;
         // when nothing is granted the question goes to the approval channel, and a question
@@ -398,17 +502,53 @@ async fn call(ctx: &McpContext, name: &str, args: Value) -> Result<Value, Value>
             }
         }
 
-        "rigel_claim" | "rigel_release" | "rigel_who" => Err(failure(
-            "UNAVAILABLE",
-            "advisory claims arrive in Phase 5; this build does not accept or report them",
-        )),
-
         other => Err(failure("UNKNOWN_TOOL", format!("unknown tool {other}"))),
     }
 }
 
 fn specs() -> Vec<Value> {
     let all = vec![
+        json!({
+            "name": "rigel_claim",
+            "description": "Register intent to edit files. Advisory: other agents may still write, and a path someone else holds is reported rather than refused. Never blocks.",
+            "inputSchema": {
+                "type": "object",
+                "required": ["paths", "reason"],
+                "properties": {
+                    "paths": {
+                        "type": "array",
+                        "items": { "type": "string" },
+                        "minItems": 1,
+                        "maxItems": 50
+                    },
+                    "reason": { "type": "string", "maxLength": 280 },
+                    "ttl_seconds": { "type": "integer", "minimum": 60, "maximum": 3600, "default": 900 }
+                }
+            }
+        }),
+        json!({
+            "name": "rigel_release",
+            "description": "Release your claims. The ledger row stays as history (released_at and a reason); nothing is deleted.",
+            "inputSchema": {
+                "type": "object",
+                "required": ["paths"],
+                "properties": {
+                    "paths": { "type": "array", "items": { "type": "string" } },
+                    "reason": { "type": "string" }
+                }
+            }
+        }),
+        json!({
+            "name": "rigel_who",
+            "description": "Who holds which paths, and which claimed files changed without the claimant writing them.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "path": { "type": "string" },
+                    "prefix": { "type": "string" }
+                }
+            }
+        }),
         json!({
             "name": "rigel_approve",
             "description": "Answer a permission request for a tool call. Returns {behavior: allow|deny} and, when allowed, the unchanged input. Rigel's scope store decides; a question nobody answers is a denial.",
@@ -538,10 +678,46 @@ mod tests {
             .map(|tool| tool["name"].as_str().unwrap())
             .collect();
         assert!(names.contains(&"rigel_patch_propose"));
-        assert!(
-            !names.contains(&"rigel_claim"),
-            "not advertised before Phase 5"
-        );
+        assert!(names.contains(&"rigel_claim"));
+        assert!(names.contains(&"rigel_who"));
+        // The word the product must never use (N1) is not in any advertised description.
+        let text = tools
+            .iter()
+            .map(|tool| tool["description"].as_str().unwrap_or_default())
+            .collect::<Vec<_>>()
+            .join(" ");
+        assert!(!text.to_ascii_lowercase().contains("locked"));
+    }
+
+    #[tokio::test]
+    async fn claim_then_who_then_release_round_trips_through_the_mcp_tools() {
+        let (_tmp, ctx) = context().await;
+        let claimed = call(
+            &ctx,
+            "rigel_claim",
+            json!({ "paths": ["src/app.tsx"], "reason": "edit the button" }),
+        )
+        .await
+        .expect("claiming is not an error");
+        assert_eq!(claimed["ok"], true);
+        assert_eq!(claimed["claims"][0]["held"], true);
+        assert!(claimed["claims"][0]["held_by"].is_object());
+
+        let who = call(&ctx, "rigel_who", json!({})).await.unwrap();
+        assert_eq!(who["claims"].as_array().unwrap().len(), 1);
+        assert_eq!(who["claims"][0]["agent"], ctx.agent_id);
+        assert_eq!(who["claims"][0]["name"], "worker");
+
+        let released = call(
+            &ctx,
+            "rigel_release",
+            json!({ "paths": ["src/app.tsx"], "reason": "done" }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(released["released"][0], "src/app.tsx");
+        let who = call(&ctx, "rigel_who", json!({})).await.unwrap();
+        assert_eq!(who["claims"].as_array().unwrap().len(), 0);
     }
 
     #[tokio::test]

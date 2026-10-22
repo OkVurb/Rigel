@@ -2276,3 +2276,150 @@ input {
   gap: 6px;
   margin-top: 10px;
 }
+
+/* merged diff and conflicts (P5.6) */
+
+.diff-view {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  overflow-y: auto;
+}
+
+.diff-view h3 {
+  margin: 0 0 6px;
+  font-size: 11px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--faint);
+}
+
+.diff-view .notice {
+  margin: 0;
+}
+
+.conflict-strip {
+  padding: 10px 12px;
+  border: 1px solid rgba(229, 72, 77, 0.4);
+  border-radius: 8px;
+  background: rgba(229, 72, 77, 0.05);
+}
+
+.conflict-row + .conflict-row {
+  margin-top: 10px;
+  padding-top: 10px;
+  border-top: 1px solid var(--hairline);
+}
+
+.conflict-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.conflict-head .grow {
+  flex: 1;
+}
+
+.conflict-path {
+  font-size: 12px;
+}
+
+.conflict-when {
+  color: var(--faint);
+  font-size: 11px;
+}
+
+.conflict-who,
+.conflict-hashes {
+  margin: 4px 0 0;
+  font-size: 11px;
+  color: var(--muted);
+}
+
+.conflict-actions,
+.claim-actions {
+  display: flex;
+  gap: 6px;
+  margin-top: 8px;
+}
+
+.claims-block,
+.patches-block {
+  padding: 10px 12px;
+  border: 1px solid var(--hairline);
+  border-radius: 8px;
+}
+
+.claim-list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.claim-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 5px 0;
+  border-bottom: 1px solid var(--hairline);
+  font-size: 12px;
+}
+
+.claim-row:last-child {
+  border-bottom: 0;
+}
+
+.claim-row.stale .claim-path {
+  color: var(--muted);
+}
+
+.claim-path {
+  flex: 1;
+  overflow-wrap: anywhere;
+}
+
+.claim-owner {
+  color: var(--text);
+}
+
+.unverified {
+  margin: 8px 0 0;
+  color: var(--accent);
+  font-size: 11px;
+}
+
+.patch {
+  margin-top: 8px;
+}
+
+.patch header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.patch header .grow {
+  flex: 1;
+}
+
+.patch-path {
+  font-size: 12px;
+}
+
+.patch-diff {
+  max-height: 220px;
+  overflow: auto;
+  margin: 6px 0 0;
+  padding: 8px;
+  border: 1px solid var(--hairline);
+  border-radius: 6px;
+  background: var(--well);
+  font-family: var(--mono);
+  font-size: 11px;
+  white-space: pre;
+}
+
+.diff-spend {
+  color: var(--faint);
+}

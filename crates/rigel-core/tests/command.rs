@@ -330,3 +330,115 @@ async fn a_project_grant_survives_a_new_tool_set_and_a_near_miss_still_asks() {
     assert_eq!(approver.requests().len(), 1);
     assert_eq!(approver.requests()[0].command, "echo pinned!");
 }
+
+/* ------------------------- P4.18: the whole gate -------------------------- */
+
+fn git(root: &std::path::Path, args: &[&str]) -> bool {
+    std::process::Command::new("git")
+        .arg("-C")
+        .arg(root)
+        .args(args)
+        .output()
+        .map(|output| output.status.success())
+        .unwrap_or(false)
+}
+
+fn git_repo() -> Option<tempfile::TempDir> {
+    let ok = std::process::Command::new("git")
+        .arg("--version")
+        .output()
+        .map(|output| output.status.success())
+        .unwrap_or(false);
+    if !ok {
+        return None;
+    }
+    let tmp = tempfile::tempdir().unwrap();
+    assert!(git(tmp.path(), &["init", "-q"]));
+    assert!(git(tmp.path(), &["config", "user.email", "rigel@test"]));
+    assert!(git(tmp.path(), &["config", "user.name", "Rigel Test"]));
+    // A byte-identical restore must not depend on the machine's line-ending conversion.
+    assert!(git(tmp.path(), &["config", "core.autocrlf", "false"]));
+    std::fs::create_dir_all(tmp.path().join("src")).unwrap();
+    std::fs::write(tmp.path().join("src/lib.rs"), "fn version() -> u8 { 1 }\n").unwrap();
+    assert!(git(tmp.path(), &["add", "."]));
+    assert!(git(tmp.path(), &["commit", "-q", "-m", "committed"]));
+    // The work that has no other copy: one modified tracked file and one untracked file.
+    std::fs::write(tmp.path().join("src/lib.rs"), "fn version() -> u8 { 2 }\n").unwrap();
+    std::fs::write(tmp.path().join("notes.txt"), "remember the tests\n").unwrap();
+    Some(tmp)
+}
+
+#[tokio::test]
+async fn a_destructive_command_is_gated_by_deliberation_a_snapshot_and_consent() {
+    let Some(tmp) = git_repo() else {
+        return;
+    };
+    let deliberator = Arc::new(FixedDeliberator {
+        calls: std::sync::atomic::AtomicUsize::new(0),
+    });
+    let denied = tools_with(
+        tmp.path(),
+        Recorder::new(CommandDecision::Deny),
+        Some(deliberator.clone()),
+    )
+    .await;
+    let before = std::fs::read(tmp.path().join("src/lib.rs")).unwrap();
+
+    let outcome = run(
+        &denied,
+        serde_json::json!({ "command": "git reset --hard" }),
+    )
+    .await;
+
+    // Deny: the command did not run, the tree is byte-identical and no snapshot was taken.
+    assert_eq!(outcome.body["error"]["code"], "DENIED");
+    assert_eq!(outcome.body["approved"], false);
+    assert_eq!(
+        std::fs::read(tmp.path().join("src/lib.rs")).unwrap(),
+        before
+    );
+    assert!(tmp.path().join("notes.txt").exists());
+    assert!(outcome.body["snapshot"].is_null());
+    // The advisors ran before the question, and their note is on the denied item too.
+    assert_eq!(
+        deliberator.calls.load(std::sync::atomic::Ordering::SeqCst),
+        1
+    );
+    assert!(outcome.body["deliberation"]["note"].is_string());
+    assert_eq!(outcome.body["destructive"][0]["id"], "git-reset");
+
+    // Approve: the same command now runs, and the snapshot id is recorded with it.
+    let allowed = tools_with(
+        tmp.path(),
+        Recorder::new(CommandDecision::ALLOW_ONCE),
+        Some(deliberator.clone()),
+    )
+    .await;
+    let outcome = run(
+        &allowed,
+        serde_json::json!({ "command": "git reset --hard" }),
+    )
+    .await;
+
+    assert!(outcome.ok, "{:?}", outcome.body);
+    assert_eq!(outcome.body["command"], "git reset --hard");
+    assert_eq!(outcome.body["snapshot"]["kind"], "git");
+    assert_eq!(
+        std::fs::read_to_string(tmp.path().join("src/lib.rs")).unwrap(),
+        "fn version() -> u8 { 1 }\n",
+        "the command did what it said"
+    );
+    let snapshot_id = outcome.body["snapshot"]["id"].as_str().unwrap().to_string();
+
+    // Restoring the recorded snapshot reproduces the pre-turn tree, byte for byte.
+    let snapshots = rigel_core::SnapshotService::new(tmp.path(), tmp.path().join("index"));
+    snapshots.restore(&snapshot_id, tmp.path()).unwrap();
+    assert_eq!(
+        std::fs::read(tmp.path().join("src/lib.rs")).unwrap(),
+        before
+    );
+    assert_eq!(
+        std::fs::read_to_string(tmp.path().join("notes.txt")).unwrap(),
+        "remember the tests\n"
+    );
+}

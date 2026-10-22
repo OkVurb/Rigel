@@ -451,6 +451,52 @@ export interface PendingApproval {
 
 export type ApprovalAnswer = "once" | "session" | "project" | "always" | "deny";
 
+
+/** One claim in the ledger, as the Rust struct serialises. */
+export interface Claim {
+  id: string;
+  path: string;
+  agent_id: string;
+  /** The agent's role, else its harness. */
+  agent: string;
+  harness: string;
+  base_hash: string | null;
+  acquired_at: number;
+  heartbeat_at: number;
+  released_at: number | null;
+  release_reason: string | null;
+  /** No heartbeat for 90 s: reported, never auto-released. */
+  stale: boolean;
+  held: boolean;
+}
+
+export interface ClaimConflict {
+  id: string;
+  path: string;
+  claimant: string | null;
+  writer: string | null;
+  base_hash: string | null;
+  observed_hash: string | null;
+  detected_at: number;
+  resolved_at: number | null;
+  resolution: string | null;
+}
+
+export interface UnverifiedChange {
+  path: string;
+  agent: string | null;
+  claimant: string | null;
+  base_hash: string | null;
+  observed_hash: string | null;
+  ambiguous: boolean;
+}
+
+export interface CoordinationView {
+  claims: Claim[];
+  unverified_changes: UnverifiedChange[];
+  conflicts: ClaimConflict[];
+}
+
 export const isTauri = (): boolean =>
   typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
 
@@ -614,6 +660,26 @@ export const api = {
 
   async raiseBudget(project: string, session: string, capCents: number): Promise<Session> {
     return call<Session>("budget_raise", { project, session, capCents });
+  },
+
+
+  /** The merged diff: claims, unverified changes and open conflicts (P5.6). */
+  async claimList(project: string): Promise<CoordinationView> {
+    if (!isTauri()) {
+      return { claims: [], unverified_changes: [], conflicts: [] };
+    }
+    return call<CoordinationView>("claim_list", { project });
+  },
+
+  async resolveConflict(project: string, id: string, resolution: string): Promise<void> {
+    if (!isTauri()) return;
+    return call<void>("conflict_resolve", { project, id, resolution });
+  },
+
+  /** Tell the desktop watcher which project to follow. */
+  async watchProject(project: string): Promise<void> {
+    if (!isTauri()) return;
+    return call<void>("watch_project", { project });
   },
 
   async listPatches(project: string, session: string): Promise<Patch[]> {

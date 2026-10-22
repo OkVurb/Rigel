@@ -21,11 +21,12 @@ use std::sync::Arc;
 use rigel_core::agent::approval::{ApprovalBus, PendingApproval};
 use rigel_core::agent::{Cancels, Coordinator, DEFAULT_MAX_STEPS, fixed_context_chars};
 use rigel_core::{
-    Agent, AgentEvent, ApprovalScope, BudgetService, CommandApprover, CommandDecision,
-    CommandRequest, EventSink, InterruptSink, MemoryFile, MemoryService, Model, OpenRouterModel,
-    Patch, PatchPipeline, ResumeOutcome, Scopes, Session, SessionService, SkillDetail, SkillIndex,
-    SkillsError, StopAt, Store, SubagentPolicy, SyncPolicy, Tools, Turn, TurnQuote, TurnTranscript,
-    Usage, WriteMode, credentials, skills::search::SearchHit,
+    Agent, AgentEvent, ApprovalScope, BudgetService, ClaimConflict, ClaimService, CommandApprover,
+    CommandDecision, CommandRequest, ConflictWatcher, EventSink, InterruptSink, MemoryFile,
+    MemoryService, Model, OpenRouterModel, POLL_INTERVAL, Patch, PatchPipeline, ResumeOutcome,
+    Scopes, Session, SessionService, SkillDetail, SkillIndex, SkillsError, StopAt, Store,
+    SubagentPolicy, SyncPolicy, Tools, Turn, TurnQuote, TurnTranscript, UnverifiedChange, Usage,
+    WriteMode, credentials, skills::search::SearchHit,
 };
 use serde::{Deserialize, Serialize};
 use tauri::{Emitter, State};
@@ -655,6 +656,120 @@ fn approval_answer(id: String, scope: Option<String>) -> Result<(), String> {
     ApprovalBus::new(index_dir()).answer(&id, scope)
 }
 
+/* ---------------------------- claims and conflicts ------------------------ */
+
+/// The project the window is watching. A global so the watcher thread can start at app boot,
+/// before any window has opened a session, and simply idle until one does.
+static WATCHED_ROOT: std::sync::Mutex<Option<PathBuf>> = std::sync::Mutex::new(None);
+
+/// Everything the Diff view needs about coordination in one call.
+#[derive(Debug, Clone, Serialize)]
+pub struct CoordinationView {
+    pub claims: Vec<rigel_core::Claim>,
+    pub unverified_changes: Vec<UnverifiedChange>,
+    pub conflicts: Vec<ClaimConflict>,
+}
+
+/// Tell the watcher which project to follow. Called when a session is opened.
+#[tauri::command]
+fn watch_project(project: String) {
+    if let Ok(mut watched) = WATCHED_ROOT.lock() {
+        *watched = Some(PathBuf::from(project));
+    }
+}
+
+#[tauri::command]
+fn claim_list(project: String) -> Result<CoordinationView, String> {
+    tauri::async_runtime::block_on(async move {
+        let root = std::fs::canonicalize(&project).map_err(message)?;
+        let service = SessionService::open(&root).await.map_err(message)?;
+        let claims = ClaimService::new(service.pool().clone(), &root);
+        Ok(CoordinationView {
+            claims: claims.held(None).await.map_err(message)?,
+            unverified_changes: claims.unverified().await.map_err(message)?,
+            conflicts: claims.conflicts().await.map_err(message)?,
+        })
+    })
+}
+
+#[tauri::command]
+fn conflict_resolve(project: String, id: String, resolution: String) -> Result<(), String> {
+    tauri::async_runtime::block_on(async move {
+        let root = std::fs::canonicalize(&project).map_err(message)?;
+        let service = SessionService::open(&root).await.map_err(message)?;
+        ClaimService::new(service.pool().clone(), &root)
+            .resolve_conflict(&id, &resolution)
+            .await
+            .map_err(message)
+    })
+}
+
+/// Watch the open project for writes by agents other than the claimant. The watcher ticks every
+/// [`POLL_INTERVAL`], which is also the worst-case detection latency (P5.8: within two seconds).
+fn spawn_conflict_watcher(app: tauri::AppHandle) {
+    std::thread::Builder::new()
+        .name("rigel-conflicts".to_string())
+        .spawn(move || {
+            let runtime = match tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+            {
+                Ok(runtime) => runtime,
+                Err(_) => return,
+            };
+            runtime.block_on(async move {
+                let mut watcher: Option<(PathBuf, ConflictWatcher)> = None;
+                loop {
+                    tokio::time::sleep(POLL_INTERVAL).await;
+                    let root = match WATCHED_ROOT.lock() {
+                        Ok(watched) => watched.clone(),
+                        Err(_) => None,
+                    };
+                    let Some(root) = root else {
+                        watcher = None;
+                        continue;
+                    };
+                    if watcher.as_ref().map(|(path, _)| path) != Some(&root) {
+                        watcher = Some((root.clone(), ConflictWatcher::new(&root)));
+                    }
+                    let Some((_, conflicts)) = watcher.as_mut() else {
+                        continue;
+                    };
+                    let Ok(service) = SessionService::open(&root).await else {
+                        continue;
+                    };
+                    let Ok(sessions) = service.list().await else {
+                        continue;
+                    };
+                    let Some(session) = sessions
+                        .iter()
+                        .find(|session| session.status == rigel_core::SessionStatus::Active)
+                        .or_else(|| sessions.first())
+                    else {
+                        continue;
+                    };
+                    let Ok(agents) = service.agents(&session.id).await else {
+                        continue;
+                    };
+                    let running: Vec<Agent> = agents
+                        .into_iter()
+                        .filter(|agent| agent.status == "running")
+                        .collect();
+                    if running.is_empty() {
+                        continue;
+                    }
+                    let claims = ClaimService::new(service.pool().clone(), &root);
+                    if let Ok(recorded) = conflicts.step(&claims, &running).await {
+                        for conflict in recorded {
+                            let _ = app.emit("rigel://conflict", &conflict);
+                        }
+                    }
+                }
+            });
+        })
+        .ok();
+}
+
 #[tauri::command]
 fn turn_cancel(state: State<'_, AppRuntime>, turn: String) -> Result<(), String> {
     state.cancels.cancel_turn(&turn);
@@ -1108,8 +1223,9 @@ fn warm_router() {
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
-        .setup(|_app| {
+        .setup(|app| {
             warm_router();
+            spawn_conflict_watcher(app.handle().clone());
             Ok(())
         })
         .manage(AppRuntime {
@@ -1131,6 +1247,9 @@ pub fn run() {
             turn_cancel,
             approval_pending,
             approval_answer,
+            watch_project,
+            claim_list,
+            conflict_resolve,
             turn_estimate,
             budget_get,
             budget_set,

@@ -5,7 +5,9 @@
 //! `docs/handoff.md` §3.2 (S2).
 
 pub mod agent;
+pub mod attribute;
 pub mod budget;
+pub mod claims;
 pub mod credentials;
 pub mod domain;
 pub mod memory;
@@ -24,9 +26,14 @@ pub use agent::{
     OriginDecision, OriginRequest, POLICIES, Policy, Position, Scopes, ScriptedModel, ServerStatus,
     StopReason, SubagentPolicy, ToolCall, ToolOutcome, ToolSpec, Tools, TurnRun, classify,
 };
+pub use attribute::{Attributed, ConflictWatcher, Observed, POLL_INTERVAL, Watcher};
 pub use budget::{
     BudgetError, BudgetOutcome, BudgetService, BudgetSnapshot, InterruptSink, ReconcileReport,
     TurnQuote, quote_turn,
+};
+pub use claims::{
+    CLAIM_TTL, Claim, ClaimConflict, ClaimError, ClaimResult, ClaimService, STALE_AFTER,
+    UnverifiedChange,
 };
 pub use domain::{AgentEvent, CostSource, EventSink, ItemKind, NullSink, Usage};
 pub use memory::{MemoryError, MemoryFile, MemoryService, WriteMode};
