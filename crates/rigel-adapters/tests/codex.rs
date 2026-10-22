@@ -25,6 +25,7 @@ fn config(cwd: &std::path::Path, transport: Transport) -> CodexConfig {
         sandbox: SandboxMode::ReadOnly,
         approval: ApprovalPolicy::Never,
         transport,
+        skills_budget: rigel_adapters::codex::DEFAULT_SKILLS_BUDGET,
         timeout: Duration::from_secs(10),
         env: Default::default(),
         vendor_login: None,

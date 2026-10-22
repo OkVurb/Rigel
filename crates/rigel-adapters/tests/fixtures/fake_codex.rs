@@ -92,7 +92,6 @@ fn app_server() {
     let stdin = std::io::stdin();
     let mut lines = stdin.lock().lines();
     while let Some(Ok(line)) = lines.next() {
-        let line = line;
         let Ok(message) = serde_json::from_str::<Value>(&line) else {
             continue;
         };

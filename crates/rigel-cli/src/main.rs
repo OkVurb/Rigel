@@ -17,6 +17,7 @@ use serde_json::json;
 mod claims;
 mod harness;
 mod phase3;
+mod worktree;
 
 use harness::{CodexCommand, HarnessCommand};
 use phase3::{AgentCommand, KeyCommand, MemoryCommand, PatchCommand, SnapshotCommand};
@@ -92,6 +93,12 @@ enum Command {
     Claim {
         #[command(subcommand)]
         command: claims::ClaimCommand,
+    },
+
+    /// One private git checkout per agent, merged back through the patch pipeline.
+    Worktree {
+        #[command(subcommand)]
+        command: worktree::WorktreeCommand,
     },
 
     /// The Codex harness: probe it, or run one turn through it.
@@ -384,6 +391,8 @@ async fn main() -> ExitCode {
         Command::Codex { command } => harness::run_codex(command).await,
 
         Command::Harness { command } => harness::run_harness(command, &dir).await,
+
+        Command::Worktree { command } => worktree::run(&dir, command).await,
 
         Command::Mcp {
             project,

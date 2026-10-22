@@ -1,9 +1,10 @@
 //! The ACP client against a scripted agent.
 //!
-//! Neither Cursor nor Cline is installed on this machine, so the fixture binary stands in for the
-//! wire protocol. Every shape it prints follows the published v1 schema, and the assertions are
-//! about what the client *sends back*: the approval outcome, the cancel notification, the version
-//! it accepts. That is the part a fake agent cannot fake for us.
+//! Cursor is not installed on this machine and Cline is, but both are exercised through the same
+//! fixture binary so the suite is deterministic and needs no vendor session: the fixture stands in
+//! for the wire protocol. Every shape it prints follows the published v1 schema, and the assertions
+//! are about what the client *sends back*: the approval outcome, the cancel notification, the
+//! version it accepts. That is the part a fake agent cannot fake for us.
 
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -12,6 +13,7 @@ use std::time::Duration;
 use async_trait::async_trait;
 use rigel_adapters::acp::{AcpConfig, AcpEvent, ApprovalDecision, ApprovalRequest, Approver};
 use rigel_adapters::{AcpClient, Adapter, AuthMode, Harness};
+use rigel_core::ItemKind;
 use rigel_core::credentials::Secret;
 
 fn fake_path() -> PathBuf {
@@ -101,6 +103,17 @@ async fn a_turn_streams_updates_and_routes_the_approval() {
             },
             AcpEvent::MessageDelta {
                 text: "ng".to_string()
+            },
+            // P4.8: the agent's `kind` decides the item kind, and the raw input is kept so the
+            // command the transcript shows is the command the agent asked to run.
+            AcpEvent::ToolCall {
+                tool_call_id: "call-1".to_string(),
+                title: "Run the test suite".to_string(),
+                kind: Some("execute".to_string()),
+                item_kind: ItemKind::Command,
+                operation: "execute",
+                status: Some("pending".to_string()),
+                raw_input: Some(serde_json::json!({ "command": "cargo test" })),
             },
             AcpEvent::ToolCallUpdate {
                 tool_call_id: "call-1".to_string(),
@@ -271,27 +284,46 @@ async fn a_subscription_only_agent_is_not_spawned() {
 }
 
 #[tokio::test]
-async fn cline_has_no_provider_key_so_it_refuses_to_spawn() {
+async fn cline_takes_its_own_key_and_speaks_the_same_protocol() {
     let dir = tempfile::tempdir().unwrap();
     let approver = Arc::new(Recorded {
-        decision: ApprovalDecision::RejectOnce,
+        decision: ApprovalDecision::AllowOnce,
         seen: Mutex::new(Vec::new()),
     });
     let mut config = AcpConfig::cline(dir.path());
     config.exe = fake_path();
+    config.timeout = Duration::from_secs(10);
     config.vendor_login = None;
+    config.env.insert(
+        "CLINE_API_KEY".to_string(),
+        Secret::new("sk-cline-test-must-not-print"),
+    );
+    config.env.insert(
+        "FAKE_ACP_RECORD".to_string(),
+        Secret::new(dir.path().join("record.txt").display().to_string()),
+    );
     assert_eq!(config.args, vec!["--acp".to_string()]);
-    let error = AcpClient::spawn(config, approver)
+
+    let mut client = AcpClient::spawn(config, approver.clone())
         .await
-        .expect_err("Cline has no key path before P4.4");
+        .expect("Cline should initialize with its own key");
+    client.new_session().await.expect("session/new");
+    let turn = client
+        .prompt("say pong", |_| {})
+        .await
+        .expect("the turn should finish");
+
+    assert_eq!(turn.text, "pong");
+    assert_eq!(approver.seen.lock().unwrap().len(), 1);
+    let record = recorded(dir.path());
+    assert!(record.contains("argv=--acp"), "{record}");
     assert!(
-        matches!(
-            error,
-            rigel_adapters::AdapterError::RequiresApiKey {
-                harness: Harness::Cline
-            }
-        ),
-        "unexpected: {error}"
+        record.contains("cline_key=set"),
+        "the Cline key must reach the child: {record}"
+    );
+    assert!(
+        record.contains("key=unset"),
+        "Cursor's key must not leak into Cline: {record}"
     );
 }
 

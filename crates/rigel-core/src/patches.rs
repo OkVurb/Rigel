@@ -62,6 +62,26 @@ pub enum RecoveryState {
     Conflicted,
 }
 
+/// One `@@` block, attributed to the agent whose patch proposed it (P5.6).
+///
+/// The diff text remains the record; this is the index that lets the merged view put a name in
+/// the gutter of every hunk instead of one name per file.
+#[derive(Debug, Clone, Serialize)]
+pub struct AttributedHunk {
+    pub patch_id: String,
+    pub path: String,
+    pub ordinal: i64,
+    pub agent_id: String,
+    pub header: String,
+    pub old_start: i64,
+    pub old_lines: i64,
+    pub new_start: i64,
+    pub new_lines: i64,
+    pub created_at: i64,
+    /// The patch's status: `applied`, `reverted`, `proposed` or `conflicted`.
+    pub status: String,
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct Recovery {
     pub patch_id: String,
@@ -281,6 +301,30 @@ impl PatchPipeline {
         .bind(created_at)
         .execute(&self.pool)
         .await?;
+
+        // Its hunks, before anything can be returned: a patch that exists has an attribution
+        // for every block in its diff.
+        for (ordinal, hunk) in parse_diff_hunks(&diff).into_iter().enumerate() {
+            sqlx::query(
+                "INSERT INTO patch_hunks
+                   (id, patch_id, path, ordinal, agent_id, header, old_start, old_lines,
+                    new_start, new_lines, created_at)
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            )
+            .bind(uuid::Uuid::new_v4().to_string())
+            .bind(&id)
+            .bind(rel)
+            .bind(ordinal as i64)
+            .bind(agent_id)
+            .bind(&hunk.header)
+            .bind(hunk.old_start)
+            .bind(hunk.old_lines)
+            .bind(hunk.new_start)
+            .bind(hunk.new_lines)
+            .bind(created_at)
+            .execute(&self.pool)
+            .await?;
+        }
 
         let tmp = path
             .parent()
@@ -514,6 +558,39 @@ impl PatchPipeline {
         Ok(rows.into_iter().map(Patch::from).collect())
     }
 
+    /// Every hunk in a session, in file order and then creation order, with the patch status.
+    pub async fn attributed_hunks(
+        &self,
+        session_id: &str,
+    ) -> Result<Vec<AttributedHunk>, PatchError> {
+        let rows: Vec<AttributedRow> = sqlx::query_as(
+            "SELECT h.patch_id, h.path, h.ordinal, h.agent_id, h.header, h.old_start,
+                    h.old_lines, h.new_start, h.new_lines, h.created_at, p.status
+             FROM patch_hunks h JOIN patches p ON p.id = h.patch_id
+             WHERE p.session_id = ?
+             ORDER BY h.path, h.created_at, h.ordinal",
+        )
+        .bind(session_id)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows
+            .into_iter()
+            .map(|row| AttributedHunk {
+                patch_id: row.0,
+                path: row.1,
+                ordinal: row.2,
+                agent_id: row.3,
+                header: row.4,
+                old_start: row.5,
+                old_lines: row.6,
+                new_start: row.7,
+                new_lines: row.8,
+                created_at: row.9,
+                status: row.10,
+            })
+            .collect())
+    }
+
     pub async fn get(&self, id: &str) -> Result<Option<Patch>, PatchError> {
         let row: Option<PatchRow> = sqlx::query_as(
             "SELECT id, session_id, agent_id, path, base_hash, result_hash, diff, status,
@@ -583,6 +660,20 @@ impl PatchPipeline {
         Ok(())
     }
 }
+
+type AttributedRow = (
+    String,
+    String,
+    i64,
+    String,
+    String,
+    i64,
+    i64,
+    i64,
+    i64,
+    i64,
+    String,
+);
 
 type PatchRow = (
     String,
@@ -668,6 +759,54 @@ fn lines_keep(text: &str) -> Vec<&str> {
 /// One hunk around the change, with up to three lines of context. Rigel does not try to
 /// produce a pretty multi-hunk diff: the diff is evidence for a human and the exact inverse
 /// for `revert`, and one hunk serves both.
+/// A parsed `@@ -a,b +c,d @@` header.
+#[derive(Debug, Clone, PartialEq)]
+pub struct HunkHeader {
+    pub header: String,
+    pub old_start: i64,
+    pub old_lines: i64,
+    pub new_start: i64,
+    pub new_lines: i64,
+}
+
+/// Every hunk header in a unified diff, in order.
+pub fn parse_diff_hunks(diff: &str) -> Vec<HunkHeader> {
+    let mut out = Vec::new();
+    for line in diff.lines() {
+        let Some(rest) = line.strip_prefix("@@ -") else {
+            continue;
+        };
+        let Some((old, after)) = rest.split_once(" +") else {
+            continue;
+        };
+        let Some((new, _)) = after.split_once(" @@") else {
+            continue;
+        };
+        let parse_range = |range: &str| -> Option<(i64, i64)> {
+            let mut parts = range.split(',');
+            let start = parts.next()?.parse::<i64>().ok()?;
+            let lines = match parts.next() {
+                Some(lines) => lines.parse::<i64>().ok()?,
+                None => 1,
+            };
+            Some((start, lines))
+        };
+        let (Some((old_start, old_lines)), Some((new_start, new_lines))) =
+            (parse_range(old), parse_range(new))
+        else {
+            continue;
+        };
+        out.push(HunkHeader {
+            header: line.trim_end().to_string(),
+            old_start,
+            old_lines,
+            new_start,
+            new_lines,
+        });
+    }
+    out
+}
+
 pub fn unified_diff(path: &str, old: &str, new: &str) -> String {
     if old == new {
         return String::new();

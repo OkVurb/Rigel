@@ -153,7 +153,7 @@ impl Scopes {
     /// Remember an approval at `scope`. `Once` is a no-op: nothing outlives the call.
     pub fn remember(&self, key: &str, scope: ApprovalScope) -> Result<(), String> {
         match scope {
-            ApprovalScope::Once => return Ok(()),
+            ApprovalScope::Once => Ok(()),
             ApprovalScope::Session => {
                 if let Ok(mut session) = self.session.lock() {
                     session.insert(key.to_string());

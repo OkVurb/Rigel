@@ -106,8 +106,8 @@ impl AcpConfig {
         Self::new(Harness::Cline, cwd)
     }
 
-    /// Resolve this harness's key into the child's environment. Cline has no provider key before
-    /// P4.4 writes its own config, so it never gains one from here.
+    /// Resolve this harness's key into the child's environment. Cursor reads `CURSOR_API_KEY`;
+    /// Cline reads `CLINE_API_KEY`, the key its own ACP child authenticates with.
     pub fn inject_credential(&mut self, store: &dyn CredentialStore) -> bool {
         let Some(spec) = credential_spec(self.harness, None) else {
             return false;
@@ -341,6 +341,7 @@ impl AcpClient {
             .env_remove("ANTHROPIC_API_KEY")
             .env_remove("OPENAI_API_KEY")
             .env_remove("CURSOR_API_KEY")
+            .env_remove("CLINE_API_KEY")
             .envs(
                 config
                     .env
@@ -741,8 +742,9 @@ impl Drop for AcpClient {
     }
 }
 
-/// How an ACP harness authenticates. Cline has no provider key before P4.4, so it reports `None`
-/// even when its CLI is logged in — which is why Rigel will not spawn it yet.
+/// How an ACP harness authenticates. Each ACP harness has an explicit key path: Cursor reads
+/// `CURSOR_API_KEY`, Cline reads `CLINE_API_KEY`. A vendor login with no key is a subscription,
+/// which Rigel will not spawn (D21).
 pub(crate) fn acp_auth_mode(config: &AcpConfig) -> AuthMode {
     let Some(spec) = credential_spec(config.harness, None) else {
         return AuthMode::None;
@@ -1109,11 +1111,23 @@ mod tests {
     }
 
     #[test]
-    fn cline_has_no_key_before_its_own_config_exists() {
+    fn cline_uses_the_cline_key_and_the_acp_flag() {
         let mut config = AcpConfig::cline(".");
         config.vendor_login = None;
         assert_eq!(acp_auth_mode(&config), AuthMode::None);
         assert!(config.args.contains(&"--acp".to_string()));
+        struct Key;
+        impl CredentialStore for Key {
+            fn lookup(&self, provider: &str) -> Option<Secret> {
+                (provider == rigel_core::credentials::CLINE).then(|| Secret::new("sk-cline"))
+            }
+        }
+        assert!(config.inject_credential(&Key));
+        assert_eq!(
+            config.env.get("CLINE_API_KEY").map(|key| key.expose()),
+            Some("sk-cline")
+        );
+        assert_eq!(acp_auth_mode(&config), AuthMode::ApiKey);
     }
 
     #[test]

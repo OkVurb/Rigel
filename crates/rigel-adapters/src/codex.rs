@@ -41,6 +41,14 @@ use crate::{
 pub const DEFAULT_MODEL: &str = "gpt-5.6-sol-medium";
 /// The local router's OpenAI-compatible surface.
 pub const DEFAULT_BASE_URL: &str = "http://127.0.0.1:20128/v1";
+/// Codex's available-skills catalogue defaults to 2% of the model window (up to 10 000 tokens).
+/// Rigel sends a much smaller ceiling: nothing on the skills shelf is needed for a task Rigel
+/// started, and the 21 Oct probe showed the catalogue was the difference between a few hundred
+/// and 155 895 input tokens for a one-word answer (P4.19).
+pub const DEFAULT_SKILLS_BUDGET: u32 = 1_000;
+/// Instructions and tool schemas when there is no earlier turn to measure. Deliberately
+/// conservative: the estimate's job is to warn, not to be a bill.
+pub const FIXED_CONTEXT_TOKENS: u64 = 1_500;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -72,6 +80,9 @@ pub struct CodexConfig {
     pub sandbox: SandboxMode,
     pub approval: ApprovalPolicy,
     pub transport: Transport,
+    /// Ceiling on the available-skills catalogue for this turn. `0` disables host skill
+    /// discovery entirely (`features.skip_host_skill_discovery=true`).
+    pub skills_budget: u32,
     /// One turn, start to finish. The router can be slow on the first turn of the day.
     pub timeout: Duration,
     /// Per-agent process environment. Values stay wrapped so debug output is always redacted.
@@ -91,6 +102,7 @@ impl fmt::Debug for CodexConfig {
             .field("sandbox", &self.sandbox)
             .field("approval", &self.approval)
             .field("transport", &self.transport)
+            .field("skills_budget", &self.skills_budget)
             .field("timeout", &self.timeout)
             .field("env", &self.env)
             .field("vendor_login", &self.vendor_login)
@@ -109,6 +121,7 @@ impl CodexConfig {
             sandbox: SandboxMode::ReadOnly,
             approval: ApprovalPolicy::Never,
             transport: Transport::Auto,
+            skills_budget: DEFAULT_SKILLS_BUDGET,
             timeout: Duration::from_secs(180),
             env: BTreeMap::new(),
             vendor_login: default_vendor_login(),
@@ -178,6 +191,19 @@ pub struct CodexUsage {
     pub output_tokens: u64,
     #[serde(default)]
     pub reasoning_output_tokens: u64,
+}
+
+/// A pre-flight input estimate. It is not a bill: `TurnResult::usage` replaces it once the
+/// provider reports what it actually charged.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ContextEstimate {
+    pub prompt_tokens: u64,
+    pub skills_tokens: u32,
+    pub fixed_tokens: u64,
+    pub input_tokens: u64,
+    pub last_turn_input: Option<u64>,
+    /// Which term dominated the sum, so the CLI can print a sentence a person can check.
+    pub basis: &'static str,
 }
 
 #[derive(Debug, Clone)]
@@ -266,27 +292,66 @@ impl CodexAdapter {
             .map_err(|failure| AdapterError::from(failure.redacted(&secrets)))
     }
 
-    /// The `-c` overrides for pointing Codex at a router. Written here, never taken from
-    /// `omniroute launch-codex` (see the module docs).
+    /// The `-c` overrides for pointing Codex at a router and keeping its context small. Written
+    /// here, never taken from `omniroute launch-codex` (see the module docs).
     fn overrides(&self) -> Vec<String> {
-        if self.config.base_url.trim().is_empty() {
-            return Vec::new();
+        let mut overrides = Vec::new();
+        if !self.config.base_url.trim().is_empty() {
+            overrides.extend([
+                "model_provider=\"omniroute\"".to_string(),
+                "model_providers.omniroute.name=\"OmniRoute\"".to_string(),
+                format!(
+                    "model_providers.omniroute.base_url=\"{}\"",
+                    self.config.base_url
+                ),
+                "model_providers.omniroute.wire_api=\"responses\"".to_string(),
+                // A custom provider authenticates with the variable it names, and Codex sends that
+                // value as the bearer token. `requires_openai_auth` must stay false here: it selects
+                // Codex's own OpenAI auth (the ChatGPT login in `~/.codex/auth.json`), which is the
+                // subscription reuse D21 forbids, and it bypasses the per-agent environment.
+                "model_providers.omniroute.env_key=\"OPENAI_API_KEY\"".to_string(),
+                "model_providers.omniroute.requires_openai_auth=false".to_string(),
+            ]);
         }
-        vec![
-            "model_provider=\"omniroute\"".to_string(),
-            "model_providers.omniroute.name=\"OmniRoute\"".to_string(),
-            format!(
-                "model_providers.omniroute.base_url=\"{}\"",
-                self.config.base_url
-            ),
-            "model_providers.omniroute.wire_api=\"responses\"".to_string(),
-            // A custom provider authenticates with the variable it names, and Codex sends that
-            // value as the bearer token. `requires_openai_auth` must stay false here: it selects
-            // Codex's own OpenAI auth (the ChatGPT login in `~/.codex/auth.json`), which is the
-            // subscription reuse D21 forbids, and it bypasses the per-agent environment.
-            "model_providers.omniroute.env_key=\"OPENAI_API_KEY\"".to_string(),
-            "model_providers.omniroute.requires_openai_auth=false".to_string(),
-        ]
+        // P4.19: the available-skills catalogue is context, not capability. `0` turns host skill
+        // discovery off for this turn; anything else is a token ceiling for the catalogue.
+        if self.config.skills_budget == 0 {
+            overrides.push("features.skip_host_skill_discovery=true".to_string());
+        } else {
+            overrides.push(format!(
+                "skills.max_context_tokens={}",
+                self.config.skills_budget
+            ));
+        }
+        overrides
+    }
+
+    /// What this turn will cost in input tokens before it is sent. When the caller knows the
+    /// previous turn's real count, that is the better basis: the fixed context was already
+    /// measured once, and only the new prompt is added. Otherwise the fixed allowance and the
+    /// skills ceiling are summed, and the result says so.
+    pub fn estimate_input(&self, prompt: &str, last_turn_input: Option<u64>) -> ContextEstimate {
+        let prompt_tokens = rigel_core::agent::pricing::tokens_for(prompt.chars().count());
+        let skills_tokens = self.config.skills_budget;
+        let (input_tokens, fixed_tokens, basis) = match last_turn_input {
+            Some(previous) => (previous + prompt_tokens, 0, "last turn + prompt"),
+            None => {
+                let fixed = FIXED_CONTEXT_TOKENS + u64::from(skills_tokens);
+                (
+                    prompt_tokens + fixed,
+                    FIXED_CONTEXT_TOKENS,
+                    "prompt + fixed + skills",
+                )
+            }
+        };
+        ContextEstimate {
+            prompt_tokens,
+            skills_tokens,
+            fixed_tokens,
+            input_tokens,
+            last_turn_input,
+            basis,
+        }
     }
 
     fn command(&self) -> Command {
@@ -1343,9 +1408,63 @@ mod tests {
                 .any(|pair| pair.contains("env_key=\"OPENAI_API_KEY\""))
         );
 
+        // The skills ceiling is not provider-specific and must survive a direct connection.
+        assert!(
+            overrides
+                .iter()
+                .any(|pair| pair == "skills.max_context_tokens=1000"),
+            "the default skills ceiling must be sent: {overrides:?}"
+        );
+
         let mut direct = CodexConfig::router(".");
         direct.base_url = String::new();
-        assert!(CodexAdapter::new(direct).overrides().is_empty());
+        let direct_overrides = CodexAdapter::new(direct).overrides();
+        assert!(
+            direct_overrides
+                .iter()
+                .all(|pair| !pair.starts_with("model_provider")),
+            "a direct connection invents no provider: {direct_overrides:?}"
+        );
+        assert_eq!(direct_overrides.len(), 1);
+    }
+
+    #[test]
+    fn disabling_skills_is_a_feature_flag_and_zero_budget_is_honest() {
+        let mut config = CodexConfig::router(".");
+        config.skills_budget = 0;
+        let overrides = CodexAdapter::new(config).overrides();
+        assert!(
+            overrides
+                .iter()
+                .any(|pair| pair == "features.skip_host_skill_discovery=true"),
+            "{overrides:?}"
+        );
+        assert!(
+            overrides
+                .iter()
+                .all(|pair| !pair.starts_with("skills.max_context_tokens")),
+            "a zero ceiling is expressed by disabling discovery, not by asking for 0 tokens"
+        );
+    }
+
+    #[test]
+    fn the_estimate_uses_the_last_turn_when_there_is_one() {
+        let adapter = CodexAdapter::new(CodexConfig::router("."));
+        let cold = adapter.estimate_input("say pong", None);
+        assert_eq!(cold.prompt_tokens, 2);
+        assert_eq!(cold.skills_tokens, DEFAULT_SKILLS_BUDGET);
+        assert_eq!(cold.fixed_tokens, FIXED_CONTEXT_TOKENS);
+        assert_eq!(cold.input_tokens, 2 + FIXED_CONTEXT_TOKENS + 1_000);
+        assert_eq!(cold.basis, "prompt + fixed + skills");
+
+        let warm = adapter.estimate_input("say pong", Some(155_895));
+        assert_eq!(warm.input_tokens, 155_895 + 2);
+        assert_eq!(warm.last_turn_input, Some(155_895));
+        assert_eq!(warm.basis, "last turn + prompt");
+        assert!(
+            warm.input_tokens > cold.input_tokens,
+            "a measured 155k turn must not be estimated as a 3k one"
+        );
     }
 
     #[test]

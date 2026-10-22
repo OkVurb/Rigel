@@ -12,10 +12,67 @@ import { useEffect, useMemo, useState } from "react";
 import {
   api,
   isTauri,
+  type AttributedHunk,
   type ClaimConflict,
   type CoordinationView,
   type Patch,
 } from "./api";
+
+/** Split a stored diff into its blocks, keeping each `@@` header with its body. */
+function diffBlocks(diff: string): { header: string; body: string }[] {
+  const lines = diff.split("\n");
+  const blocks: { header: string; body: string[] }[] = [];
+  for (const line of lines) {
+    if (line.startsWith("@@")) {
+      blocks.push({ header: line, body: [] });
+    } else if (blocks.length > 0) {
+      blocks[blocks.length - 1].body.push(line);
+    }
+  }
+  return blocks.map((block) => ({ header: block.header, body: block.body.join("\n") }));
+}
+
+/**
+ * One patch, with a gutter per block. Before P5.6 the whole file carried one agent; now each
+ * `@@` block names the agent whose patch produced it, which is the whole reason the merged view
+ * exists when several agents touch one file.
+ */
+function PatchBody({
+  patch,
+  hunks,
+  nameOf,
+}: {
+  patch: Patch;
+  hunks: AttributedHunk[];
+  nameOf: (agentId: string) => string;
+}) {
+  const blocks = diffBlocks(patch.diff);
+  if (blocks.length === 0) {
+    return <pre className="patch-diff">{patch.diff}</pre>;
+  }
+  return (
+    <div className="hunk-list">
+      {blocks.map((block, index) => {
+        const hunk = hunks.find((row) => row.ordinal === index && row.path === patch.path);
+        const agent = hunk ? nameOf(hunk.agent_id) : nameOf(patch.agent_id);
+        return (
+          <div className="hunk" key={`${patch.id}-${index}`}>
+            <div className="hunk-head">
+              <span className="hunk-agent" title={hunk ? hunk.agent_id : patch.agent_id}>
+                {agent}
+              </span>
+              <span className="mono hunk-range">{block.header}</span>
+              {hunk && hunk.status !== "applied" ? (
+                <span className={`pill ${hunk.status}`}>{hunk.status}</span>
+              ) : null}
+            </div>
+            <pre className="patch-diff">{block.body}</pre>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
 
 const PREVIEW: CoordinationView = {
   claims: [
@@ -101,6 +158,7 @@ export default function DiffView({ project, session }: { project: string; sessio
   const tauri = isTauri();
   const [view, setView] = useState<CoordinationView>(() => (tauri ? { claims: [], unverified_changes: [], conflicts: [] } : PREVIEW));
   const [patches, setPatches] = useState<Patch[]>(() => (tauri ? [] : PREVIEW_PATCHES));
+  const [hunks, setHunks] = useState<AttributedHunk[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
 
@@ -109,13 +167,15 @@ export default function DiffView({ project, session }: { project: string; sessio
     const load = async () => {
       if (!tauri) return;
       try {
-        const [next, nextPatches] = await Promise.all([
+        const [next, nextPatches, nextHunks] = await Promise.all([
           api.claimList(project),
           session ? api.listPatches(project, session) : Promise.resolve([]),
+          session ? api.patchHunks(project, session) : Promise.resolve([]),
         ]);
         if (alive) {
           setView(next);
           setPatches(nextPatches);
+          setHunks(nextHunks);
         }
       } catch (problem) {
         if (alive) setError(problem instanceof Error ? problem.message : String(problem));
@@ -135,7 +195,16 @@ export default function DiffView({ project, session }: { project: string; sessio
     return map;
   }, [view.claims]);
 
-  const name = (id: string | null) => (id ? names.get(id) ?? id : "unattributed");
+  const name = (id: string | null) => (id ? names.get(id) ?? id.slice(0, 8) : "unattributed");
+  const hunksByPath = useMemo(() => {
+    const map = new Map<string, AttributedHunk[]>();
+    for (const hunk of hunks) {
+      const rows = map.get(hunk.path) ?? [];
+      rows.push(hunk);
+      map.set(hunk.path, rows);
+    }
+    return map;
+  }, [hunks]);
 
   const resolve = async (conflict: ClaimConflict, resolution: string) => {
     setBusy(conflict.id);
@@ -279,7 +348,11 @@ export default function DiffView({ project, session }: { project: string; sessio
                   revert
                 </button>
               </header>
-              <pre className="patch-diff">{patch.diff}</pre>
+              <PatchBody
+                patch={patch}
+                hunks={hunksByPath.get(patch.path) ?? []}
+                nameOf={(id) => name(id)}
+              />
             </article>
           ))
         )}

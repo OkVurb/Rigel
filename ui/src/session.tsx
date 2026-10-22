@@ -802,7 +802,7 @@ export default function SessionView({
                   {observedOnly(agent) ? (
                     <span
                       className="tag observed"
-                      title="Rigel shows this agent's turns but cannot send it new work yet; harness turns arrive with P4.10."
+                      title="Rigel shows this agent's turns but cannot send it new work yet."
                     >
                       observed only
                     </span>
@@ -822,8 +822,8 @@ export default function SessionView({
           <span className={`status-dot ${live ? "running" : "idle"}`} />
           <span>{live ? `turn ${liveTurn?.seq} running` : "idle"}</span>
           <span className="grow" />
-          {/* D40 lists claims beside spend. The claim ledger is Phase 8, so the roster says so
-              instead of rendering an empty column that would read as "nobody holds any files". */}
+          {/* D40 lists claims beside spend. The roster points at the Diff tab, where the ledger
+              shows holder, staleness and conflicts together rather than a bare count here. */}
           <span
             className="claim-state"
             title="Advisory claims are in the ledger; the Diff tab shows who holds what, and who wrote a file they did not claim."
@@ -1152,8 +1152,9 @@ export default function SessionView({
 }
 
 /**
- * Only the native agent accepts a turn today; the harnesses are watched until P4.10 wires their
- * turns. D40 wants that difference visible, so a harness row says so rather than looking sendable.
+ * Only the native agent accepts a turn; harness turns reach the transcript through `rigel codex`
+ * and `rigel agent acp`. D40 wants that difference visible, so a harness row says so rather than
+ * looking sendable.
  */
 function observedOnly(agent: Agent): boolean {
   return agent.harness !== "native";
@@ -1363,17 +1364,31 @@ function ItemRow({ item, raw }: { item: Item; raw: boolean }) {
 
   if (item.kind === "command") {
     const result = bodyRecord(item, "result");
-    const command = result && typeof result.command === "string" ? result.command : "?";
+    // A native command carries its text under `result`; a harness command is recorded from the
+    // adapter's own vocabulary (P4.8), so the same line reads the same way in the window.
+    const rawInput = bodyRecord(item, "raw_input");
+    const command =
+      result && typeof result.command === "string"
+        ? result.command
+        : bodyText(item, "command") ||
+          (rawInput && typeof rawInput.command === "string" ? rawInput.command : "?");
     const stdout = result && typeof result.stdout === "string" ? result.stdout : "";
     const stderr = result && typeof result.stderr === "string" ? result.stderr : "";
+    const harnessCode =
+      typeof item.body?.exit_code === "number" ? String(item.body.exit_code) : null;
+    const ok = item.status === "ok" || item.status === "complete" || item.status === "completed";
     const code =
       result && typeof result.exit_code === "number"
         ? String(result.exit_code)
-        : result && result.approved === false
-          ? "denied"
-          : result && result.timed_out === true
-            ? "timed out"
-            : "no exit code";
+        : harnessCode
+          ? harnessCode
+          : result && result.approved === false
+            ? "denied"
+            : result && result.timed_out === true
+              ? "timed out"
+              : item.status === "running" || item.status === "pending"
+                ? "running"
+                : "no exit code";
     const destructive = result !== null && Array.isArray(result.destructive) && result.destructive.length > 0;
     const round = result !== null && typeof result.deliberation === "object" && result.deliberation !== null
       ? (result.deliberation as { positions?: { stance?: string; text?: string }[] })
@@ -1383,7 +1398,7 @@ function ItemRow({ item, raw }: { item: Item; raw: boolean }) {
       : "";
     return (
       <>
-        <details className={`tool-line${item.status === "ok" ? "" : " bad"}`}>
+        <details className={`tool-line${ok ? "" : " bad"}`}>
           <summary>
             <span className="tool-name">$</span>
             <span className="tool-args">{command}</span>

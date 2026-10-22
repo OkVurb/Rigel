@@ -632,7 +632,7 @@ mod tests {
             .await
             .unwrap();
         assert!(first[0].held);
-        assert_eq!(first[0].held_by.as_ref().unwrap().base_hash.is_some(), true);
+        assert!(first[0].held_by.as_ref().unwrap().base_hash.is_some());
 
         let second = claims
             .acquire(&two, &path, "also the button")

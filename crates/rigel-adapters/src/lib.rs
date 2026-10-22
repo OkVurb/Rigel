@@ -22,7 +22,9 @@ pub use acp::{
 pub use claude::{
     ClaudeAdapter, ClaudeConfig, ClaudeEvent, ClaudeTurn, ClaudeUsage, PermissionMode,
 };
-pub use codex::{CodexAdapter, CodexConfig, CodexEvent, CodexUsage, Transport, TurnResult};
+pub use codex::{
+    CodexAdapter, CodexConfig, CodexEvent, CodexUsage, ContextEstimate, Transport, TurnResult,
+};
 pub use normalise::NormalItem;
 pub use registry::{AdapterCache, probe_all, probe_cached};
 
@@ -122,7 +124,13 @@ pub fn credential_spec(harness: Harness, base_url: Option<&str>) -> Option<Crede
             provider: rigel_core::credentials::CURSOR,
             env_var: "CURSOR_API_KEY",
         }),
-        Harness::Native | Harness::Cline => None,
+        // Cline's ACP child authenticates with the Cline key, not a raw model-vendor key:
+        // `cline --acp` reads it from `CLINE_API_KEY` and resolves the provider itself (P4.4).
+        Harness::Cline => Some(CredentialSpec {
+            provider: rigel_core::credentials::CLINE,
+            env_var: "CLINE_API_KEY",
+        }),
+        Harness::Native => None,
     }
 }
 
@@ -188,6 +196,10 @@ mod tests {
             credential_spec(Harness::Cursor, None).unwrap().env_var,
             "CURSOR_API_KEY"
         );
+        let cline = credential_spec(Harness::Cline, None).expect("Cline has a key path");
+        assert_eq!(cline.provider, rigel_core::credentials::CLINE);
+        assert_eq!(cline.env_var, "CLINE_API_KEY");
+        assert_eq!(credential_spec(Harness::Native, None), None);
     }
 }
 
@@ -209,8 +221,7 @@ pub struct HarnessInfo {
     pub auth_mode: AuthMode,
     pub capabilities: Capabilities,
     /// Keychain provider named in the UI's `Needs API key · <provider>` line. `None` means the
-    /// harness has no single key to install from this screen (Cline configures providers per
-    /// agent, P4.4).
+    /// harness has no key of its own (the native agent reads provider keys per model).
     #[serde(default)]
     pub provider: Option<String>,
     /// The copy-paste install command, set only while `installed` is false.

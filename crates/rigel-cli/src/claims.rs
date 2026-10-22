@@ -197,7 +197,10 @@ async fn release(
             return ExitCode::from(1);
         }
     };
-    match claims.release(&holder, &[canonical.clone()], reason).await {
+    match claims
+        .release(&holder, std::slice::from_ref(&canonical), reason)
+        .await
+    {
         Ok(released) if released.is_empty() => {
             if as_json {
                 println!(

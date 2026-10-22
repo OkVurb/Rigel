@@ -19,6 +19,7 @@ pub mod skills;
 pub mod snapshot;
 pub mod storage;
 pub mod tree;
+pub mod worktree;
 pub use agent::{
     AgentError, ApprovalScope, Cancels, ChatMessage, ChatRequest, CommandApprover, CommandDecision,
     CommandRequest, Coordinator, DEFAULT_MAX_STEPS, Deliberation, Deliberator, Delta, Finding,
@@ -38,7 +39,10 @@ pub use claims::{
 pub use domain::{AgentEvent, CostSource, EventSink, ItemKind, NullSink, Usage};
 pub use memory::{MemoryError, MemoryFile, MemoryService, WriteMode};
 pub use migrate::{INDEX_MIGRATIONS, MigrateError, Migration, PROJECT_MIGRATIONS, apply, now_ms};
-pub use patches::{Patch, PatchError, PatchPipeline, Recovery, RecoveryState, StopAt};
+pub use patches::{
+    AttributedHunk, HunkHeader, Patch, PatchError, PatchPipeline, Recovery, RecoveryState, StopAt,
+    parse_diff_hunks,
+};
 pub use resume::{ResumeError, ResumeOutcome};
 pub use session::{
     Agent, Checkpoint, Item, Session, SessionError, SessionService, SessionStatus, Turn,
@@ -53,3 +57,6 @@ pub use snapshot::{
     SnapshotError, SnapshotKind, SnapshotService,
 };
 pub use storage::{StorageError, Store, default_index_dir};
+pub use worktree::{
+    MergeLine, MergeReport, MergeStatus, WORKTREES_DIR, Worktree, WorktreeError, WorktreeService,
+};

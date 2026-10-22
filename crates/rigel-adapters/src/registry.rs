@@ -10,8 +10,8 @@
 //!
 //! Auth classification follows §4.4 and is decided from **presence only**: a keychain (or
 //! environment) key means `ApiKey`; a vendor login file means `Subscription`; neither means
-//! `None`. No credential file is ever opened, and Cline deliberately reports `None` until P4.4
-//! writes its per-agent provider config.
+//! `None`. No credential file is ever opened. Cline's key is `rigel/cline` for the same reason
+//! Cursor's is `rigel/cursor`: its ACP child has its own key path.
 
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
@@ -77,7 +77,7 @@ pub fn install_hint(harness: Harness) -> String {
 }
 
 /// The vendor login artefact that makes a harness subscription-authenticated. Checked for
-/// existence only. Cline has none: its provider keys live in a per-agent config (P4.4).
+/// existence only. Cline has none: its ACP child takes a `CLINE_API_KEY`, not a login file.
 pub fn vendor_login(harness: Harness) -> Option<PathBuf> {
     let home = std::env::var_os("USERPROFILE")
         .or_else(|| std::env::var_os("HOME"))
@@ -164,7 +164,8 @@ pub fn parse_version(text: &str) -> Option<String> {
 }
 
 /// Probe every harness. Codex and Claude report through their adapter's configured credentials;
-/// Cursor and Cline have no turn adapter yet, so their probe is version plus auth classification.
+/// the ACP harnesses (Cursor, Cline) report version plus auth classification. Their turn adapter
+/// is the shared `AcpClient`, which refuses to start without the matching key.
 pub async fn probe_all(store: &dyn CredentialStore) -> Vec<HarnessInfo> {
     let mut infos = Vec::with_capacity(HARNESSES.len());
     for harness in HARNESSES {
@@ -317,20 +318,23 @@ fn resolve_executable(name: &str) -> Option<PathBuf> {
         return direct.is_file().then(|| direct.to_path_buf());
     }
     let path = std::env::var_os("PATH")?;
-    for dir in std::env::split_paths(&path) {
-        let candidate = dir.join(name);
+    std::env::split_paths(&path).find_map(|dir| pick_in_dir(&dir, name))
+}
+
+/// Choose one command in one directory. On Windows the `PATHEXT` names are tried **before** the
+/// bare name, because npm writes a POSIX shell shim with no extension beside the real `cline.cmd`
+/// (and `codex.cmd`, and so on). `CreateProcess` cannot run the shim, so preferring it makes an
+/// installed harness look installed and then fail to spawn.
+fn pick_in_dir(dir: &Path, name: &str) -> Option<PathBuf> {
+    #[cfg(windows)]
+    for extension in windows_extensions() {
+        let candidate = dir.join(format!("{name}{extension}"));
         if candidate.is_file() {
             return Some(candidate);
         }
-        #[cfg(windows)]
-        for extension in windows_extensions() {
-            let candidate = dir.join(format!("{name}{extension}"));
-            if candidate.is_file() {
-                return Some(candidate);
-            }
-        }
     }
-    None
+    let candidate = dir.join(name);
+    candidate.is_file().then_some(candidate)
 }
 
 #[cfg(windows)]
@@ -535,6 +539,28 @@ mod tests {
         assert!(!capabilities(Harness::Claude, None).nested_agents);
     }
 
+    #[cfg(windows)]
+    #[test]
+    fn an_npm_shim_loses_to_the_runnable_batch_file() {
+        let dir = tempfile::tempdir().unwrap();
+        // Exactly what npm leaves behind for `cline`: a sh script named `cline`, a `cline.cmd`
+        // CreateProcess can run, and a `cline.ps1` that PATHEXT does not list here.
+        std::fs::write(
+            dir.path().join("cline"),
+            "#!/bin/sh
+exit 0
+",
+        )
+        .unwrap();
+        std::fs::write(dir.path().join("cline.cmd"), "@echo off").unwrap();
+        let picked = pick_in_dir(dir.path(), "cline").expect("one of them is chosen");
+        assert_eq!(
+            picked.file_name().and_then(|name| name.to_str()),
+            Some("cline.cmd"),
+            "the bare shim must not win over the runnable shim"
+        );
+    }
+
     #[test]
     fn auth_classification_prefers_a_key_and_never_invents_one() {
         assert_eq!(auth_from_presence(true, true), AuthMode::ApiKey);
@@ -543,8 +569,10 @@ mod tests {
     }
 
     #[test]
-    fn cline_has_no_single_provider_before_p4_4() {
-        assert_eq!(credential_spec(Harness::Cline, None), None);
+    fn cline_probes_as_its_own_provider_with_no_login_file() {
+        let spec = credential_spec(Harness::Cline, None).expect("Cline has a key path");
+        assert_eq!(spec.provider, rigel_core::credentials::CLINE);
+        assert_eq!(spec.env_var, "CLINE_API_KEY");
         assert_eq!(vendor_login(Harness::Cline), None);
         assert!(capabilities(Harness::Cline, None).acp);
     }

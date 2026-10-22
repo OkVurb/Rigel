@@ -21,12 +21,12 @@ use std::sync::Arc;
 use rigel_core::agent::approval::{ApprovalBus, PendingApproval};
 use rigel_core::agent::{Cancels, Coordinator, DEFAULT_MAX_STEPS, fixed_context_chars};
 use rigel_core::{
-    Agent, AgentEvent, ApprovalScope, BudgetService, ClaimConflict, ClaimService, CommandApprover,
-    CommandDecision, CommandRequest, ConflictWatcher, EventSink, InterruptSink, MemoryFile,
-    MemoryService, Model, OpenRouterModel, POLL_INTERVAL, Patch, PatchPipeline, ResumeOutcome,
-    Scopes, Session, SessionService, SkillDetail, SkillIndex, SkillsError, StopAt, Store,
-    SubagentPolicy, SyncPolicy, Tools, Turn, TurnQuote, TurnTranscript, UnverifiedChange, Usage,
-    WriteMode, credentials, skills::search::SearchHit,
+    Agent, AgentEvent, ApprovalScope, AttributedHunk, BudgetService, ClaimConflict, ClaimService,
+    CommandApprover, CommandDecision, CommandRequest, ConflictWatcher, EventSink, InterruptSink,
+    MemoryFile, MemoryService, Model, OpenRouterModel, POLL_INTERVAL, Patch, PatchPipeline,
+    ResumeOutcome, Scopes, Session, SessionService, SkillDetail, SkillIndex, SkillsError, StopAt,
+    Store, SubagentPolicy, SyncPolicy, Tools, Turn, TurnQuote, TurnTranscript, UnverifiedChange,
+    Usage, WriteMode, credentials, skills::search::SearchHit,
 };
 use serde::{Deserialize, Serialize};
 use tauri::{Emitter, State};
@@ -868,6 +868,19 @@ fn patch_list(project: String, session: String) -> Result<Vec<Patch>, String> {
 }
 
 #[tauri::command]
+fn patch_hunks(project: String, session: String) -> Result<Vec<AttributedHunk>, String> {
+    tauri::async_runtime::block_on(async move {
+        let service = SessionService::open(Path::new(&project))
+            .await
+            .map_err(message)?;
+        PatchPipeline::new(Path::new(&project), service.pool().clone())
+            .attributed_hunks(&session)
+            .await
+            .map_err(message)
+    })
+}
+
+#[tauri::command]
 fn patch_revert(project: String, id: String) -> Result<Patch, String> {
     tauri::async_runtime::block_on(async move {
         let service = SessionService::open(Path::new(&project))
@@ -1255,6 +1268,7 @@ pub fn run() {
             budget_set,
             budget_raise,
             patch_list,
+            patch_hunks,
             patch_revert,
             memory_read,
             memory_write,

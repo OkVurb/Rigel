@@ -127,7 +127,7 @@ The prototype's Discover view talks to two marketplaces that send no CORS header
 | Memory | **real**: committed `MEMORY.md` + topics per agent, absolute-path/secret validator, index rebuild |
 | MCP | **real**: stdio server scoped to `--session` and `--agent`, sharing the same tools |
 | Codex harness | **real**: `rigel codex probe` and one turn through `codex app-server`, with `codex exec --json` as the tested fallback; Rigel writes the router `-c` overrides itself (verified against Codex 0.162.1) |
-| Cursor/Cline harness | **real protocol**: `rigel agent acp --harness cursor|cline` drives one ACP turn, records session updates and both sides of every permission request, and refuses a subscription-only identity; each harness takes its own key (`CURSOR_API_KEY`, `CLINE_API_KEY`) and is probed separately. The approval surface is the CLI prompt until P4.10. Verified against a scripted ACP agent — neither CLI is installed on this machine |
+| Cursor/Cline harness | **real protocol**: `rigel agent acp --harness cursor|cline` drives one ACP turn, records session updates and both sides of every permission request, and refuses a subscription-only identity; each harness takes its own key (`CURSOR_API_KEY`, `CLINE_API_KEY`) and is probed separately. An ACP run asks on the CLI's stdin, and the window card is the native agent's surface. Verified against a scripted ACP agent — neither CLI is installed on this machine |
 | Prototype migration | `rigel skills import --from` + [the export snippet](docs/migrating-prototype-index.md) |
 | Discover / Targets / Dependencies (prototype) | still the Phase 0 browser app; Phase 6 ports them |
 
@@ -153,6 +153,7 @@ The prototype's Discover view talks to two marketplaces that send no CORS header
 - `node scripts/handoff-status.mjs` — checklist progress per phase; fails if the §11 summary table is stale
 - `bash scripts/dev.sh` — local dev: the desktop shell under `infisical run --env=dev`, with the setup steps in [INFISICAL.md](INFISICAL.md)
 - `bash scripts/p3-exit-test.sh` — the Phase 3 exit test; needs a built `rigel` and `python`
+- `bash scripts/p5-exit-test.sh` — two agents on one file: conflict in two seconds, no "locked"
 - `scripts/fixtures/p4-subagents.json` — a scripted parent that delegates to two cheap readers; `rigel agent run --script` prints their bills
 
 ## Limits, stated plainly

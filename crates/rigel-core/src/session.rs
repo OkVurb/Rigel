@@ -70,6 +70,8 @@ pub struct Agent {
     pub harness: String,
     pub role: Option<String>,
     pub model: Option<String>,
+    /// The agent's private checkout, when it was given one (P5.5).
+    pub worktree: Option<String>,
     pub status: String,
     pub started_at: i64,
     pub spend_cents: i64,
@@ -318,7 +320,7 @@ impl SessionService {
 
     pub async fn agents(&self, session_id: &str) -> Result<Vec<Agent>, SessionError> {
         let rows: Vec<AgentRow> = sqlx::query_as(
-            "SELECT id, session_id, harness, role, model, status, started_at,
+            "SELECT id, session_id, harness, role, model, worktree, status, started_at,
                     spend_cents, spend_micros, tokens_in, tokens_out
              FROM agents WHERE session_id = ? ORDER BY started_at, rowid",
         )
@@ -330,7 +332,7 @@ impl SessionService {
 
     pub async fn agent(&self, id: &str) -> Result<Agent, SessionError> {
         let row: Option<AgentRow> = sqlx::query_as(
-            "SELECT id, session_id, harness, role, model, status, started_at,
+            "SELECT id, session_id, harness, role, model, worktree, status, started_at,
                     spend_cents, spend_micros, tokens_in, tokens_out
              FROM agents WHERE id = ?",
         )
@@ -786,6 +788,7 @@ type AgentRow = (
     String,
     Option<String>,
     Option<String>,
+    Option<String>,
     String,
     i64,
     i64,
@@ -801,12 +804,13 @@ fn agent_from_row(row: AgentRow) -> Agent {
         harness: row.2,
         role: row.3,
         model: row.4,
-        status: row.5,
-        started_at: row.6,
-        spend_cents: row.7,
-        spend_micros: row.8,
-        tokens_in: row.9,
-        tokens_out: row.10,
+        worktree: row.5,
+        status: row.6,
+        started_at: row.7,
+        spend_cents: row.8,
+        spend_micros: row.9,
+        tokens_in: row.10,
+        tokens_out: row.11,
     }
 }
 

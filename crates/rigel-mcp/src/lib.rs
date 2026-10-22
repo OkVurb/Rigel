@@ -280,7 +280,7 @@ async fn call(ctx: &McpContext, name: &str, args: Value) -> Result<Value, Value>
                             "held": claim.held,
                         })).collect::<Vec<_>>(),
                         "unverified_changes": unverified.iter()
-                            .filter(|change| path.map_or(true, |path| change.path == path))
+                            .filter(|change| path.as_ref().is_none_or(|path| change.path == *path))
                             .map(|change| json!({
                                 "path": change.path,
                                 "agent": change.agent,

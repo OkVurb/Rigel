@@ -52,6 +52,17 @@ fn main() {
             }
         ),
     );
+    record(
+        &record_path,
+        &format!(
+            "cline_key={}",
+            if std::env::var("CLINE_API_KEY").is_ok() {
+                "set"
+            } else {
+                "unset"
+            }
+        ),
+    );
 
     let stdin = std::io::stdin();
     let mut lines = stdin.lock().lines();
@@ -249,6 +260,25 @@ fn run_turn(
             { "optionId": "deny", "name": "Reject", "kind": "reject_once" }
         ])
     };
+    // The Phase 4 exit test asks each harness to run the same diagnostic command; the default
+    // stays the test suite so the other fixtures read like a real turn.
+    let (title, command) = if mode == "doctor" {
+        ("Run rigel doctor", "rigel doctor --json")
+    } else {
+        ("Run the test suite", "cargo test")
+    };
+    // A real agent announces the call before asking to run it, which is what gives the turn a
+    // command item carrying the text the user approves.
+    update(
+        "tool_call",
+        json!({
+            "toolCallId": "call-1",
+            "title": title,
+            "kind": "execute",
+            "status": "pending",
+            "rawInput": { "command": command }
+        }),
+    );
     let permission_id = 900;
     emit(json!({
         "jsonrpc": "2.0",
@@ -258,9 +288,9 @@ fn run_turn(
             "sessionId": "sess-1",
             "toolCall": {
                 "toolCallId": "call-1",
-                "title": "Run the test suite",
+                "title": title,
                 "kind": "execute",
-                "rawInput": { "command": "cargo test" }
+                "rawInput": { "command": command }
             },
             "options": options
         }

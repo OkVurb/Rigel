@@ -1,11 +1,13 @@
 //! The `rigel codex` surface: probe the harness, or run one turn through it.
 //!
-//! This is the first external adapter wired to the CLI (P4.1, P4.5). It deliberately does not
-//! touch the session store yet: the point today is that the protocol works through Rigel's own
-//! binary, with the same `-c` overrides the probe recorded (see handoff §4.2).
+//! It is the first external adapter wired to the CLI (P4.1, P4.5). A turn is a real session turn:
+//! it opens the newest session (or starts one), records the prompt, normalised items, approvals,
+//! answer and a priced `Usage` row, and closes the turn. The estimate is printed before the
+//! request (P4.19), and a turn left running by a killed process is marked `interrupted` on the
+//! next run for that agent only.
 
 use std::io::Write;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use async_trait::async_trait;
@@ -13,11 +15,11 @@ use clap::Subcommand;
 use rigel_adapters::registry::{self, CACHE_FILE};
 use rigel_adapters::{
     Adapter, AdapterError, ApprovalDecision, ApprovalRequest, Approver, CodexAdapter, CodexConfig,
-    CodexEvent, Transport,
+    CodexEvent, NormalItem, Transport, TurnResult,
 };
 use rigel_core::credentials::KeychainCredentialStore;
-use rigel_core::{ApprovalScope, Scopes};
-use serde_json::json;
+use rigel_core::{ApprovalScope, BudgetService, Scopes, SessionService};
+use serde_json::{Value, json};
 
 use crate::phase3::parse_scope_answer;
 
@@ -36,6 +38,9 @@ pub enum CodexCommand {
     Run {
         #[arg(long, value_name = "PATH", default_value = ".")]
         project: PathBuf,
+        /// Session id. Defaults to the newest open session, starting one if there is none.
+        #[arg(long)]
+        session: Option<String>,
         #[arg(long)]
         prompt: String,
         /// Provider base URL. Defaults to the local router.
@@ -48,6 +53,13 @@ pub enum CodexCommand {
         transport: String,
         #[arg(long)]
         exe: Option<PathBuf>,
+        /// Tokens allowed for Codex's available-skills catalogue (P4.19). Defaults to 1000;
+        /// the CLI's own default is 2% of the model window, up to 10 000.
+        #[arg(long, value_name = "TOKENS")]
+        skills_budget: Option<u32>,
+        /// Skip host skill discovery entirely for this turn; shorthand for `--skills-budget 0`.
+        #[arg(long)]
+        no_skills: bool,
         #[arg(long)]
         json: bool,
     },
@@ -137,20 +149,30 @@ pub async fn run_codex(command: CodexCommand) -> ExitCode {
         CodexCommand::Probe { exe, json: as_json } => probe(exe, as_json).await,
         CodexCommand::Run {
             project,
+            session,
             prompt,
             base,
             model,
             transport,
             exe,
+            skills_budget,
+            no_skills,
             json: as_json,
         } => {
+            let skills_budget = if no_skills {
+                0
+            } else {
+                skills_budget.unwrap_or(rigel_adapters::codex::DEFAULT_SKILLS_BUDGET)
+            };
             run(RunOptions {
                 project,
+                session,
                 prompt,
                 base,
                 model,
                 transport,
                 exe,
+                skills_budget,
                 as_json,
             })
             .await
@@ -211,22 +233,248 @@ async fn probe(exe: Option<PathBuf>, as_json: bool) -> ExitCode {
 
 struct RunOptions {
     project: PathBuf,
+    session: Option<String>,
     prompt: String,
     base: Option<String>,
     model: Option<String>,
     transport: String,
     exe: Option<PathBuf>,
+    skills_budget: u32,
     as_json: bool,
+}
+
+/// The session, agent and turn one Codex call is billed to (P4.19).
+struct Recorded {
+    service: SessionService,
+    session_id: String,
+    agent: rigel_core::Agent,
+    turn: rigel_core::Turn,
+    last_input: Option<u64>,
+}
+
+/// The newest open session, or a new one. Mirrors `rigel agent run` so both harnesses share a
+/// session instead of inventing a second history.
+async fn resolve_session(
+    service: &SessionService,
+    requested: Option<&str>,
+) -> Result<rigel_core::Session, rigel_core::SessionError> {
+    if let Some(id) = requested {
+        return service.get(id).await;
+    }
+    match service
+        .list()
+        .await?
+        .into_iter()
+        .find(|session| session.status != rigel_core::SessionStatus::Ended)
+    {
+        Some(session) => Ok(session),
+        None => service.start(Some("codex"), Some(500)).await,
+    }
+}
+
+impl Recorded {
+    async fn open(
+        project: &Path,
+        requested: Option<&str>,
+        model: &str,
+        prompt: &str,
+    ) -> Result<Self, String> {
+        let service = SessionService::open(project)
+            .await
+            .map_err(|error| error.to_string())?;
+        let session = resolve_session(&service, requested)
+            .await
+            .map_err(|error| error.to_string())?;
+
+        let agent = match service
+            .agents(&session.id)
+            .await
+            .map_err(|error| error.to_string())?
+            .into_iter()
+            .find(|candidate| {
+                candidate.harness == "codex" && candidate.role.as_deref() == Some("codex")
+            }) {
+            Some(agent) => agent,
+            None => service
+                .register_agent_with(&session.id, "codex", Some("codex"), Some(model))
+                .await
+                .map_err(|error| error.to_string())?,
+        };
+
+        // A previous `rigel codex` that was killed left a running turn behind. This command owns
+        // one turn at a time, so any running turn for this agent is dead, not live. Other agents
+        // in the session are untouched (P4.12).
+        for stale in service
+            .running_turns(&session.id)
+            .await
+            .map_err(|error| error.to_string())?
+            .into_iter()
+            .filter(|turn| turn.agent_id == agent.id)
+        {
+            let _ = service
+                .finish_turn_with_reason(&stale.id, "failed", Some("interrupted"))
+                .await;
+            let _ = service.set_agent_status(&agent.id, "interrupted").await;
+        }
+
+        let last_input = service
+            .transcript(&session.id)
+            .await
+            .map_err(|error| error.to_string())?
+            .into_iter()
+            .filter(|row| row.turn.agent_id == agent.id)
+            .filter_map(|row| row.turn.usage)
+            .next_back()
+            .map(|usage| usage.input_tokens + usage.cached_input_tokens);
+
+        let turn = service
+            .append_turn(&agent.id, Some(prompt))
+            .await
+            .map_err(|error| error.to_string())?;
+        let _ = service.set_agent_status(&agent.id, "running").await;
+        let _ = service
+            .append_item(
+                &turn.id,
+                "message",
+                "complete",
+                &json!({ "role": "user", "text": prompt }),
+                &json!({ "source": "rigel-cli", "harness": "codex" }),
+            )
+            .await;
+
+        Ok(Self {
+            service,
+            session_id: session.id,
+            agent,
+            turn,
+            last_input,
+        })
+    }
+
+    /// Persist what the turn did before its answer is written, so a command appears above the
+    /// message that reports it. This is what makes `rigel codex run` a transcript item rather
+    /// than a printout (P4.8, P4.12).
+    async fn record_items(&self, items: &[NormalItem], approvals: &[Value]) {
+        for item in items {
+            let _ = self
+                .service
+                .append_item(
+                    &self.turn.id,
+                    item.kind.as_str(),
+                    "complete",
+                    &item.body,
+                    &json!({ "harness": "codex" }),
+                )
+                .await;
+        }
+        for approval in approvals {
+            let _ = self
+                .service
+                .append_item(
+                    &self.turn.id,
+                    "approval",
+                    "complete",
+                    approval,
+                    &json!({ "harness": "codex" }),
+                )
+                .await;
+        }
+    }
+
+    /// Write the answer, the bill and the close of the turn. The usage row is what makes the
+    /// next estimate use a measured number instead of the fixed allowance.
+    async fn finish(
+        &self,
+        result: &Result<TurnResult, AdapterError>,
+        model: &str,
+    ) -> Option<rigel_core::Usage> {
+        if let Err(error) = result {
+            let _ = self
+                .service
+                .append_item(
+                    &self.turn.id,
+                    "error",
+                    "error",
+                    &json!({ "message": error.to_string(), "harness": "codex" }),
+                    &json!({ "harness": "codex" }),
+                )
+                .await;
+            let _ = self
+                .service
+                .finish_turn_with_reason(&self.turn.id, "failed", Some("harness_error"))
+                .await;
+            let _ = self
+                .service
+                .set_agent_status(&self.agent.id, "failed")
+                .await;
+            return None;
+        }
+
+        let Ok(turn) = result else { unreachable!() };
+        let _ = self
+            .service
+            .append_item(
+                &self.turn.id,
+                "message",
+                "complete",
+                &json!({ "role": "assistant", "text": turn.text }),
+                &json!({ "harness": "codex", "transport": turn.transport.as_str() }),
+            )
+            .await;
+
+        let usage = turn.usage.map(|reported| rigel_core::Usage {
+            input_tokens: reported.input_tokens,
+            cached_input_tokens: reported.cached_input_tokens,
+            output_tokens: reported.output_tokens,
+            reasoning_tokens: reported.reasoning_output_tokens,
+            cost_micros: rigel_core::agent::pricing::cost_micros(
+                model,
+                reported.input_tokens,
+                reported.cached_input_tokens,
+                reported.output_tokens + reported.reasoning_output_tokens,
+            ),
+            provider_micros: None,
+            source: rigel_core::CostSource::Estimated,
+        });
+
+        if let Some(usage) = usage {
+            let _ = self
+                .service
+                .append_item(
+                    &self.turn.id,
+                    "usage",
+                    "complete",
+                    &serde_json::to_value(usage).unwrap_or(serde_json::Value::Null),
+                    &json!({ "harness": "codex", "transport": turn.transport.as_str() }),
+                )
+                .await;
+            let budget = BudgetService::with_null_interrupt(self.service.pool().clone());
+            if let Ok(rigel_core::BudgetOutcome::Exceeded) =
+                budget.account(&self.agent.id, &self.turn.id, &usage).await
+            {
+                eprintln!("rigel: this turn crossed the session cap; no further turn will start");
+            }
+        }
+
+        let _ = self
+            .service
+            .finish_turn_with_reason(&self.turn.id, "completed", Some("completed"))
+            .await;
+        let _ = self.service.set_agent_status(&self.agent.id, "idle").await;
+        usage
+    }
 }
 
 async fn run(options: RunOptions) -> ExitCode {
     let RunOptions {
         project,
+        session,
         prompt,
         base,
         model,
         transport,
         exe,
+        skills_budget,
         as_json,
     } = options;
 
@@ -251,15 +499,48 @@ async fn run(options: RunOptions) -> ExitCode {
     if let Some(exe) = exe {
         config.exe = exe;
     }
+    config.skills_budget = skills_budget;
 
     let credential_provider = config.credential_provider().to_string();
     let project = config.cwd.clone();
+    let model_name = config.model.clone();
     config.inject_credential(&KeychainCredentialStore);
+
+    let recorded = match Recorded::open(&project, session.as_deref(), &model_name, &prompt).await {
+        Ok(recorded) => recorded,
+        Err(error) => {
+            eprintln!("rigel: could not open the session: {error}");
+            return ExitCode::from(2);
+        }
+    };
 
     // Codex asks before it writes; the same four scopes as the native agent answer here (N2).
     let adapter = CodexAdapter::new(config).with_approver(std::sync::Arc::new(HarnessApprover {
         scopes: Scopes::new(&project, rigel_core::default_index_dir()),
     }));
+
+    // P4.19: the estimate goes out before the request. JSON mode keeps stdout to one document,
+    // so the line goes to stderr where a script can still read it.
+    let estimate = adapter.estimate_input(&prompt, recorded.last_input);
+    let estimate_line = match estimate.last_turn_input {
+        Some(previous) => format!(
+            "context  ~{} in (last turn {previous} + prompt {}) · skills ceiling {}",
+            estimate.input_tokens, estimate.prompt_tokens, estimate.skills_tokens
+        ),
+        None => format!(
+            "context  ~{} in (prompt {} + fixed {} + skills {})",
+            estimate.input_tokens,
+            estimate.prompt_tokens,
+            estimate.fixed_tokens,
+            estimate.skills_tokens
+        ),
+    };
+    if as_json {
+        eprintln!("{estimate_line}");
+    } else {
+        println!("  {estimate_line}");
+    }
+
     let mut notices = Vec::new();
     let mut items = Vec::new();
     let mut approvals = Vec::new();
@@ -306,6 +587,9 @@ async fn run(options: RunOptions) -> ExitCode {
         println!();
     }
 
+    recorded.record_items(&items, &approvals).await;
+    let recorded_usage = recorded.finish(&outcome, &model_name).await;
+
     match outcome {
         Ok(result) => {
             if as_json {
@@ -318,6 +602,12 @@ async fn run(options: RunOptions) -> ExitCode {
                         "fell_back": result.fell_back,
                         "thread_id": result.thread_id,
                         "usage": result.usage,
+                        "recorded_usage": recorded_usage,
+                        "estimate": estimate,
+                        "estimate_before_send": estimate_line,
+                        "session": recorded.session_id,
+                        "agent": recorded.agent.id,
+                        "turn": recorded.turn.id,
                         "duration_ms": result.duration.as_millis() as u64,
                         "notices": notices,
                         "approvals": approvals,
@@ -344,8 +634,11 @@ async fn run(options: RunOptions) -> ExitCode {
                 );
                 if let Some(usage) = result.usage {
                     println!(
-                        "  usage     {} in ({} cached) · {} out",
-                        usage.input_tokens, usage.cached_input_tokens, usage.output_tokens
+                        "  usage     {} in ({} cached) · {} out · turn {}",
+                        usage.input_tokens,
+                        usage.cached_input_tokens,
+                        usage.output_tokens,
+                        &recorded.turn.id[..8.min(recorded.turn.id.len())]
                     );
                 }
                 for item in &items {
@@ -366,6 +659,8 @@ async fn run(options: RunOptions) -> ExitCode {
                         "error": error.to_string(),
                         "provider": credential_provider,
                         "fix": format!("rigel keys set {credential_provider}"),
+                        "session": recorded.session_id,
+                        "turn": recorded.turn.id,
                     })
                 );
             }
@@ -453,8 +748,7 @@ impl Approver for HarnessApprover {
 /// follows.
 fn ask_harness(request: &ApprovalRequest) -> Option<ApprovalScope> {
     eprintln!(
-        "\n{} wants to {}:\n  {}{}\n  [o]nce  [s]ession  [p]roject  [a]lways  [r]eject  (anything else rejects):",
-        "the harness",
+        "\nthe harness wants to {}:\n  {}{}\n  [o]nce  [s]ession  [p]roject  [a]lways  [r]eject  (anything else rejects):",
         request.kind.as_deref().unwrap_or("do something"),
         request.title,
         match &request.raw_input {
@@ -469,5 +763,105 @@ fn ask_harness(request: &ApprovalRequest) -> Option<ApprovalScope> {
     match std::io::stdin().read_line(&mut line) {
         Ok(0) | Err(_) => None,
         Ok(_) => parse_scope_answer(&line),
+    }
+}
+
+#[cfg(test)]
+mod session_tests {
+    use super::*;
+    use rigel_adapters::CodexUsage;
+    use std::time::Duration;
+
+    fn result(input: u64, cached: u64, output: u64) -> TurnResult {
+        TurnResult {
+            text: "pong".to_string(),
+            usage: Some(CodexUsage {
+                input_tokens: input,
+                cached_input_tokens: cached,
+                output_tokens: output,
+                reasoning_output_tokens: 0,
+            }),
+            transport: Transport::AppServer,
+            thread_id: Some("th-1".to_string()),
+            duration: Duration::from_millis(5),
+            fell_back: false,
+        }
+    }
+
+    #[tokio::test]
+    async fn a_codex_turn_records_its_tokens_and_the_next_estimate_uses_them() {
+        let dir = tempfile::tempdir().unwrap();
+        let first = Recorded::open(dir.path(), None, "gpt-test", "say pong")
+            .await
+            .expect("a session opens");
+        assert_eq!(
+            first.last_input, None,
+            "a fresh session has nothing to copy"
+        );
+
+        let recorded = first
+            .finish(&Ok(result(155_895, 95, 4)), "gpt-test")
+            .await
+            .expect("the turn reported usage");
+        assert_eq!(recorded.input_tokens, 155_895);
+        assert_eq!(recorded.cached_input_tokens, 95);
+        assert!(recorded.cost_micros > 0, "a price is attached to the row");
+
+        let stored = first.service.turn(&first.turn.id).await.unwrap();
+        assert_eq!(stored.status, "completed");
+        assert_eq!(
+            stored
+                .usage
+                .expect("usage_json is what reconcile reads")
+                .input_tokens,
+            155_895
+        );
+
+        let second = Recorded::open(dir.path(), None, "gpt-test", "again")
+            .await
+            .expect("the same session reopens");
+        assert_eq!(
+            second.last_input,
+            Some(155_895 + 95),
+            "the next estimate starts from a measured turn"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_killed_turn_is_marked_interrupted_and_another_agent_is_untouched() {
+        let dir = tempfile::tempdir().unwrap();
+        let recorded = Recorded::open(dir.path(), None, "gpt-test", "first")
+            .await
+            .unwrap();
+        let session = recorded
+            .service
+            .agent(&recorded.turn.agent_id)
+            .await
+            .unwrap()
+            .session_id;
+
+        // A second agent in the same session, with work in flight. Opening a Codex turn must not
+        // touch it: P4.12's promise is that killing one agent leaves the others running.
+        let other = recorded
+            .service
+            .register_agent_with(&session, "native", Some("worker"), None)
+            .await
+            .unwrap();
+        let other_turn = recorded
+            .service
+            .append_turn(&other.id, Some("still working"))
+            .await
+            .unwrap();
+
+        // The first Codex turn was never finished: exactly what a killed process leaves behind.
+        let reopened = Recorded::open(dir.path(), None, "gpt-test", "second")
+            .await
+            .unwrap();
+        let stale = reopened.service.turn(&recorded.turn.id).await.unwrap();
+        assert_eq!(stale.status, "failed");
+        assert_eq!(stale.stop_reason.as_deref(), Some("interrupted"));
+
+        let untouched = reopened.service.turn(&other_turn.id).await.unwrap();
+        assert_eq!(untouched.status, "running");
     }
 }

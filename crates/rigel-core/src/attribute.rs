@@ -308,7 +308,7 @@ mod tests {
             id: agent.clone(),
             ..test_agent("writer")
         };
-        let one = Watcher::attribute(&observed, &[made.clone()]);
+        let one = Watcher::attribute(&observed, std::slice::from_ref(&made));
         assert_eq!(one[0].agents, vec![agent.clone()]);
         assert!(!one[0].ambiguous);
 
@@ -401,6 +401,7 @@ mod tests {
             harness: "native".to_string(),
             role: Some(role.to_string()),
             model: None,
+            worktree: None,
             status: "running".to_string(),
             started_at: 0,
             spend_cents: 0,

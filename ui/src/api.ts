@@ -131,6 +131,21 @@ export interface Patch {
   reverted_at: number | null;
 }
 
+/** One `@@` block and the agent whose patch proposed it (P5.6). */
+export interface AttributedHunk {
+  patch_id: string;
+  path: string;
+  ordinal: number;
+  agent_id: string;
+  header: string;
+  old_start: number;
+  old_lines: number;
+  new_start: number;
+  new_lines: number;
+  created_at: number;
+  status: string;
+}
+
 export interface Recovery {
   patch_id: string;
   path: string;
@@ -684,6 +699,10 @@ export const api = {
 
   async listPatches(project: string, session: string): Promise<Patch[]> {
     return call<Patch[]>("patch_list", { project, session });
+  },
+
+  async patchHunks(project: string, session: string): Promise<AttributedHunk[]> {
+    return call<AttributedHunk[]>("patch_hunks", { project, session });
   },
 
   async revertPatch(id: string): Promise<Patch> {

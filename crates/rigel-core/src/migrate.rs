@@ -38,6 +38,11 @@ pub const PROJECT_MIGRATIONS: &[Migration] = &[
         name: "0003_subagents",
         sql: include_str!("../../../migrations/project/0003_subagents.sql"),
     },
+    Migration {
+        version: 4,
+        name: "0004_patch_hunks",
+        sql: include_str!("../../../migrations/project/0004_patch_hunks.sql"),
+    },
 ];
 
 /// `%APPDATA%\Rigel\index.db`
