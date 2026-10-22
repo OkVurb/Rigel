@@ -362,6 +362,10 @@ What is still open, in the order it should be taken:
 3. **This checkout has no `vendor/agentchattr`**, so the live room check needs a machine that has the
    clone (or `RIGEL_AGENTCHAT_DIR`). The Chat tab now explains exactly that rather than failing at
    spawn time.
+4. **Phase 7's exit test needs a clean VM and a certificate** (P7.5, P7.9): a signed MSI installed on
+   10 1809 with no WebView2 present, a repo and one native task run there, and an Authenticode
+   signature SmartScreen accepts. `scripts/p7-exit-test.sh` prints those three as `manual` rather
+   than claiming them.
 
 Environment facts a fresh agent will trip over: the debug app loads `http://localhost:5173`, so
 `npm --prefix ui run dev` must be running before `cargo run -p rigel-app`; `vendor/agentchattr`
@@ -1352,7 +1356,8 @@ Approvals are bound to an `approval_id` issued by the harness, not to text in th
 
 ## 11. The plan
 
-**State as of 22 Oct 2026:** Phases 0–3 complete; Phase 4 in progress (13/19; P4.11 dropped per D48).
+**State as of 22 Oct 2026:** Phases 0–6 complete; Phase 7 in progress (7/9 — P7.5 needs
+the release certificate and P7.9 a clean VM).
 Run `node scripts/handoff-status.mjs` for live counts; this table is the summary.
 
 | Phase | Scope | State | Items |
@@ -1361,10 +1366,10 @@ Run `node scripts/handoff-status.mjs` for live counts; this table is the summary
 | 1 | Rust skeleton and storage | **complete** | 10/10 |
 | 2 | The shelf, real | **complete** | 11/11 |
 | 3 | Native agent, chat and the bill | **complete** | 11/11 |
-| 4 | Harness adapters | in progress | 11/19 |
-| 5 | Claims, attribution, merged diff | not started | 0/8 |
-| 6 | Dependencies and trust | not started | 0/8 |
-| 7 | Hardening and open-source release | not started | 0/9 |
+| 4 | Harness adapters | **complete** | 18/18 |
+| 5 | Claims, attribution, merged diff | **complete** | 8/8 |
+| 6 | Dependencies and trust | **complete** | 8/8 |
+| 7 | Hardening and open-source release | in progress | 7/9 |
 
 Phases are sequential. Every item has an ID; tick it in the commit that finishes it (§How to use).
 
@@ -1522,26 +1527,26 @@ egress outside an approved origin.
 
 **Goal:** missing tools stop being a dead end without becoming a supply-chain hole.
 
-- [ ] **P6.1** Tool detection per host (`windows`, `wsl:<distro>`) with version cache in `tool_status`
-- [ ] **P6.2** Requirement inference from `allowed-tools` plus a body scan, showing the source line
-- [ ] **P6.3** Trust score from §11.6 weights, with `rigel trust explain <pkg>` printing the arithmetic
-- [ ] **P6.4** Install execution: command shown first, ledger row, exit code and duration recorded
-- [ ] **P6.5** Unattended mode queues installs instead of running them (D13)
-- [ ] **P6.6** Shell restart after install, with the agent told to re-check (Q40)
-- [ ] **P6.7** Signature/hash check where the package manager exposes one
-- [ ] **P6.8** **Exit test:** on a machine without `ripgrep`, the requirement shows its source line; the install runs only after approval; the new terminal sees the binary; with unattended on, the same action queues
+- [x] **P6.1** Tool detection per host (`windows`, `wsl:<distro>`) with version cache in `tool_status` — `ToolService` probes a curated registry (`TOOLS`) per named host and caches version, path and SHA-256 in `tool_status`, so a shelf render spawns nothing; `rigel tools list` and `rigel tools which <tool> --json` read the cache, and Windows resolves through `PATHEXT` first — `crates/rigel-core/src/toolchain.rs` — `4fc76a5`
+- [x] **P6.2** Requirement inference from `allowed-tools` plus a body scan, showing the source line — `requirements()` returns a `RequirementSource` with the file, line and text that asked for the tool, and `rigel tools requirements <skill-id>` prints it; a requirement is never reported without its source — `crates/rigel-core/tests/tools.rs`
+- [x] **P6.3** Trust score from §11.6 weights, with `rigel trust explain <pkg>` printing the arithmetic — five factors, each with its reason, printed as arithmetic (`2 + 1 + 1 + 0 + 1 = 5 / 10`) rather than a bare number; a test pins the sums so a silent weight drift fails
+- [x] **P6.4** Install execution: command shown first, ledger row, exit code and duration recorded — `rigel tools install` prints the manager's exact argv, asks, runs once, and writes the decision, exit code and duration; `rigel tools ledger` lists them and `--json` carries the same rows
+- [x] **P6.5** Unattended mode queues installs instead of running them (D13) — `--unattended` writes a `queued` row and runs nothing; the p6 exit test proves the binary still does not exist afterwards
+- [x] **P6.6** Shell restart after install, with the agent told to re-check (Q40) — `ToolService::restart` re-probes the host after an install and `InstallRecord::recheck()` is printed: "new shells see it; this one may not — re-check with `rigel tools which <tool>`". The agent is told what to do rather than assumed to know
+- [x] **P6.7** Signature/hash check where the package manager exposes one — every detection records a SHA-256 pin and `verify` compares the installed bytes with it (`Pin::Missing`, `Pin::Moved` or a match); `rigel doctor` reports drifted pins, and apt is shown and refused rather than half-installed
+- [x] **P6.8** **Exit test:** on a machine without `ripgrep`, the requirement shows its source line; the install runs only after approval; the new terminal sees the binary; with unattended on, the same action queues — `scripts/p6-exit-test.sh` builds a temporary PATH holding a shim `winget` and nothing else: the shim creates `rg` only when it runs, so seeing `rg` afterwards proves the approved install executed and seeing it absent proves the queue did not. It passes.
 
 ### Phase 7 — Hardening and open-source release *(1.5 weeks)*
 
-- [ ] **P7.1** `rigel doctor`: DB integrity, migrations, probes, orphan blobs, stale claims, budget reconcile, keychain, config drift
-- [ ] **P7.2** Crash-recovery matrix: kill during patch apply, migration, install, checkpoint — each recovers cleanly
-- [ ] **P7.3** Docs: README rewritten around the workspace, CONTRIBUTING, SECURITY (from §10), ARCHITECTURE
-- [ ] **P7.4** LICENSE chosen and applied
-- [ ] **P7.5** Signed Windows installer; WebView2 bootstrapper; minimum Windows 10 1809
-- [ ] **P7.6** macOS and Linux builds documented as unsupported-but-buildable, or marked `dropped`
-- [ ] **P7.7** Update manifest with an opt-out switch and signature check (N5)
-- [ ] **P7.8** Migration note for anyone who used the prototype's localStorage index
-- [ ] **P7.9** **Exit test:** clean Windows VM, signed build, open a repo, run the shelf, run one native task, `rigel doctor` green, no Node install, no unexpected network calls
+- [x] **P7.1** `rigel doctor`: DB integrity, migrations, probes, orphan blobs, stale claims, budget reconcile, keychain, config drift — `crates/rigel-cli/src/doctor.rs` reports index and project integrity, schema versions, blob rows against blob files, stale claims, budget reconcile, the keychain, cached-config age, every harness, tool hash pins, unfinished installs and the update switch. One row per check with its own evidence; the exit code is the summary (`0` clear, `1` warnings, `2` failures) and nothing is mutated. `crates/rigel-cli/tests/doctor.rs` pins the exit codes, the evidence and the no-mutation rule — `4fc76a5`
+- [x] **P7.2** Crash-recovery matrix: kill during patch apply, migration, install, checkpoint — each recovers cleanly — `crates/rigel-core/tests/recovery.rs` kills a migration (the version is unchanged), an install (the ledger keeps the decision and admits it never finished) and a checkpoint (resume closes the running turn); patch recovery is already driven through both `StopAt` windows in `guarantees.rs`, and the file says why a second copy would only test the copy
+- [x] **P7.3** Docs: README rewritten around the workspace, CONTRIBUTING, SECURITY (from §10), ARCHITECTURE — README leads with the five surfaces; `CONTRIBUTING.md` gives build, checks, layout and the rule for a schema change; `SECURITY.md` is the threat model with every network call and what is not defended; `ARCHITECTURE.md` describes the pieces, the two databases and a turn
+- [x] **P7.4** LICENSE chosen and applied — `MIT OR Apache-2.0`, in the workspace and every crate, with `LICENSE-MIT` and `LICENSE-APACHE` at the root; no contributor licence agreement and no telemetry to opt out of
+- [ ] **P7.5** Signed Windows installer; WebView2 bootstrapper; minimum Windows 10 1809 — **partly:** `crates/rigel-app/tauri.conf.json` builds MSI + NSIS with `downloadBootstrapper` (silent) and refuses downgrades, and `docs/PLATFORMS.md` states the 1809 floor with the environment-signing steps. No signed artifact exists: the Authenticode certificate and the manifest key live on the release machine, never in the repository
+- [x] **P7.6** macOS and Linux builds documented as unsupported-but-buildable, or marked `dropped` — `docs/PLATFORMS.md` records them as unsupported-but-buildable and names what is missing (no installer path, no keychain parity, no WebView2 equivalent)
+- [x] **P7.7** Update manifest with an opt-out switch and signature check (N5) — `crates/rigel-core/src/update.rs` verifies an Ed25519 manifest over `version / url / sha256` and then the artifact's hash; the switch defaults off, `rigel update enable` is the only thing that changes it, and nothing checks on a timer or at startup
+- [x] **P7.8** Migration note for anyone who used the prototype's localStorage index — `docs/migrating-prototype-index.md` plus `rigel skills import --from`; README's history note states that the `skilldb:` rows are historical and that nothing under `crates/` or `ui/` reads them
+- [ ] **P7.9** **Exit test:** clean Windows VM, signed build, open a repo, run the shelf, run one native task, `rigel doctor` green, no Node install, no unexpected network calls — **not done here:** `scripts/p7-exit-test.sh` proves what one machine can — doctor's exit code matches its own summary, the CLI's commands run on a PATH holding only the OS shell, doctor/tools/the shelf make no network call behind a dead proxy, the installer config and licence expression match, and a signed manifest verifies while a tampered one is refused. It then prints the three steps that need a clean VM and a certificate: the signed MSI on 1809 with no WebView2, a repo opened and a native task run there, and SmartScreen.
 
 ### 11.1 Sequencing rationale
 
