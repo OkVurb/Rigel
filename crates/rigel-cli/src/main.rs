@@ -18,9 +18,7 @@ mod harness;
 mod phase3;
 
 use harness::{CodexCommand, HarnessCommand};
-use phase3::{
-    AgentCommand, KeyCommand, MemoryCommand, PatchCommand, SnapshotCommand,
-};
+use phase3::{AgentCommand, KeyCommand, MemoryCommand, PatchCommand, SnapshotCommand};
 
 #[derive(Parser)]
 #[command(name = "rigel", version, about = "Rigel — an agent workspace")]
@@ -609,20 +607,11 @@ async fn run_skills(dir: &Path, command: SkillCommand) -> ExitCode {
             skillsmp_pages,
             json: as_json,
         } => {
-            let queries: Vec<String> = skillsmp_queries
-                .split(',')
-                .map(str::to_owned)
-                .collect();
-            match index
-                .sweep(skillhub_pages, &queries, skillsmp_pages)
-                .await
-            {
+            let queries: Vec<String> = skillsmp_queries.split(',').map(str::to_owned).collect();
+            match index.sweep(skillhub_pages, &queries, skillsmp_pages).await {
                 Ok(report) => {
                     if as_json {
-                        println!(
-                            "{}",
-                            serde_json::to_string(&report).unwrap_or_default()
-                        );
+                        println!("{}", serde_json::to_string(&report).unwrap_or_default());
                     } else {
                         println!(
                             "skillhub    {} rows over {} page(s){}",

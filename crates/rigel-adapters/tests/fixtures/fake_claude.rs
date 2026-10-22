@@ -63,7 +63,10 @@ fn main() {
 /// A recorded stream is the whole script: print it as it was recorded.
 fn replay(path: &std::ffi::OsStr) {
     let Ok(text) = std::fs::read_to_string(path) else {
-        eprintln!("fake-claude: cannot read fixture {}", path.to_string_lossy());
+        eprintln!(
+            "fake-claude: cannot read fixture {}",
+            path.to_string_lossy()
+        );
         std::process::exit(2);
     };
     for line in text.lines().filter(|line| !line.trim().is_empty()) {

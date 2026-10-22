@@ -5,8 +5,8 @@
 //! coordinator, the tools, the budget service, the patch pipeline and the session store are
 //! the production ones.
 
-use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -798,8 +798,11 @@ impl Model for EffortRecorder {
         on_delta: &mut DeltaSink<'_>,
     ) -> Result<(), ModelError> {
         self.seen.lock().unwrap().push(request.effort.clone());
-        on_delta(Delta::Text("done.
-".to_string()));
+        on_delta(Delta::Text(
+            "done.
+"
+            .to_string(),
+        ));
         on_delta(Delta::Finish("stop".to_string()));
         Ok(())
     }
@@ -851,7 +854,10 @@ async fn the_coordinators_effort_reaches_every_step_request() {
 
     assert_eq!(run.stop, StopReason::Completed);
     let seen = model.seen.lock().unwrap().clone();
-    assert!(!seen.is_empty(), "the model must have been asked at least once");
+    assert!(
+        !seen.is_empty(),
+        "the model must have been asked at least once"
+    );
     assert!(
         seen.iter().all(|effort| effort.as_deref() == Some("low")),
         "every step request carries the coordinator's effort: {seen:?}"

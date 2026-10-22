@@ -16,8 +16,8 @@
 //! normalised into the same `AgentEvent`s; the coordinator is for the agent Rigel runs
 //! itself (D19).
 
-pub mod approval;
 pub mod agentchat;
+pub mod approval;
 pub mod coordinator;
 pub mod deliberation;
 pub mod destructive;

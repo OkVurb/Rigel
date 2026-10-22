@@ -429,6 +429,10 @@ fn agent_stop(state: State<'_, AppRuntime>, project: String, agent: String) -> R
 
 /// Create a turn and start it. Returns as soon as the row exists; the answer streams on
 /// `rigel://events`.
+///
+/// Two injected handles plus six caller fields. `invoke` matches arguments by name, so the
+/// signature has to stay flat; `rigel-core::agent::tools` carries the same allow.
+#[allow(clippy::too_many_arguments)]
 #[tauri::command]
 fn turn_send(
     app: tauri::AppHandle,
@@ -446,7 +450,9 @@ fn turn_send(
     let provider = settings.provider.trim().to_lowercase();
     let effort = effort.unwrap_or_else(|| settings.effort.clone());
     if !valid_effort(&effort) {
-        return Err(format!("unknown effort `{effort}`; use low, medium or high"));
+        return Err(format!(
+            "unknown effort `{effort}`; use low, medium or high"
+        ));
     }
     // The provider picks the default model; the effort is applied on the wire, never folded
     // into the id the provider chose.
@@ -859,17 +865,21 @@ fn wire_model(model: &str, effort: &str, provider: &str) -> String {
 /// Chat tab status. `project` is the open project root (or path input); the vendor
 /// checkout is discovered next to it, or via RIGEL_AGENTCHAT_DIR in the core.
 #[tauri::command]
-fn chat_status(project: Option<String>) -> Result<rigel_core::agent::agentchat::ChatStatus, String> {
-    Ok(tauri::async_runtime::block_on(rigel_core::agent::agentchat::status(
-        project.as_deref(),
-    )))
+fn chat_status(
+    project: Option<String>,
+) -> Result<rigel_core::agent::agentchat::ChatStatus, String> {
+    Ok(tauri::async_runtime::block_on(
+        rigel_core::agent::agentchat::status(project.as_deref()),
+    ))
 }
 
 /// Boot the vendor chat server when it is down. Spawning is how Rigel earns the session
 /// token, so "already running externally" stays unauthenticated (`authed: false`).
 #[tauri::command]
 fn chat_start(project: Option<String>) -> Result<rigel_core::agent::agentchat::ChatStatus, String> {
-    tauri::async_runtime::block_on(rigel_core::agent::agentchat::ensure_server(project.as_deref()))
+    tauri::async_runtime::block_on(rigel_core::agent::agentchat::ensure_server(
+        project.as_deref(),
+    ))
 }
 
 #[tauri::command]
