@@ -306,9 +306,17 @@ transport, and an ACP tool call all become items with the bodies the native agen
 anything unmappable is an `error` item with `unmapped: true` and the wire event under `raw`. The
 golden `tool_call` replays assert the shapes, so that row is no longer a recorded gap — `a12e7c9`.
 
-Two of those commits are Phase 4 checklist lines (P4.7, P4.8): the checklist now reads **12/19**
-(P4.11 dropped per D48), and the next two in order are P4.9 (the roster UI, D40) and P4.10
-(end-to-end approvals across the three protocols).
+The roster UI (P4.9, D40) landed next, in `a1388a7`: a subagent is indented under the agent whose turn
+spawned it instead of being listed as a peer; a harness agent carries an `observed only` tag because
+Rigel can show its turns but cannot send it work until P4.10; selecting an agent opens its own
+transcript, child turns included, and selecting a second puts the two side by side with a hairline
+between them — a third selection replaces the older pane rather than growing a grid. Claims are the
+one D40 element with no backend: the claim ledger is Phase 8, so the roster foot says
+`claims not tracked yet` rather than an empty column that would read as "nobody holds any files".
+
+Three of those commits are Phase 4 checklist lines (P4.7, P4.8, P4.9): the checklist now reads
+**13/19** (P4.11 dropped per D48), and the next one in order is P4.10 (end-to-end approvals across
+the three protocols).
 
 **CI is green again** (`5de38c9`): `cargo fmt --all -- --check` and `cargo clippy --workspace
 --all-targets -- -D warnings` both pass. The lint that was outstanding was `turn_send`'s eight
@@ -317,7 +325,7 @@ says so.
 
 What is still open, in the order it should be taken:
 
-1. **P4.9 → P4.10**, as above. Everything else in Phase 4 is the approval and safety lane
+1. **P4.10**, as above. Everything else in Phase 4 is the approval and safety lane
    (P4.12–P4.19), where the fixtures from P4.7 are now available to replay.
 2. **One human look at Claude's TUI.** The trust files are now written by a command, but the six
    tools inside a *running* interactive session have not been re-observed since; Claude reads trust
@@ -1315,7 +1323,7 @@ Approvals are bound to an `approval_id` issued by the harness, not to text in th
 
 ## 11. The plan
 
-**State as of 22 Oct 2026:** Phases 0–3 complete; Phase 4 in progress (12/19; P4.11 dropped per D48).
+**State as of 22 Oct 2026:** Phases 0–3 complete; Phase 4 in progress (13/19; P4.11 dropped per D48).
 Run `node scripts/handoff-status.mjs` for live counts; this table is the summary.
 
 | Phase | Scope | State | Items |
@@ -1453,7 +1461,7 @@ P4.7 fixtures and P4.8 normalisation.
 - [x] **P4.6** Claude adapter: `claude -p --bare --output-format stream-json --verbose --include-partial-messages --permission-mode <mode>` — **deviation:** `--permission-prompt-tool` is not passed yet, because the MCP approval server it names does not exist until P4.10 and naming a missing tool would fail every permission request; the default policy is the CLI's own, which fails closed. `--bare` makes D21 enforceable: only `ANTHROPIC_API_KEY` authenticates, and a child that reports another `apiKeySource` is killed at its first event — `crates/rigel-adapters/src/claude.rs`, `tests/claude.rs` — `f2c8dbf`
 - [x] **P4.7** Golden fixtures per harness per scenario (start, tool call, approval, error, interrupt) + replay tests — 15 JSONL streams under `crates/rigel-adapters/tests/fixtures/golden/`, replayed verbatim by the three fixture binaries through the production loops; `tests/replay.rs` (4 tests) also fails when a fixture has no scenario. Streams are authored to the documented shapes (provenance and unmapped scenarios in that directory's README): Claude/Codex tool calls and Codex approvals are pinned as gaps for P4.8/P4.10, and Codex `turn/completed` with status `interrupted` decoding as success is recorded for P4.12 — `20a1f60`
 - [x] **P4.8** Normalisation for all ten item kinds; unmappable events retained as `unmapped` — `crates/rigel-adapters/src/normalise.rs` holds the mapping table (Claude tool names, Codex item types in both spellings, ACP `kind`), item bodies reuse the native agent's shapes, and an unmappable event is an `error` item with `unmapped: true` plus the raw payload. Claude decodes thinking, `tool_use` and `tool_result` (the result inherits the call's kind by id); Codex decodes commands, file changes, MCP calls, searches, plans, reasoning and errors on both transports; ACP tool calls carry their item kind — `tests/replay.rs` pins the golden `tool_call` stream per harness — `a12e7c9`
-- [ ] **P4.9** Roster UI (D40): nested subagents, `observed only` labels, per-agent spend and claims; at most two transcripts side by side, no tabs or grids
+- [x] **P4.9** Roster UI (D40): nested subagents, `observed only` labels, per-agent spend and claims; at most two transcripts side by side, no tabs or grids — a subagent row is indented under the agent whose turn spawned it (derived from `parent_turn_id`, not seeded); a non-native harness carries `observed only` because Rigel cannot send it a turn yet; selecting an agent opens its own transcript and a second selection splits the pane, with a third replacing the older one. **Claims are not shown:** the claim ledger is Phase 8, so the foot says `claims not tracked yet` instead of an empty column — `ui/src/session.tsx`, verified in the browser preview against the sample roster — `a1388a7`
 - [ ] **P4.10** End-to-end approvals across all three protocols, with scope buttons (N2)
 - [ ] ~~**P4.11** Sidecar decision recorded: implement it for Cline SDK-only features, or mark `dropped` with the reason~~ **dropped:** the Node sidecar is not worth reinventing Cline's SDK quirks when ACP already reaches its approval surface; Cline SDK-only features stay unavailable and the roster labels them as such (D48, 21 Oct).
 - [ ] **P4.12** **Exit test:** Codex, Cursor and Cline each run `rigel doctor --json`; all three show a real command item and exit code; killing one leaves the others running and marks it `Interrupted`
