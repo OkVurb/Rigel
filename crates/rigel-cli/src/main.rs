@@ -130,6 +130,12 @@ enum Command {
         command: CodexCommand,
     },
 
+    /// The Claude Code harness: probe it, or run one turn through it.
+    Claude {
+        #[command(subcommand)]
+        command: harness::ClaudeCommand,
+    },
+
     /// Every harness on this machine, cached in `adapters.json`.
     Harness {
         #[command(subcommand)]
@@ -326,6 +332,8 @@ async fn main() -> ExitCode {
         Command::Claim { command } => claims::run_claim(command).await,
 
         Command::Codex { command } => harness::run_codex(command).await,
+
+        Command::Claude { command } => harness::run_claude(command, &dir).await,
 
         Command::Harness { command } => harness::run_harness(command, &dir).await,
 
