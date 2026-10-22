@@ -911,6 +911,34 @@ fn chat_start_agents(project: Option<String>) -> Result<Vec<String>, String> {
     ))
 }
 
+/// The harness processes Rigel started and still holds. The roster offers Stop only for these;
+/// anything else in the room was launched by hand and is the user's to close.
+#[tauri::command]
+fn chat_launched() -> Vec<rigel_core::agent::agentchat::ChatProcess> {
+    rigel_core::agent::agentchat::launched()
+}
+
+/// The harnesses the checkout configures, ready or not, so the roster can offer a per-agent start
+/// and say why one cannot start.
+#[tauri::command]
+fn chat_harnesses(project: Option<String>) -> Vec<rigel_core::agent::agentchat::ChatHarness> {
+    rigel_core::agent::agentchat::configured(project.as_deref())
+}
+
+#[tauri::command]
+fn chat_start_agent(project: Option<String>, name: String) -> Result<String, String> {
+    tauri::async_runtime::block_on(rigel_core::agent::agentchat::start_agent(
+        project.as_deref(),
+        &name,
+    ))
+}
+
+/// Stop one agent Rigel started: the wrapper, its CLI and that CLI's children.
+#[tauri::command]
+fn chat_stop_agent(name: String) -> Result<String, String> {
+    tauri::async_runtime::block_on(rigel_core::agent::agentchat::stop_agent(&name))
+}
+
 /* -------------------------------- settings ------------------------------- */
 
 #[tauri::command]
@@ -1031,6 +1059,10 @@ pub fn run() {
             chat_messages,
             chat_send,
             chat_start_agents,
+            chat_launched,
+            chat_harnesses,
+            chat_start_agent,
+            chat_stop_agent,
             settings_get,
             settings_set,
             usage_summary,
@@ -1040,6 +1072,13 @@ pub fn run() {
             skills_status,
             skills_index
         ])
-        .run(tauri::generate_context!())
-        .expect("rigel: failed to start the window");
+        .build(tauri::generate_context!())
+        .expect("rigel: failed to build the window")
+        .run(|_, event| {
+            // The agents are this app's children; without this, closing the window leaves hidden
+            // wrappers holding room slots that the next launch cannot clean up.
+            if matches!(event, tauri::RunEvent::Exit) {
+                rigel_core::agent::agentchat::stop_all();
+            }
+        });
 }

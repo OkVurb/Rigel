@@ -41,6 +41,23 @@ pub struct ChatStatus {
     pub dir: Option<String>,
 }
 
+/// One harness process Rigel started for the room, and therefore can stop.
+///
+/// The chat server only knows names, not pids, so the roster cannot tell an agent Rigel owns from
+/// one a user started by hand. This is that bookkeeping: the pid to kill, and the configured name
+/// the room's `@name` (or `@name-2`) belongs to.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct ChatProcess {
+    pub name: String,
+    pub label: String,
+    pub pid: u32,
+}
+
+/// Live children this process started. A wrapper that exits on its own is removed by its waiter
+/// thread, so a stale entry means "Rigel started it and it is still running", which is exactly the
+/// condition for offering a Stop button.
+static LAUNCHED: Mutex<Vec<ChatProcess>> = Mutex::new(Vec::new());
+
 #[derive(Debug, Clone, Serialize)]
 pub struct ChatMessage {
     pub id: u64,
@@ -200,11 +217,7 @@ pub async fn ensure_server(project_root: Option<&str>) -> Result<ChatStatus, Str
         return Ok(status(project_root).await);
     }
 
-    let dir = dir_for(project_root).ok_or_else(|| {
-        "no agentchattr checkout found next to the project \
-         (looked for vendor/agentchattr); set RIGEL_AGENTCHAT_DIR to point at one"
-            .to_string()
-    })?;
+    let dir = dir_for(project_root).ok_or_else(missing_checkout)?;
 
     spawn_server(&dir)?;
 
@@ -532,7 +545,7 @@ fn harness_argv(harness: &ChatHarness) -> Vec<String> {
     argv
 }
 
-fn spawn_harness(dir: &Path, harness: &ChatHarness) -> Result<(), String> {
+fn spawn_harness(dir: &Path, harness: &ChatHarness) -> Result<ChatProcess, String> {
     let python = chat_python(dir).ok_or("no python found on PATH to start an agent")?;
     let mut command = std::process::Command::new(python);
     command
@@ -553,12 +566,147 @@ fn spawn_harness(dir: &Path, harness: &ChatHarness) -> Result<(), String> {
         command.creation_flags(0x0800_0000);
     }
 
-    let child = command
+    let mut child = command
         .spawn()
         .map_err(|error| format!("could not start {} ({error})", harness.label))?;
-    // The agent outlives this call and is reaped by the OS, like the chat server above.
-    std::mem::forget(child);
-    Ok(())
+    let pid = child.id();
+    let process = ChatProcess {
+        name: harness.name.clone(),
+        label: harness.label.clone(),
+        pid,
+    };
+    if let Ok(mut launched) = LAUNCHED.lock() {
+        launched.push(process.clone());
+    }
+
+    // Keep the handle and reap it. `mem::forget` used to leak it, which is why there was no Stop:
+    // with no waiter, nothing removed the entry when the wrapper died on its own.
+    let reaped = process.clone();
+    std::thread::spawn(move || {
+        let _ = child.wait();
+        if let Ok(mut launched) = LAUNCHED.lock() {
+            launched.retain(|known| known.pid != reaped.pid);
+        }
+    });
+    Ok(process)
+}
+
+/// The harness processes Rigel is holding. The roster uses this to offer Stop only for agents it
+/// owns; anything else in the room was started by hand and stays the user's to close.
+pub fn launched() -> Vec<ChatProcess> {
+    LAUNCHED
+        .lock()
+        .map(|launched| launched.clone())
+        .unwrap_or_default()
+}
+
+/// Does `candidate` name the same agent as `configured`? The room registers `claude`, but a
+/// second live copy claims `claude-2`, and a stale slot keeps the suffix until it expires.
+fn same_agent(candidate: &str, configured: &str) -> bool {
+    candidate == configured || candidate.starts_with(&format!("{configured}-"))
+}
+
+/// Kill one process and everything it started. The wrapper is the parent of the CLI, which is the
+/// parent of whatever the CLI spawned (Codex's MCP proxy, Claude's node children); killing only the
+/// wrapper would leave the CLI holding the console, and the room believing the agent is alive.
+pub fn kill_tree(pid: u32) -> Result<(), String> {
+    #[cfg(windows)]
+    {
+        // `/T` is the whole tree, `/F` is required for a console process that ignores WM_CLOSE.
+        let output = std::process::Command::new("taskkill")
+            .args(["/PID", &pid.to_string(), "/T", "/F"])
+            .output()
+            .map_err(|error| format!("could not run taskkill: {error}"))?;
+        if output.status.success() {
+            return Ok(());
+        }
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        // Already gone is the outcome we wanted; taskkill reports it as a failure, and its text is
+        // localised, so ask tasklist whether the pid still exists instead of reading the message.
+        if !pid_running(pid) {
+            return Ok(());
+        }
+        return Err(format!("taskkill could not stop pid {pid}: {stderr}"));
+    }
+    #[cfg(not(windows))]
+    {
+        let output = std::process::Command::new("kill")
+            .args(["-TERM", &pid.to_string()])
+            .output()
+            .map_err(|error| format!("could not run kill: {error}"))?;
+        if output.status.success() {
+            Ok(())
+        } else {
+            Err(format!("kill could not stop pid {pid}"))
+        }
+    }
+}
+
+/// Stop every agent this process started. Called when the window closes: a hidden wrapper with no
+/// window and no owner is exactly the orphan pile the 22 Oct QA run had to `taskkill` by hand.
+pub fn stop_all() -> usize {
+    let ours = launched();
+    for process in &ours {
+        let _ = kill_tree(process.pid);
+    }
+    if let Ok(mut launched) = LAUNCHED.lock() {
+        launched.clear();
+    }
+    ours.len()
+}
+
+/// Is this pid alive? `tasklist` is present on every supported Windows and prints the pid only for
+/// a live process, which keeps the liveness check locale-independent.
+#[cfg(windows)]
+fn pid_running(pid: u32) -> bool {
+    std::process::Command::new("tasklist")
+        .args(["/FI", &format!("PID eq {pid}"), "/NH"])
+        .output()
+        .map(|output| String::from_utf8_lossy(&output.stdout).contains(&pid.to_string()))
+        .unwrap_or(true)
+}
+
+/// Stop an agent Rigel started. Refuses what it does not own rather than guessing at a pid.
+pub async fn stop_agent(name: &str) -> Result<String, String> {
+    let ours = launched();
+    let process = ours
+        .iter()
+        .find(|process| same_agent(name, &process.name))
+        .cloned()
+        .ok_or_else(|| {
+            format!(
+                "Rigel did not start `{name}`, so it has no pid to stop — close that agent's own window"
+            )
+        })?;
+
+    kill_tree(process.pid)?;
+    if let Ok(mut launched) = LAUNCHED.lock() {
+        launched.retain(|known| known.pid != process.pid);
+    }
+
+    // The room frees the slot when the wrapper stops heartbeating, so poll it rather than promise
+    // the canonical name is back. A room Rigel cannot authenticate against is not polled at all.
+    let client = http_client();
+    if !healthy(&client).await {
+        return Ok(format!("{} stopped", process.label));
+    }
+    for _ in 0..40 {
+        tokio::time::sleep(Duration::from_millis(250)).await;
+        let present = api_call(reqwest::Method::GET, "/api/status", None)
+            .await
+            .map(|value| online_names(&value))
+            .unwrap_or_default();
+        if !present.iter().any(|online| same_agent(online, &process.name)) {
+            return Ok(format!(
+                "{} stopped; @{} is free again",
+                process.label, process.name
+            ));
+        }
+    }
+    Ok(format!(
+        "{} stopped, but @{} still holds a slot — the room frees it when the heartbeat expires",
+        process.label, process.name
+    ))
 }
 
 fn online_names(status: &Value) -> Vec<String> {
@@ -575,11 +723,7 @@ pub async fn start_agents(project_root: Option<&str>) -> Result<Vec<String>, Str
     if !healthy(&client).await {
         return Err("the room is not running — start it first".to_string());
     }
-    let dir = dir_for(project_root).ok_or_else(|| {
-        "no agentchattr checkout found next to the project \
-         (looked for vendor/agentchattr); set RIGEL_AGENTCHAT_DIR to point at one"
-            .to_string()
-    })?;
+    let dir = dir_for(project_root).ok_or_else(missing_checkout)?;
 
     let present = api_call(reqwest::Method::GET, "/api/status", None)
         .await
@@ -592,14 +736,14 @@ pub async fn start_agents(project_root: Option<&str>) -> Result<Vec<String>, Str
         if !harness.ready {
             continue;
         }
-        let already_here = present.iter().any(|name| {
-            name == &harness.name || name.starts_with(&format!("{}-", harness.name))
-        });
-        if already_here {
+        if present
+            .iter()
+            .any(|name| same_agent(name, &harness.name))
+        {
             continue;
         }
         match spawn_harness(&dir, &harness) {
-            Ok(()) => started.push(harness.label),
+            Ok(process) => started.push(process.label),
             Err(problem) => problems.push(problem),
         }
     }
@@ -608,6 +752,59 @@ pub async fn start_agents(project_root: Option<&str>) -> Result<Vec<String>, Str
         return Err(problems.join("; "));
     }
     Ok(started)
+}
+
+/// Start one configured harness by name — the roster's per-agent button. Same readiness rules as
+/// the all-at-once launch: an uninstalled CLI or a keyless API agent is refused with the reason
+/// rather than joining the room only to fail.
+pub async fn start_agent(project_root: Option<&str>, name: &str) -> Result<String, String> {
+    let client = http_client();
+    if !healthy(&client).await {
+        return Err("the room is not running — start it first".to_string());
+    }
+    let dir = dir_for(project_root).ok_or_else(|| missing_checkout())?;
+    let harness = harnesses(&dir)
+        .into_iter()
+        .find(|harness| same_agent(name, &harness.name))
+        .ok_or_else(|| {
+            format!(
+                "`{name}` is not configured in this checkout (config.toml / config.local.toml)"
+            )
+        })?;
+    if !harness.ready {
+        return Err(format!(
+            "{} cannot start: the CLI is not on PATH{}",
+            harness.label,
+            if harness.api {
+                " or its provider key is unset"
+            } else {
+                ""
+            }
+        ));
+    }
+    let present = api_call(reqwest::Method::GET, "/api/status", None)
+        .await
+        .map(|value| online_names(&value))
+        .unwrap_or_default();
+    if present.iter().any(|online| same_agent(online, &harness.name)) {
+        return Err(format!("{} is already in the room", harness.label));
+    }
+    let process = spawn_harness(&dir, &harness)?;
+    Ok(format!("{} started (pid {})", process.label, process.pid))
+}
+
+/// The harnesses this checkout configures, for the roster's per-agent Start buttons. Empty when
+/// there is no checkout; the Chat tab explains that case separately.
+pub fn configured(project_root: Option<&str>) -> Vec<ChatHarness> {
+    dir_for(project_root)
+        .map(|dir| harnesses(&dir))
+        .unwrap_or_default()
+}
+
+/// One message for both spawn paths, so the Chat tab can say the same thing everywhere.
+fn missing_checkout() -> String {
+    "no agentchattr checkout: clone https://github.com/bcurts/agentchattr into      vendor/agentchattr (a fresh clone has none — it is gitignored), or set      RIGEL_AGENTCHAT_DIR to an existing checkout"
+        .to_string()
 }
 
 #[cfg(test)]
@@ -716,6 +913,34 @@ label = "Phi4 (local)"
     #[test]
     fn missing_env_and_project_mean_no_dir() {
         assert_eq!(dir_for(Some("/nonexistent-skills-shelf")), None);
+    }
+
+    #[test]
+    fn a_suffixed_room_name_belongs_to_the_configured_agent() {
+        // The room registers `claude`, a second copy claims `claude-2`, and `claudette` is a
+        // different agent entirely — a prefix match without the dash would confuse them.
+        assert!(same_agent("claude", "claude"));
+        assert!(same_agent("claude-2", "claude"));
+        assert!(!same_agent("claude", "claude-2"));
+        assert!(!same_agent("claudette", "claude"));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn kill_tree_ends_a_hidden_child_and_tolerates_a_dead_pid() {
+        use std::os::windows::process::CommandExt;
+        let mut child = std::process::Command::new("cmd")
+            .args(["/C", "ping -n 60 127.0.0.1 >/dev/null"])
+            .creation_flags(0x0800_0000)
+            .spawn()
+            .expect("spawn a long-running hidden child");
+        let pid = child.id();
+        kill_tree(pid).expect("taskkill /T /F");
+        let status = child.wait().expect("the child is reaped");
+        assert!(!status.success(), "a killed child must not report success");
+        assert!(!pid_running(pid), "tasklist must not find the pid");
+        // A pid that died on its own between the click and the kill is not an error.
+        assert!(kill_tree(pid).is_ok());
     }
 
     #[test]

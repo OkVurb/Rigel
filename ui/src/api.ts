@@ -234,6 +234,21 @@ export interface AgentChatAgent {
   role: string | null;
 }
 
+/** One harness process Rigel started for the room, so the roster can offer a Stop. */
+export interface AgentChatProcess {
+  name: string;
+  label: string;
+  pid: number;
+}
+
+/** One harness the chat checkout configures; `ready` means its CLI/key is present. */
+export interface AgentChatHarness {
+  name: string;
+  label: string;
+  api: boolean;
+  ready: boolean;
+}
+
 /** Browser preview only: the shape of a live room, from this project's recorded run. */
 const PREVIEW_CHAT_MESSAGES: AgentChatMessage[] = [
   { id: 1, sender: "user", text: "@claude @codex Review crates/rigel-cli/src/phase3.rs — one improvement each, then debate.", time: "21:18:02", kind: "chat", channel: "general" },
@@ -720,6 +735,33 @@ export const api = {
     async startAgents(project: string | null): Promise<string[]> {
       if (!isTauri()) throw new Error("Start agents from the desktop app, not the browser preview.");
       return call<string[]>("chat_start_agents", { project });
+    },
+
+    /** The agents Rigel owns. Anything else in the room was started by hand. */
+    async launched(): Promise<AgentChatProcess[]> {
+      if (!isTauri()) return [];
+      return call<AgentChatProcess[]>("chat_launched");
+    },
+
+    async harnesses(project: string | null): Promise<AgentChatHarness[]> {
+      if (!isTauri()) {
+        return [
+          { name: "claude", label: "Claude", api: false, ready: true },
+          { name: "codex", label: "Codex", api: false, ready: true },
+          { name: "phi4", label: "Phi4 (local)", api: true, ready: true },
+        ];
+      }
+      return call<AgentChatHarness[]>("chat_harnesses", { project });
+    },
+
+    async startAgent(project: string | null, name: string): Promise<string> {
+      if (!isTauri()) throw new Error("Start agents from the desktop app, not the browser preview.");
+      return call<string>("chat_start_agent", { project, name });
+    },
+
+    async stopAgent(name: string): Promise<string> {
+      if (!isTauri()) throw new Error("Stop agents from the desktop app, not the browser preview.");
+      return call<string>("chat_stop_agent", { name });
     },
   },
 };

@@ -10,7 +10,18 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 
-import { api, type AgentChatAgent, type AgentChatMessage } from "./api";
+import {
+  api,
+  type AgentChatAgent,
+  type AgentChatHarness,
+  type AgentChatMessage,
+  type AgentChatProcess,
+} from "./api";
+
+/** Mirrors `same_agent` in the core: the room may register `claude-2` for configured `claude`. */
+function sameAgent(candidate: string, configured: string): boolean {
+  return candidate === configured || candidate.startsWith(`${configured}-`);
+}
 
 type Status = Awaited<ReturnType<typeof api.agentChat.status>>;
 
@@ -37,6 +48,9 @@ export default function ChatView({
   const [status, setStatus] = useState<Status | null>(null);
   const [booting, setBooting] = useState(false);
   const [agents, setAgents] = useState<Record<string, AgentChatAgent>>({});
+  const [processes, setProcesses] = useState<AgentChatProcess[]>([]);
+  const [harnesses, setHarnesses] = useState<AgentChatHarness[]>([]);
+  const [busyAgent, setBusyAgent] = useState<string | null>(null);
   const [channels, setChannels] = useState<string[]>(["general"]);
   const [channel, setChannel] = useState("general");
   const [messages, setMessages] = useState<AgentChatMessage[]>([]);
@@ -61,13 +75,17 @@ export default function ChatView({
         if (!live) return;
         setStatus(next);
         if (next.authed) {
-          const [room, presence] = await Promise.all([
+          const [room, presence, owned, configured] = await Promise.all([
             api.agentChat.channels(),
             api.agentChat.agents(),
+            api.agentChat.launched(),
+            api.agentChat.harnesses(project || null),
           ]);
           if (!live) return;
           setChannels(room);
           setAgents(presence);
+          setProcesses(owned);
+          setHarnesses(configured);
           const fresh = await api.agentChat.messages(channel, lastIdRef.current);
           if (fresh.length > 0) {
             setMessages((current) =>
@@ -138,6 +156,36 @@ export default function ChatView({
       setStarting(false);
     }
   }, [project, onNotice]);
+
+  /** Start one configured harness; the roster refreshes on the next poll. */
+  const startOne = useCallback(
+    async (name: string) => {
+      setBusyAgent(name);
+      try {
+        onNotice(await api.agentChat.startAgent(project || null, name));
+      } catch (problem) {
+        onNotice(problem instanceof Error ? problem.message : String(problem));
+      } finally {
+        setBusyAgent(null);
+      }
+    },
+    [project, onNotice],
+  );
+
+  /** Stop one agent Rigel owns, killing the wrapper and everything under it. */
+  const stopOne = useCallback(
+    async (name: string) => {
+      setBusyAgent(name);
+      try {
+        onNotice(await api.agentChat.stopAgent(name));
+      } catch (problem) {
+        onNotice(problem instanceof Error ? problem.message : String(problem));
+      } finally {
+        setBusyAgent(null);
+      }
+    },
+    [onNotice],
+  );
 
   const send = useCallback(async () => {
     const text = draft.trim();
@@ -253,21 +301,56 @@ export default function ChatView({
         </div>
 
         <section className="chat-roster" aria-label="Agents">
-          {presence.map(([name, agent]) => (
-            <div className="chat-agent" key={name} title={agent.role ?? name}>
-              <span
-                className={`chat-dot ${agent.available ? (agent.busy ? "busy" : "up") : "down"}`}
-                style={{ color: agent.color }}
-                aria-hidden
+          {presence.map(([name, agent]) => {
+            const owned = processes.find((process) => sameAgent(name, process.name));
+            return (
+              <div
+                className="chat-agent"
+                key={name}
+                title={owned ? `${agent.role ?? name} · pid ${owned.pid}` : (agent.role ?? name)}
               >
-                ●
-              </span>
-              <span className="row-name">
-                {agent.label || name}
-                {agent.role ? <span className="tag">{agent.role}</span> : null}
-              </span>
-            </div>
-          ))}
+                <span
+                  className={`chat-dot ${agent.available ? (agent.busy ? "busy" : "up") : "down"}`}
+                  style={{ color: agent.color }}
+                  aria-hidden
+                >
+                  ●
+                </span>
+                <span className="row-name">
+                  {agent.label || name}
+                  {agent.role ? <span className="tag">{agent.role}</span> : null}
+                </span>
+                {owned ? (
+                  <button
+                    className="chat-agent-control"
+                    onClick={() => void stopOne(owned.name)}
+                    disabled={busyAgent !== null}
+                    title={`Rigel started this agent (pid ${owned.pid}); Stop kills the wrapper, its CLI and their children.`}
+                  >
+                    {busyAgent === owned.name ? "Stopping…" : "Stop"}
+                  </button>
+                ) : null}
+              </div>
+            );
+          })}
+
+          {/* Configured but not in the room: start one without starting them all. */}
+          {harnesses
+            .filter(
+              (harness) =>
+                harness.ready && !presence.some(([name]) => sameAgent(name, harness.name)),
+            )
+            .map((harness) => (
+              <button
+                key={harness.name}
+                className="chat-agent-control start"
+                onClick={() => void startOne(harness.name)}
+                disabled={busyAgent !== null}
+                title={`Start ${harness.label} on a hidden console, without starting the others.`}
+              >
+                {busyAgent === harness.name ? "Starting…" : `Start ${harness.label}`}
+              </button>
+            ))}
 
           <button
             className="chat-start-agents"

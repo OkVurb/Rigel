@@ -1937,6 +1937,35 @@ input {
   margin-left: 6px;
 }
 
+/* Per-agent lifecycle: Stop only for the processes Rigel owns, Start for configured ones. */
+.chat-agent-control {
+  margin-left: auto;
+  padding: 2px 8px;
+  border: 1px solid var(--hairline);
+  border-radius: 5px;
+  background: transparent;
+  color: var(--muted);
+  font-size: 11px;
+  cursor: pointer;
+}
+
+.chat-agent-control:hover:not(:disabled) {
+  border-color: rgba(233, 162, 59, 0.45);
+  color: var(--text);
+}
+
+.chat-agent-control:disabled {
+  opacity: 0.55;
+}
+
+.chat-agent-control.start {
+  margin-left: 0;
+  width: 100%;
+  padding: 6px 10px;
+  font-size: 12px;
+  text-align: left;
+}
+
 .chat-start-agents {
   margin-top: 4px;
   padding: 6px 10px;
