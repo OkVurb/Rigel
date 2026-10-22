@@ -115,9 +115,13 @@ async fn healthy(client: &reqwest::Client) -> bool {
 }
 
 /// One authenticated API call. The token replaces the browser cookie the vendor UI uses.
-async fn api_call(method: reqwest::Method, path: &str, body: Option<Value>) -> Result<Value, String> {
+async fn api_call(
+    method: reqwest::Method,
+    path: &str,
+    body: Option<Value>,
+) -> Result<Value, String> {
     let url = format!("{}{}", origin(), path);
-    let token = token().ok_or_else(|| {
+    let token = token().ok_or({
         "the chat server is up but Rigel has no session token for it — restart it from the Chat tab"
     })?;
     let mut request = http_client()
@@ -179,9 +183,7 @@ pub fn dir_for(project_root: Option<&str>) -> Option<std::path::PathBuf> {
             return Some(candidate);
         }
     }
-    let Some(project) = project_root else {
-        return None;
-    };
+    let project = project_root?;
     for candidate in ["vendor/agentchattr", "agentchattr"] {
         let candidate = Path::new(project).join(candidate);
         if candidate.join("run.py").exists() {
@@ -197,12 +199,9 @@ pub async fn status(project_root: Option<&str>) -> ChatStatus {
     let running = healthy(&client).await;
 
     let authed = running
-        && match api_call(reqwest::Method::GET, "/api/settings", None).await {
-            Ok(_) => true,
-            // `api_call` reports a missing token with a message; a protocol error here means
-            // the token is stale (server restarted) — either way the tab cannot authenticate.
-            Err(_) => false,
-        };
+        && api_call(reqwest::Method::GET, "/api/settings", None)
+            .await
+            .is_ok();
 
     let dir = dir_for(project_root);
     ChatStatus {
@@ -280,13 +279,11 @@ fn which(program: &str) -> Option<std::path::PathBuf> {
     for dir in std::env::split_paths(&path) {
         #[cfg(windows)]
         for suffix in [".exe", ""] {
-            let candidate = dir.join(
-                if program.ends_with(".exe") {
-                    program.to_string()
-                } else {
-                    format!("{program}{suffix}")
-                },
-            );
+            let candidate = dir.join(if program.ends_with(".exe") {
+                program.to_string()
+            } else {
+                format!("{program}{suffix}")
+            });
             if candidate.is_file() {
                 return Some(candidate);
             }
@@ -356,7 +353,11 @@ pub async fn agents() -> Result<Value, String> {
 }
 
 /// Recent history, or everything newer than `since_id` for the poller.
-pub async fn messages(channel: Option<&str>, since_id: u64, limit: u64) -> Result<Vec<ChatMessage>, String> {
+pub async fn messages(
+    channel: Option<&str>,
+    since_id: u64,
+    limit: u64,
+) -> Result<Vec<ChatMessage>, String> {
     let mut path = if since_id > 0 {
         format!("/api/messages?since_id={since_id}&limit={limit}")
     } else {
@@ -367,7 +368,9 @@ pub async fn messages(channel: Option<&str>, since_id: u64, limit: u64) -> Resul
             path.push_str(&format!("&channel={}", urlencoded(name)?));
         }
     }
-    Ok(parse_messages(api_call(reqwest::Method::GET, &path, None).await?))
+    Ok(parse_messages(
+        api_call(reqwest::Method::GET, &path, None).await?,
+    ))
 }
 
 fn urlencoded(value: &str) -> Result<String, String> {
@@ -386,12 +389,10 @@ fn urlencoded(value: &str) -> Result<String, String> {
 /// path for them (the REST send is per-agent-token only), so the core owns a short-lived
 /// socket per message. `sender: "user"` matches the vendor UI's default identity.
 pub async fn send(text: &str, channel: &str) -> Result<(), String> {
-    let token = token().ok_or_else(|| {
+    let token = token().ok_or({
         "the chat server is up but Rigel has no session token for it — restart it from the Chat tab"
     })?;
-    let url = origin()
-        .replacen("http", "ws", 1)
-        .replace("127.0.0.1", "127.0.0.1");
+    let url = origin().replacen("http", "ws", 1);
     let ws_url = format!("{url}/ws?token={token}");
 
     let (mut socket, _) = tokio_tungstenite::connect_async(&ws_url)
@@ -406,7 +407,7 @@ pub async fn send(text: &str, channel: &str) -> Result<(), String> {
     });
     socket
         .send(tokio_tungstenite::tungstenite::Message::Text(
-            frame.to_string().into(),
+            frame.to_string(),
         ))
         .await
         .map_err(|error| format!("chat send failed: {error}"))?;
@@ -476,7 +477,10 @@ fn parse_agents(text: &str) -> Vec<AgentTable> {
         if line.is_empty() {
             continue;
         }
-        if let Some(section) = line.strip_prefix('[').and_then(|rest| rest.strip_suffix(']')) {
+        if let Some(section) = line
+            .strip_prefix('[')
+            .and_then(|rest| rest.strip_suffix(']'))
+        {
             if let Some(name) = section.trim().strip_prefix("agents.") {
                 tables.push((unquote(name), Vec::new()));
             } else {
@@ -573,9 +577,27 @@ fn harness_argv(harness: &ChatHarness) -> Vec<String> {
 
 fn spawn_harness(dir: &Path, harness: &ChatHarness) -> Result<ChatProcess, String> {
     let python = chat_python(dir).ok_or("no python found on PATH to start an agent")?;
-    let mut command = std::process::Command::new(python);
+    launch_hidden(
+        &python,
+        &harness_argv(harness),
+        dir,
+        &harness.name,
+        &harness.label,
+    )
+}
+
+/// The CreateProcess half, split from the harness table so a test can drive it with a stub
+/// wrapper. Everything that decides whether the console is visible lives here.
+fn launch_hidden(
+    program: &Path,
+    argv: &[String],
+    dir: &Path,
+    name: &str,
+    label: &str,
+) -> Result<ChatProcess, String> {
+    let mut command = std::process::Command::new(program);
     command
-        .args(harness_argv(harness))
+        .args(argv)
         .current_dir(dir)
         // Inherited on purpose: `CREATE_NO_WINDOW` hands the child its own console, and the
         // wrapper injects keystrokes through those inherited handles. Redirecting them would
@@ -594,11 +616,11 @@ fn spawn_harness(dir: &Path, harness: &ChatHarness) -> Result<ChatProcess, Strin
 
     let mut child = command
         .spawn()
-        .map_err(|error| format!("could not start {} ({error})", harness.label))?;
+        .map_err(|error| format!("could not start {label} ({error})"))?;
     let pid = child.id();
     let process = ChatProcess {
-        name: harness.name.clone(),
-        label: harness.label.clone(),
+        name: name.to_string(),
+        label: label.to_string(),
         pid,
     };
     if let Ok(mut launched) = LAUNCHED.lock() {
@@ -652,7 +674,7 @@ pub fn kill_tree(pid: u32) -> Result<(), String> {
         if !pid_running(pid) {
             return Ok(());
         }
-        return Err(format!("taskkill could not stop pid {pid}: {stderr}"));
+        Err(format!("taskkill could not stop pid {pid}: {stderr}"))
     }
     #[cfg(not(windows))]
     {
@@ -722,7 +744,10 @@ pub async fn stop_agent(name: &str) -> Result<String, String> {
             .await
             .map(|value| online_names(&value))
             .unwrap_or_default();
-        if !present.iter().any(|online| same_agent(online, &process.name)) {
+        if !present
+            .iter()
+            .any(|online| same_agent(online, &process.name))
+        {
             return Ok(format!(
                 "{} stopped; @{} is free again",
                 process.label, process.name
@@ -762,10 +787,7 @@ pub async fn start_agents(project_root: Option<&str>) -> Result<Vec<String>, Str
         if !harness.ready {
             continue;
         }
-        if present
-            .iter()
-            .any(|name| same_agent(name, &harness.name))
-        {
+        if present.iter().any(|name| same_agent(name, &harness.name)) {
             continue;
         }
         match spawn_harness(&dir, &harness) {
@@ -788,14 +810,12 @@ pub async fn start_agent(project_root: Option<&str>, name: &str) -> Result<Strin
     if !healthy(&client).await {
         return Err("the room is not running — start it first".to_string());
     }
-    let dir = dir_for(project_root).ok_or_else(|| missing_checkout())?;
+    let dir = dir_for(project_root).ok_or_else(missing_checkout)?;
     let harness = harnesses(&dir)
         .into_iter()
         .find(|harness| same_agent(name, &harness.name))
         .ok_or_else(|| {
-            format!(
-                "`{name}` is not configured in this checkout (config.toml / config.local.toml)"
-            )
+            format!("`{name}` is not configured in this checkout (config.toml / config.local.toml)")
         })?;
     if !harness.ready {
         return Err(format!(
@@ -812,7 +832,10 @@ pub async fn start_agent(project_root: Option<&str>, name: &str) -> Result<Strin
         .await
         .map(|value| online_names(&value))
         .unwrap_or_default();
-    if present.iter().any(|online| same_agent(online, &harness.name)) {
+    if present
+        .iter()
+        .any(|online| same_agent(online, &harness.name))
+    {
         return Err(format!("{} is already in the room", harness.label));
     }
     let process = spawn_harness(&dir, &harness)?;
@@ -876,7 +899,9 @@ label = "Phi4 (local)"
             .parent()
             .and_then(Path::parent);
         let Some(repo_root) = repo_root else { return };
-        let Some(dir) = dir_for(Some(&repo_root.display().to_string())) else { return };
+        let Some(dir) = dir_for(Some(&repo_root.display().to_string())) else {
+            return;
+        };
         let found = harnesses(&dir);
         assert!(found.iter().any(|harness| harness.name == "claude"));
         assert!(found.iter().any(|harness| harness.name == "codex"));
@@ -887,9 +912,17 @@ label = "Phi4 (local)"
     #[test]
     fn an_api_agent_needs_its_key_before_it_counts_as_ready() {
         // A missing key would join the roster and fail every turn; a keyless local model is fine.
-        assert!(!harness_ready(true, "minimax", Some("RIGEL_TEST_KEY_THAT_IS_NOT_SET")));
+        assert!(!harness_ready(
+            true,
+            "minimax",
+            Some("RIGEL_TEST_KEY_THAT_IS_NOT_SET")
+        ));
         assert!(harness_ready(true, "phi4", None));
-        assert!(!harness_ready(false, "definitely-not-an-installed-cli", None));
+        assert!(!harness_ready(
+            false,
+            "definitely-not-an-installed-cli",
+            None
+        ));
     }
 
     #[test]
@@ -977,6 +1010,91 @@ label = "Phi4 (local)"
         assert!(!pid_running(pid), "tasklist must not find the pid");
         // A pid that died on its own between the click and the kill is not an error.
         assert!(kill_tree(pid).is_ok());
+    }
+
+    /// The `CreateProcess` half, pinned. A stub wrapper launched the way `start_agents` launches a
+    /// real one must get a console with a usable stdin handle and no window, and must receive the
+    /// argv the harness table chose. `GetConsoleWindow() == 0` is the whole "nothing on screen"
+    /// claim; `GetConsoleMode` on the stdin handle is what the wrapper's `WriteConsoleInput`
+    /// injection needs and what a redirected pipe would fail.
+    #[cfg(windows)]
+    #[test]
+    fn a_launched_wrapper_gets_a_hidden_console_and_its_argv() {
+        let dir = std::env::temp_dir().join(format!("rigel-spawn-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        std::fs::write(
+            dir.join("wrapper.py"),
+            r#"
+import ctypes, pathlib, sys, time
+
+kernel32 = ctypes.windll.kernel32
+kernel32.CreateFileW.restype = ctypes.c_void_p
+# CONIN$ names the console the child owns, whatever handles it inherited. A writable console
+# input buffer with a console mode is exactly what the wrapper's WriteConsoleInput needs.
+conin = kernel32.CreateFileW("CONIN$", 0xC0000000, 3, None, 3, 0, None)
+mode = ctypes.c_uint(0)
+console_ok = (
+    1
+    if conin not in (None, 0, ctypes.c_void_p(-1).value)
+    and kernel32.GetConsoleMode(ctypes.c_void_p(conin), ctypes.byref(mode))
+    else 0
+)
+report = pathlib.Path(__file__).with_name("report.txt")
+report.write_text(
+    "hwnd=%d\nconsole_ok=%d\nargv=%s\n"
+    % (kernel32.GetConsoleWindow(), console_ok, " ".join(sys.argv[1:])),
+    encoding="utf-8",
+)
+time.sleep(30)
+"#,
+        )
+        .expect("stub wrapper");
+
+        let Some(python) = chat_python(&dir) else {
+            eprintln!("no python on PATH; skipping the CreateProcess check");
+            return;
+        };
+        let argv = harness_argv(&ChatHarness {
+            name: "claude".to_string(),
+            label: "Claude".to_string(),
+            api: false,
+            ready: true,
+        });
+        assert_eq!(
+            argv,
+            vec![
+                "wrapper.py".to_string(),
+                "claude".to_string(),
+                "--dangerously-skip-permissions".to_string()
+            ],
+            "the harness table is what the spawn is given"
+        );
+
+        let process = launch_hidden(&python, &argv, &dir, "claude", "Claude")
+            .expect("the stub wrapper starts");
+        let report = dir.join("report.txt");
+        let mut text = String::new();
+        for _ in 0..100 {
+            if let Ok(read) = std::fs::read_to_string(&report) {
+                text = read;
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+        let _ = kill_tree(process.pid);
+        let _ = std::fs::remove_dir_all(&dir);
+
+        assert!(!text.is_empty(), "the stub wrapper never reported back");
+        assert!(text.contains("hwnd=0"), "a console window leaked: {text}");
+        assert!(
+            text.contains("console_ok=1"),
+            "the hidden console has no writable input buffer: {text}"
+        );
+        assert!(
+            text.contains("argv=claude --dangerously-skip-permissions"),
+            "the launched argv lost the harness flags: {text}"
+        );
     }
 
     #[test]
