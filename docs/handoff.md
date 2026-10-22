@@ -4,7 +4,8 @@
 CLI carries a source URL; every decision carries an ID that later sections cite. Where this document
 and an older doc disagree, this document wins — see [§3.3 Superseded](#33-superseded).
 
-**Last reviewed:** 21 Oct 2026 (multi-agent chat probe added, §2.8).
+**Last reviewed:** 22 Oct 2026 (the agent room ships with in-app, windowless agent launch, and
+is merged into `main` — §2.8–§2.10).
 
 ---
 
@@ -163,7 +164,7 @@ replace the localStorage notes above.
 | **P4.6** Claude adapter | `crates/rigel-adapters/src/claude.rs`, `tests/claude.rs`, `tests/fixtures/fake_claude.rs` | NDJSON stream normalised into `Started` / `Delta` / `Message` / `Notice`; per-turn usage and `total_cost_usd`; argv, cwd and stream shapes pinned by 11 tests (prompt on argv, key never on argv, `--bare` present, subscription identity killed, key redacted out of every event, blocked turn surfaced, silent non-zero exit refused, a truncated stream without a `result` line rejected, an init line with no `apiKeySource` refused). Probe reports 2.1.251 against the real CLI |
 | **P4.3** ACP client | `crates/rigel-adapters/src/acp.rs`, `tests/acp.rs`, `tests/fixtures/fake_acp.rs` | JSON-RPC v1 client for `agent acp` / `cline --acp`; initialize → session/new → session/prompt; `session/update` normalised into message, thought, tool-call, plan, usage, notice and `unmapped` events; `session/request_permission` routed to an `Approver` and answered only with an option the agent offered, otherwise `cancelled`; 9 tests against a scripted agent (approval outcome on the wire, unoffered allow downgraded, protocol 99 refused, hung turn cancelled and acknowledged, a pending approval answered `cancelled`, relative cwd refused, no key no spawn) |
 
-### 2.8 Multi-agent chat — the P6 probe, verified 21 Oct 2026
+### 2.8 Multi-agent chat — the P6 probe, verified 21–22 Oct 2026
 
 The phase 5/6 question was "can several real CLI agents share one room, under Rigel's rules,
 without a new protocol?" The answer is yes, and the working prototype is a tab in this app, not a
@@ -175,7 +176,7 @@ the design draft is [multi-agent-channels-draft.md](multi-agent-channels-draft.m
 | Chat tab | `ui/src/agentchat.tsx`, rail entry in `ui/src/App.tsx`, styles in `ui/src/shell.css` | roster pills, channels, stream, composer; boots the room from the tab; never touches the server directly |
 | Swarm button | `ui/src/session.tsx` composer → `swarm` in `ui/src/App.tsx` | hands the typed task to **every available room agent at once** as one `@mention` broadcast on `#general`, then opens Chat with the outcome; a room that is unauthed or has no online agents refuses with a visible reason instead of pretending to fan out |
 | Core front | `crates/rigel-core/src/agent/agentchat.rs` | spawns `run.py` when the room is down (the OmniRoute contract), reads the session token from its stdout into core memory, exposes `status / channels / agents / messages / send` |
-| Tauri commands | `crates/rigel-app/src/lib.rs` | `chat_status / chat_start / chat_channels / chat_agents / chat_messages / chat_send`, registered in the handler |
+| Tauri commands | `crates/rigel-app/src/lib.rs` | `chat_status / chat_start / chat_channels / chat_agents / chat_messages / chat_send / chat_start_agents`, registered in the handler |
 | Hidden agent launch | `agentchat::start_agents` (core), `chat_start_agents` (Tauri), **Start agents** in the roster | spawns every configured harness (`config.toml` + `config.local.toml`) that is installed, with `CREATE_NO_WINDOW` — a real console with no window, so the wrapper's `WriteConsoleInput` injection still drives the TUI. Unattended flags match the auto-approve bats; API agents without `api_key_env` are skipped. Zero console windows verified 22 Oct |
 | External agent rows | `rigel agent register` (`crates/rigel-cli/src/phase3.rs`, `phase3/agent.rs`) | mints an `agents` row for a harness so `rigel mcp --agent` is scoped and billed like a native agent |
 | MCP server | `crates/rigel-mcp/src/lib.rs` | stdio JSON-RPC; six advertised tools (`rigel_skills_search`, `rigel_skill_load`, `rigel_patch_propose`, `rigel_budget`, `rigel_memory_read`, `rigel_memory_write`); claim tools stay unadvertised until P5 |
@@ -217,6 +218,101 @@ per-harness MCP trust as the friction to automate, not a Rigel protocol problem.
    then route into a dead or tool-less ghost (the symptom: "tools not exposed" or silence).
    Kill every `claude.exe` + `wrapper.py claude` before relaunching, and let the registry
    heartbeat expire so the canonical `@claude`/`@codex` names free up.
+6. **`.mcp.json` is machine-specific and now gitignored** alongside `vendor/`. It carries this
+   worktree's absolute paths and the session/agent ids minted by `rigel agent register`; a
+   checkout that needs Claude's MCP wiring has to regenerate it rather than inherit it.
+7. **The room's session token lives in Rigel's process.** If Rigel exits while the python server
+   keeps running, the next instance reports `authed: false` and cannot send; close that server so
+   Rigel can spawn and own a fresh one. Agents are children of Rigel, so a restart leaves them
+   reconnecting to a dead origin until the new room is up and **Start agents** is pressed.
+
+**Hidden agents, verified 22 Oct:** twelve console windows had accumulated from repeated
+`windows/start_*.bat` launches — every wrapper dies with its console, so those were empty shells
+still holding slots — and `taskkill /T` closed all of them. The Chat roster's **Start agents**
+button now launches the configured harnesses itself: `agentchat::start_agents` reads
+`config.toml` then `config.local.toml` (line-based, local wins), skips a CLI that is not on
+`PATH` and an API agent whose `api_key_env` is unset, and spawns `wrapper.py` /
+`wrapper_api.py` with `CREATE_NO_WINDOW`. That flag matters: the process still gets a console
+with valid `GetStdHandle` handles — which `wrapper_windows.inject` needs for
+`WriteConsoleInput` — while `GetConsoleWindow()` returns 0, so nothing appears on screen. A
+standalone probe pinned that (`stdin_console=True stdout_console=True hwnd=0`), and the live run
+confirmed it: `Get-Process` showed no console window for `python|claude|codex|cmd|conhost`, the
+app owned three `wrapper*.py` children plus one `conhost.exe`, the roster read 3 online, and
+`@codex` answered from the correct worktree folder in about 40 s.
+
+Because a hidden console cannot answer a prompt, the launchers pass the same unattended flags the
+auto-approve bats used (`--dangerously-skip-permissions`, `--dangerously-bypass-approvals-and-sandbox`),
+and `harness_argv` is a pure function with a test so those flags stay visible and reviewable.
+`/api/status` also carries room-level keys (`paused`) with no presence fields; the roster filters
+on `typeof available === "boolean"` so they never render as blank pills.
+
+### 2.9 The 22 Oct merge — the room plus the Phase 4 safety work
+
+`main` had already landed the Phase 4 safety chain and a per-turn model picker written in another
+thread; this branch carried the chat room, the Swarm button, the live-catalogue picker and the
+windowless agent launchers. Both sides touched `ui/src/session.tsx`, `ui/src/api.ts`,
+`crates/rigel-app/src/lib.rs`, `docs/handoff.md` and `README.md`, so the merge was reconciled by
+hand rather than accepted wholesale.
+
+| Area | Resolution |
+|---|---|
+| Model picker | The live catalogue plus a separate effort wins. `ui/src/models.ts` (a hardcoded per-provider list and `<select>`) is deleted; nothing imported it. The control is the chip in `ui/src/modelpicker.tsx`, and it writes through the same `settings_set` command as the Settings tab. |
+| Default model | `configured_model(&settings, &provider)` still picks the provider's own default (Gemini keeps its default), and `wire_model` then applies the effort for OmniRoute ids that already encode one. |
+| Effort | One setting, sent as `reasoning_effort`, never folded into the model id. Three call sites have nothing to inherit yet and now say so: the CLI `Coordinator` (`crates/rigel-cli/src/phase3/agent.rs`), the deliberation round (`crates/rigel-core/src/agent/deliberation.rs`) and Gemini's test request all pass `effort: None`. Threading `--effort` through the CLI is open (§2.10). |
+| Transcript rows | The branch's command row and the merged `command` / `web_search` rows both stay: destructive advice, denied and timed-out states, and untrusted fetches still render. |
+| Handoff / README | This file keeps the P6 section and D42–D69; the phase counts (11/19) and the Phase 4 capability table come from `main`. README gained the `skills sweep` command, the prototype dev line and a corrected Session-surface row. |
+| Gemini key | `key_status` reports `gemini`, so Settings no longer claims a key is missing when one exists. |
+
+Commits: `83e5db0` on the branch, `2ca2ead` the merge on `main`, pushed to `origin/main` the same
+day. Verified by `cargo test --workspace` (102 core unit tests plus every adapter/CLI suite,
+green), `npx tsc --noEmit`, `npm run build`, and a live run of the rebuilt app on the merged tree:
+room booted, three agents online, zero console windows, Session showing the model/effort chip and
+the Swarm button.
+
+Two things the merge exposed that are worth keeping in mind:
+
+- `ChatRequest` grew an `effort` field, so every literal had to state it. Adding a field to a
+  request struct is a breaking change across files that do not otherwise move — expect it.
+- One test asserted the *machine* had `vendor/agentchattr` next to the repo. That passed in the
+  worktree and failed in the primary checkout, which is exactly the wrong kind of test. It now
+  builds its own fixture in `std::env::temp_dir()` and asserts `dir_for` lands on it.
+
+### 2.10 Where the work stands, and what is open (22 Oct 2026)
+
+Verified working in the app: open a project → Chat → **Start the chat server** → **Start agents**
+→ three agents (Claude, Codex, Phi4) online with no window on screen; mention one and it replies;
+press **Swarm** on the Session tab and every online agent gets the task. Session has a live model
+and effort picker; Settings mirrors it.
+
+Known gaps, roughly in the order they should be taken:
+
+1. **P4.7 golden fixtures** (D51 says first, before new tools or UI). One recorded stream per
+   harness per scenario — start, tool call, approval, error, interrupt — plus replay assertions.
+   Cursor and Cline probes now exist, so those fixtures are no longer speculative.
+2. **Agent lifecycle.** `start_agents` calls `mem::forget` on each child, so Rigel holds no handle:
+   there is no Stop, no per-agent start, and a closed app leaves orphaned wrappers. Track the
+   pids, kill the tree (wrapper → CLI → its node children), and free the registration so the
+   canonical `@name` comes back. The roster currently dedupes by `name` or `name-*` prefix only.
+3. **Finish the effort plumbing.** Add `--effort` to `rigel agent run`, pass it into `Coordinator`
+   and `ModelDeliberator` (both are `None` today), and assert `reasoning_effort` reaches the wire
+   on both paths. Until then the CLI and the advisory round use the provider default.
+4. **Swarm preflight.** Swarm currently broadcasts to every online agent. Show the roster with
+   checkboxes before sending, and keep the refusal messages for an unauthed room or an empty one.
+5. **A checkout-less room.** `vendor/agentchattr` is gitignored, so a fresh clone (including this
+   repo's primary checkout) has no chat checkout. The Chat tab should say exactly what to install
+   and where, and point at `RIGEL_AGENTCHAT_DIR`, instead of failing at spawn time.
+6. **Claude TUI MCP visibility.** `claude -p --mcp-config …` sees all six rigel tools; the
+   interactive session still exposes only `rigel_budget` (evidence in the QA doc). Automate the
+   `.claude/settings.local.json` / `enabledMcpjsonServers` trust step or record why it cannot be.
+7. **Spawn-path tests.** `harness_argv`, config parsing and the readiness rules are unit-tested;
+   the `CreateProcess` call itself is not. A test that spawns a stub wrapper on Windows and
+   asserts "no console window, handshake still works" would pin the whole feature.
+
+Environment facts a fresh agent will trip over: the debug app loads `http://localhost:5173`, so
+`npm --prefix ui run dev` must be running before `cargo run -p rigel-app`; `vendor/agentchattr`
+and `.mcp.json` are local-only; never launch agents with `vendor/agentchattr/windows/*.bat`
+(windowed consoles, orphaned on restart); and `--json` runs default to deny, so an approved
+command must say so explicitly.
 
 ---
 
@@ -968,6 +1064,15 @@ to; never parse human output.
 | `budget.set` | `{ session, cap_cents }` | `Session` |
 | `memory.read` / `memory.write` | `{ agent, topic }` / `{ agent, topic, content, mode }` | file / `()` |
 | `settings.get` / `settings.set` | — | `Settings` |
+| `models_list` | — | `string[]` — the provider's live catalogue for the picker |
+| `chat_status` | `{ project? }` | `ChatStatus` (`running`, `authed`, `origin`, `dir`) |
+| `chat_start` | `{ project? }` | `ChatStatus` — boots `run.py` and keeps the token in Rust |
+| `chat_channels` / `chat_agents` / `chat_messages` | — / — / `{ channel?, since_id?, limit? }` | channels, presence, messages |
+| `chat_send` | `{ channel, text }` | sends over the vendor websocket |
+| `chat_start_agents` | `{ project? }` | launches the configured harnesses with `CREATE_NO_WINDOW`, returns the labels started |
+
+The names above are the design vocabulary; the registered commands are snake_case (`turn_send`,
+`session_start`, `chat_start_agents`, …).
 
 Event channel `rigel://events`: `AgentEvent` (normalised), `SessionUpdated`, `ClaimChanged`,
 `ConflictDetected`, `BudgetWarning`, `BudgetExceeded`, `ApprovalRequested`, `ApprovalResolved`,
@@ -1419,6 +1524,12 @@ Non-negotiable tests, by name:
 4. `budget_stops_within_one_turn` — fake adapter emits usage above cap; assert interrupt called once.
 5. `memory_rejects_paths` — every pattern in §7.1.
 6. `fixture_replay_matches_normalisation` — recorded harness streams normalise to expected items.
+
+As of 22 Oct 2026, `cargo test --workspace` covers 102 core unit tests plus the adapter, CLI and
+integration suites; `npx tsc --noEmit` and `npm --prefix ui run build` are part of the same gate.
+The chat module's own tests pin the config parser, the harness argv (including the unattended
+flags), the API-key readiness rule and the checkout guess; the spawn call itself is still
+untested (§2.10, item 7).
 
 A failing test is fixed by fixing the cause. No suppressions, no `#[ignore]` above, no snapshot updates
 without reading the diff.
