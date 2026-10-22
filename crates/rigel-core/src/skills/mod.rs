@@ -40,7 +40,9 @@ pub use evidence::{Evidence, EvidenceSummary};
 pub use github::GitHubSource;
 pub use http::{Fetched, Http, HttpError};
 pub use hub::{SkillHubSource, SkillsMpSource};
-pub use index::{ImportReport, IndexStats, IngestReport, SkillDetail, SkillIndex, VariantRow};
+pub use index::{
+    ImportReport, IndexStats, IngestReport, SkillDetail, SkillIndex, SweepReport, VariantRow,
+};
 pub use scan::{Capability, EvidenceLine, Severity};
 pub use search::{SearchHit, SearchOrder};
 pub use source::{

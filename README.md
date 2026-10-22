@@ -74,6 +74,7 @@ cargo run -q -p rigel-cli -- session resume --project . --id <session-id>
 cd ui && npm install && npm run dev   # renderer in a browser, sample rows
 bash scripts/dev.sh                    # desktop shell, secrets from Infisical (INFISICAL.md)
 cargo run -p rigel-app                 # the same, without Infisical: keychain or shell env
+cd prototype && npm run dev            # visual reference (Phase 0 browser app)
 ```
 
 The index lives at `%APPDATA%\Rigel` (`~/.local/share/rigel` elsewhere): `index.db`, plus `blobs/`
@@ -108,7 +109,7 @@ The prototype's Discover view talks to two marketplaces that send no CORS header
 | SkillsMP / SkillHub | **real** via `rigel skills sync`; metadata only, no bodies (they have none to give) |
 | Duplicates | **real**: SimHash ≤ 3 bits, clusters computed after every ingest, variants listed under the row |
 | Evidence | **real**: advertised percentages from the description, `unmeasured` until a measurement exists |
-| CLI | `rigel skills search|get|index|status|sync|stats|import|gc`, all with `--json`, §7.2 exit codes |
+| CLI | `rigel skills search|get|index|status|sync|sweep|stats|import|gc`, all with `--json`, §7.2 exit codes |
 | Native agent | **real**: OmniRoute (local router, autostarted; default `gpt-5.6-sol-medium`), OpenRouter and Gemini (`gemini-4-argon` by default) streaming with retries, a deterministic scripted model, ten tools with path-checked reads and writes, skills pinned per session |
 | Commands | **real**: `run_command` shows the exact text, cwd and timeout before anything runs; cwd is jailed to the project, output is capped at 64 KB per stream, the process is killed at its timeout, and the exit code is recorded as a `command` item. `--approval ask\|allow\|deny`; `--json` defaults to deny |
 | Destructive commands | **real**: a deterministic classifier maps a command to policy rows — `delete-outside-project`, `recursive-remove`, `force-push`, `git-reset`, `registry-write` — before approval; the prompt names the rows and the matched token, and the `command` item records them |
@@ -117,7 +118,7 @@ The prototype's Discover view talks to two marketplaces that send no CORS header
 | Egress | **real**: `fetch_url` asks per origin with `once` / `session` / `always` scopes (`always` persists in `<index dir>/approved-origins.json`), re-approves a redirect that crosses origins, reads only text-like content types, caps the body at 256 KB, and records the page as a `web_search` item with `untrusted: true` |
 | Subagents | **real**: `spawn_agents` runs up to 4 read-only children concurrently per turn on an eight-model cheap allowlist (GPT-5/5.4 nano, Gemini Flash-Lite/3 Flash, DeepSeek V4.1 Flash, Qwen3 Coder, Haiku 5.5, GPT-5.4 mini); each child is its own agent row and bill, nested under the parent turn. The allowlist is OpenRouter-shaped, so the tool is hidden on the Gemini provider rather than handing it ids Google rejects |
 | The bill | **real**: micro-dollar accounting from provider usage, local price fallback, 80% warning, cap enforced within one turn, `reconcile` |
-| Session surface | **real**: roster, role-gutter transcript, streaming text, collapsed tool lines, patch diffs, raw/debug toggle, inline 80% prompt, and a per-turn model picker in the composer (provider stays in Settings) |
+| Session surface | **real**: roster, role-gutter transcript, streaming text, collapsed tool lines, patch diffs, raw/debug toggle, inline 80% prompt, a live model and effort picker fed by the provider catalogue (provider stays in Settings), and a Swarm button that hands the typed task to every agent in the chat room |
 | Patches | **real**: CAS check, write-ahead journal, fsync + rename, idempotent apply, revert once applied |
 | Resume | **real**: tree hash vs checkpoint, running turns closed as `cancelled`, journal reconciled without applying, forced continue is an intervention |
 | Memory | **real**: committed `MEMORY.md` + topics per agent, absolute-path/secret validator, index rebuild |

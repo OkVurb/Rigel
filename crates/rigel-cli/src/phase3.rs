@@ -81,6 +81,23 @@ pub enum AgentCommand {
         json: bool,
     },
 
+    /// Mint an agent row for an external harness, then hand its id to `rigel mcp`.
+    Register {
+        #[arg(long, value_name = "PATH", default_value = ".")]
+        project: PathBuf,
+        /// Session id. Defaults to the newest active session, starting one if there is none.
+        #[arg(long)]
+        session: Option<String>,
+        /// Which external harness wants the tools (recorded on the row).
+        #[arg(long, default_value = "external")]
+        harness: String,
+        /// The harness's own name for this worker, e.g. `claude`.
+        #[arg(long, default_value = "chat")]
+        role: String,
+        #[arg(long)]
+        json: bool,
+    },
+
     /// Agents in a session, with their spend.
     List {
         #[arg(long, value_name = "PATH", default_value = ".")]

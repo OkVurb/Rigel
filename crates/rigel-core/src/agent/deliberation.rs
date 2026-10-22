@@ -137,6 +137,9 @@ impl ModelDeliberator {
             tools: Vec::new(),
             max_tokens: Some(320),
             temperature: 0.2,
+            // The advisory round runs on the parent's model but not on a turn, so it has no
+            // effort to inherit here; the provider default applies.
+            effort: None,
         };
         let mut text = String::new();
         let mut usage = Usage::default();

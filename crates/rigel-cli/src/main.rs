@@ -209,6 +209,24 @@ enum SkillCommand {
         json: bool,
     },
 
+    /// Sweep both marketplaces across many pages into the index (metadata only, no bodies).
+    Sweep {
+        /// SkillHub list pages to walk, 100 cards each. 0 skips the marketplace.
+        #[arg(long, default_value_t = 0)]
+        skillhub_pages: u32,
+        /// SkillsMP search queries to walk, comma-separated, each up to `--skillsmp-pages` pages of 50.
+        #[arg(
+            long,
+            default_value = "skill,claude,code,test,commit,review,deploy,automation,agent,data,docs,security,api,design,pdf,summarize,write,translate,debug,git"
+        )]
+        skillsmp_queries: String,
+        /// SkillsMP pages per query, 50 rows each.
+        #[arg(long, default_value_t = 0)]
+        skillsmp_pages: u32,
+        #[arg(long)]
+        json: bool,
+    },
+
     /// Show index size, blob count and source health.
     Stats {
         #[arg(long)]
@@ -584,6 +602,60 @@ async fn run_skills(dir: &Path, command: SkillCommand) -> ExitCode {
             }
             Err(error) => skills_failure(error, as_json),
         },
+
+        SkillCommand::Sweep {
+            skillhub_pages,
+            skillsmp_queries,
+            skillsmp_pages,
+            json: as_json,
+        } => {
+            let queries: Vec<String> = skillsmp_queries
+                .split(',')
+                .map(str::to_owned)
+                .collect();
+            match index
+                .sweep(skillhub_pages, &queries, skillsmp_pages)
+                .await
+            {
+                Ok(report) => {
+                    if as_json {
+                        println!(
+                            "{}",
+                            serde_json::to_string(&report).unwrap_or_default()
+                        );
+                    } else {
+                        println!(
+                            "skillhub    {} rows over {} page(s){}",
+                            report.skillhub_rows,
+                            report.skillhub_pages,
+                            report
+                                .skillhub_error
+                                .as_deref()
+                                .map(|error| format!(" — stopped: {error}"))
+                                .unwrap_or_default()
+                        );
+                        println!(
+                            "skillsmp    {} rows over {} query/ies × {} page(s){}",
+                            report.skillsmp_rows,
+                            report.skillsmp_queries,
+                            report.skillsmp_pages,
+                            report
+                                .skillsmp_error
+                                .as_deref()
+                                .map(|error| format!(" — stopped: {error}"))
+                                .unwrap_or_default()
+                        );
+                        println!("duplicates dropped {}", report.duplicates_dropped);
+                        println!(
+                            "index       {} → {} skills",
+                            report.skills_before, report.skills_after
+                        );
+                    }
+                    ExitCode::SUCCESS
+                }
+                Err(error) => skills_failure(error, as_json),
+            }
+        }
 
         SkillCommand::Stats { json: as_json } => match index.stats().await {
             Ok(stats) => {

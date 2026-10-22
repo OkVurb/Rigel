@@ -229,6 +229,8 @@ pub struct Coordinator {
     pub cancels: Arc<Cancels>,
     pub project_root: PathBuf,
     pub model_name: String,
+    /// Sent as `reasoning_effort` on every step (D28). `None` leaves the provider default.
+    pub effort: Option<String>,
     pub max_steps: usize,
     pub subagents: SubagentPolicy,
     /// 0 for a user turn; 1 for a subagent. Only depth 0 is offered `spawn_agents`.
@@ -763,6 +765,7 @@ impl Coordinator {
                 cancels: self.cancels.clone(),
                 project_root: self.project_root.clone(),
                 model_name: model.clone(),
+                effort: self.effort.clone(),
                 max_steps: self.subagents.max_steps,
                 subagents: self.subagents.clone(),
                 depth: self.depth + 1,
@@ -867,6 +870,7 @@ impl Coordinator {
             tools,
             max_tokens: Some(4_096),
             temperature: 0.2,
+            effort: self.effort.clone(),
         };
 
         let mut text = String::new();

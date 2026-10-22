@@ -53,6 +53,15 @@ fn default_provider() -> String {
     "omniroute".to_string()
 }
 
+/// The separate reasoning-effort setting (D28). `medium` matches the old default model.
+fn default_effort() -> String {
+    "medium".to_string()
+}
+
+fn valid_effort(effort: &str) -> bool {
+    matches!(effort, "low" | "medium" | "high")
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Settings {
     pub theme: String,
@@ -64,6 +73,9 @@ pub struct Settings {
     pub provider: String,
     #[serde(default = "default_model")]
     pub model: String,
+    /// Sent as `reasoning_effort` on every native turn; never folded into the model id.
+    #[serde(default = "default_effort")]
+    pub effort: String,
 }
 
 impl Default for Settings {
@@ -74,6 +86,7 @@ impl Default for Settings {
             unattended_default: false,
             provider: default_provider(),
             model: default_model(),
+            effort: default_effort(),
         }
     }
 }
@@ -150,13 +163,37 @@ fn load_settings() -> Settings {
 /* --------------------------------- shelf --------------------------------- */
 
 /// Shelf search. Reads only the local index, so it works offline (§9, Shelf: offline state).
+/// `offset` pages through the whole catalogue; a page is capped at 500 rows in the core.
 #[tauri::command]
-fn skills_search(query: String, limit: usize) -> Result<Vec<SearchHit>, String> {
+fn skills_search(
+    query: String,
+    limit: usize,
+    offset: Option<usize>,
+) -> Result<Vec<SearchHit>, String> {
     tauri::async_runtime::block_on(async move {
         SkillIndex::open(&index_dir())
             .await
             .map_err(message)?
-            .search(&query, limit)
+            .search_page(
+                &query,
+                limit,
+                offset.unwrap_or(0),
+                rigel_core::skills::search::SearchOrder::DEFAULT,
+            )
+            .await
+            .map_err(message)
+    })
+}
+
+/// How many rows the current query matches (the whole shelf when the query is empty).
+/// The list header and the status bar show this instead of the size of one page.
+#[tauri::command]
+fn skills_count(query: String) -> Result<i64, String> {
+    tauri::async_runtime::block_on(async move {
+        SkillIndex::open(&index_dir())
+            .await
+            .map_err(message)?
+            .count(&query)
             .await
             .map_err(message)
     })
@@ -228,6 +265,46 @@ fn project_open(path: String) -> Result<ProjectInfo, String> {
             db: store.path().to_string_lossy().into_owned(),
         })
     })
+}
+
+/// Where "New workspace" creates folders: `%USERPROFILE%\Rigel\<name>` (or `~/Rigel/<name>`).
+fn workspace_root() -> PathBuf {
+    std::env::var_os("USERPROFILE")
+        .or_else(|| std::env::var_os("HOME"))
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join("Rigel")
+}
+
+/// Create an empty folder and open it as a project. The name is a single path segment: no
+/// separators, no `.`/`..`, nothing that could escape the workspace root.
+#[tauri::command]
+fn project_create(name: String) -> Result<ProjectInfo, String> {
+    let name = name.trim();
+    if name.is_empty() {
+        return Err("Give the workspace a name.".to_string());
+    }
+    if name.len() > 64
+        || name == "."
+        || name == ".."
+        || name.contains(['/', '\\', ':', '*', '?', '"', '<', '>', '|'])
+        || name.chars().any(|c| c.is_control())
+    {
+        return Err("Use a short name with no path separators or reserved characters.".to_string());
+    }
+    let root = workspace_root().join(name);
+    if root.exists() && !root.is_dir() {
+        return Err(format!("{} exists and is not a folder.", root.display()));
+    }
+    fs::create_dir_all(&root).map_err(message)?;
+    project_open(root.to_string_lossy().into_owned())
+}
+
+/// The default directory new workspaces are created under, so the UI can show it before
+/// asking for a name (never a silent location).
+#[tauri::command]
+fn project_workspace_root() -> String {
+    workspace_root().to_string_lossy().into_owned()
 }
 
 #[tauri::command]
@@ -361,12 +438,23 @@ fn turn_send(
     agent: String,
     prompt: String,
     model: Option<String>,
+    effort: Option<String>,
 ) -> Result<TurnReply, String> {
     let root = PathBuf::from(&project);
     let service = tauri::async_runtime::block_on(SessionService::open(&root)).map_err(message)?;
     let settings = load_settings();
     let provider = settings.provider.trim().to_lowercase();
-    let model_name = model.unwrap_or_else(|| configured_model(&settings, &provider));
+    let effort = effort.unwrap_or_else(|| settings.effort.clone());
+    if !valid_effort(&effort) {
+        return Err(format!("unknown effort `{effort}`; use low, medium or high"));
+    }
+    // The provider picks the default model; the effort is applied on the wire, never folded
+    // into the id the provider chose.
+    let model_name = wire_model(
+        &model.unwrap_or_else(|| configured_model(&settings, &provider)),
+        &effort,
+        &provider,
+    );
 
     // A local router that is down is a process to launch, not a configuration error: the
     // first turn after a reboot starts OmniRoute before it sends anything.
@@ -421,6 +509,7 @@ fn turn_send(
         cancels,
         project_root: root,
         model_name,
+        effort: Some(effort),
         max_steps: DEFAULT_MAX_STEPS,
         subagents: SubagentPolicy::default(),
         depth: 0,
@@ -496,6 +585,7 @@ fn turn_estimate(
     session: String,
     prompt: String,
     model: Option<String>,
+    effort: Option<String>,
 ) -> Result<TurnQuote, String> {
     tauri::async_runtime::block_on(async move {
         let service = SessionService::open(Path::new(&project))
@@ -503,7 +593,12 @@ fn turn_estimate(
             .map_err(message)?;
         let settings = load_settings();
         let provider = settings.provider.trim().to_lowercase();
-        let model_name = model.unwrap_or_else(|| configured_model(&settings, &provider));
+        let effort = effort.unwrap_or_else(|| settings.effort.clone());
+        let model_name = wire_model(
+            &model.unwrap_or_else(|| configured_model(&settings, &provider)),
+            &effort,
+            &provider,
+        );
         let context_chars = fixed_context_chars(&model_name);
         BudgetService::with_null_interrupt(service.pool().clone())
             .quote_session(&session, &model_name, context_chars, &prompt)
@@ -678,6 +773,144 @@ fn omniroute_start() -> Result<rigel_core::ServerStatus, String> {
     tauri::async_runtime::block_on(rigel_core::agent::omniroute::ensure_server())
 }
 
+/// The model picker's catalogue, read through the same provider the agent uses. The key is
+/// read in Rust and only becomes a bearer header; the window never sees it.
+async fn fetch_models(provider: &str) -> Result<Vec<String>, String> {
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(20))
+        .build()
+        .map_err(message)?;
+
+    let response = match provider {
+        "openrouter" => {
+            let mut request = client.get("https://openrouter.ai/api/v1/models");
+            if let Ok(key) = credentials::get(credentials::OPENROUTER) {
+                request = request.bearer_auth(key);
+            }
+            request.send().await
+        }
+        "omniroute" => {
+            let key = credentials::get(credentials::OMNIROUTE)
+                .map_err(|error| format!("{error}. Add an OmniRoute key in Settings."))?;
+            rigel_core::agent::omniroute::ensure_server().await?;
+            let base = rigel_core::agent::omniroute::base_url();
+            client
+                .get(format!("{base}/models"))
+                .bearer_auth(key)
+                .send()
+                .await
+        }
+        other => return Err(format!("unknown provider `{other}`")),
+    }
+    .map_err(|error| format!("could not read the model catalogue: {error}"))?;
+
+    if !response.status().is_success() {
+        return Err(format!(
+            "the model catalogue answered {}",
+            response.status()
+        ));
+    }
+
+    let value: serde_json::Value = response
+        .json()
+        .await
+        .map_err(|error| format!("the model catalogue returned unreadable data: {error}"))?;
+    let mut models: Vec<String> = value
+        .get("data")
+        .and_then(serde_json::Value::as_array)
+        .map(|rows| {
+            rows.iter()
+                .filter_map(|row| row.get("id").and_then(serde_json::Value::as_str))
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default();
+    models.sort();
+    models.dedup();
+    if models.is_empty() {
+        return Err("the provider returned no models".to_string());
+    }
+    Ok(models)
+}
+
+#[tauri::command]
+fn models_list() -> Result<Vec<String>, String> {
+    let provider = load_settings().provider;
+    tauri::async_runtime::block_on(fetch_models(&provider))
+}
+
+/// Effort is its own setting (D28). OmniRoute happens to encode the same value in the model
+/// id, so when a picked id already carries an effort suffix, keep the two consistent on the
+/// wire rather than sending a request that contradicts itself.
+fn wire_model(model: &str, effort: &str, provider: &str) -> String {
+    if provider != "omniroute" {
+        return model.to_string();
+    }
+    for suffix in ["-minimal", "-low", "-medium", "-high", "-xhigh"] {
+        if let Some(base) = model.strip_suffix(suffix) {
+            return format!("{base}-{effort}");
+        }
+    }
+    model.to_string()
+}
+
+/* ------------------------------- agent chat ------------------------------- */
+
+/// Chat tab status. `project` is the open project root (or path input); the vendor
+/// checkout is discovered next to it, or via RIGEL_AGENTCHAT_DIR in the core.
+#[tauri::command]
+fn chat_status(project: Option<String>) -> Result<rigel_core::agent::agentchat::ChatStatus, String> {
+    Ok(tauri::async_runtime::block_on(rigel_core::agent::agentchat::status(
+        project.as_deref(),
+    )))
+}
+
+/// Boot the vendor chat server when it is down. Spawning is how Rigel earns the session
+/// token, so "already running externally" stays unauthenticated (`authed: false`).
+#[tauri::command]
+fn chat_start(project: Option<String>) -> Result<rigel_core::agent::agentchat::ChatStatus, String> {
+    tauri::async_runtime::block_on(rigel_core::agent::agentchat::ensure_server(project.as_deref()))
+}
+
+#[tauri::command]
+fn chat_channels() -> Result<Vec<String>, String> {
+    tauri::async_runtime::block_on(rigel_core::agent::agentchat::channels())
+}
+
+/// Presence per instance; the vendor shape is passed through untouched.
+#[tauri::command]
+fn chat_agents() -> Result<serde_json::Value, String> {
+    tauri::async_runtime::block_on(rigel_core::agent::agentchat::agents())
+}
+
+#[tauri::command]
+fn chat_messages(
+    channel: Option<String>,
+    since_id: Option<u64>,
+    limit: Option<u64>,
+) -> Result<Vec<rigel_core::agent::agentchat::ChatMessage>, String> {
+    tauri::async_runtime::block_on(rigel_core::agent::agentchat::messages(
+        channel.as_deref(),
+        since_id.unwrap_or(0),
+        limit.unwrap_or(100),
+    ))
+}
+
+/// A user message over the vendor websocket, exactly like the browser does it.
+#[tauri::command]
+fn chat_send(channel: String, text: String) -> Result<(), String> {
+    tauri::async_runtime::block_on(rigel_core::agent::agentchat::send(&text, &channel))
+}
+
+/// Start the room's agents on a hidden console — they work, nothing opens on screen.
+/// Returns the labels launched; an empty list means every agent was already in the room.
+#[tauri::command]
+fn chat_start_agents(project: Option<String>) -> Result<Vec<String>, String> {
+    tauri::async_runtime::block_on(rigel_core::agent::agentchat::start_agents(
+        project.as_deref(),
+    ))
+}
+
 /* -------------------------------- settings ------------------------------- */
 
 #[tauri::command]
@@ -695,6 +928,12 @@ fn settings_set(settings: Settings) -> Result<Settings, String> {
         return Err(format!(
             "unknown provider `{}`; use omniroute, openrouter or gemini",
             settings.provider
+        ));
+    }
+    if !valid_effort(&settings.effort) {
+        return Err(format!(
+            "unknown effort `{}`; use low, medium or high",
+            settings.effort
         ));
     }
     let path = settings_path();
@@ -748,6 +987,7 @@ fn warm_router() {
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
+        .plugin(tauri_plugin_dialog::init())
         .setup(|_app| {
             warm_router();
             Ok(())
@@ -757,6 +997,8 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             project_open,
+            project_create,
+            project_workspace_root,
             session_start,
             session_list,
             session_get,
@@ -781,10 +1023,19 @@ pub fn run() {
             harness_probe,
             omniroute_status,
             omniroute_start,
+            models_list,
+            chat_status,
+            chat_start,
+            chat_channels,
+            chat_agents,
+            chat_messages,
+            chat_send,
+            chat_start_agents,
             settings_get,
             settings_set,
             usage_summary,
             skills_search,
+            skills_count,
             skills_load,
             skills_status,
             skills_index

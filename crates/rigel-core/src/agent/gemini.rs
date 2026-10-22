@@ -131,6 +131,8 @@ mod tests {
             tools: vec![],
             max_tokens: Some(64),
             temperature: 0.0,
+            // Gemini has no reasoning_effort field; the profile ignores it.
+            effort: None,
         };
         let cancel = CancellationToken::new();
         let mut text = String::new();

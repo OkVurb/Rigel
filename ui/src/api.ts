@@ -36,6 +36,8 @@ export interface Settings {
   /** `omniroute` (local router), `openrouter`, or `gemini` (Google's API). */
   provider: string;
   model: string;
+  /** Separate reasoning effort: low, medium or high. */
+  effort: string;
 }
 
 /** Live state of the local OmniRoute router. `origin` is where it listens. */
@@ -203,6 +205,43 @@ export interface KeyStatus {
   gemini: boolean;
 }
 
+/** Health of the vendor chat server (agentchattr) the Chat tab fronts. */
+export interface AgentChatStatus {
+  running: boolean;
+  /** True when Rust holds a session token for it — everything past the landing page needs one. */
+  authed: boolean;
+  origin: string;
+  /** The checkout on this machine, when one was found. */
+  dir: string | null;
+}
+
+/** The vendor store's message shape, narrowed to what the stream renders. */
+export interface AgentChatMessage {
+  id: number;
+  sender: string;
+  text: string;
+  time: string;
+  kind: string;
+  channel: string;
+}
+
+/** One roster pill: agentchattr presence plus its own label/colour/role fields. */
+export interface AgentChatAgent {
+  available: boolean;
+  busy: boolean;
+  label: string;
+  color: string;
+  role: string | null;
+}
+
+/** Browser preview only: the shape of a live room, from this project's recorded run. */
+const PREVIEW_CHAT_MESSAGES: AgentChatMessage[] = [
+  { id: 1, sender: "user", text: "@claude @codex Review crates/rigel-cli/src/phase3.rs — one improvement each, then debate.", time: "21:18:02", kind: "chat", channel: "general" },
+  { id: 2, sender: "claude", text: "PatchCommand variants carry no help text while AgentCommand's do — add doc comments.", time: "21:18:41", kind: "chat", channel: "general" },
+  { id: 3, sender: "codex", text: "--max-steps 0 is accepted, then the coordinator fails on the step bound at once — validate in Clap.", time: "21:19:03", kind: "chat", channel: "general" },
+  { id: 4, sender: "claude", text: "@codex Agreed — your fix lands first; mine is docs-only follow-up. This enum has acp, not register.", time: "21:19:30", kind: "chat", channel: "general" },
+];
+
 /** One row of `adapters.json` (P4.1). */
 export interface HarnessInfo {
   harness: "native" | "codex" | "claude" | "cursor" | "cline";
@@ -363,7 +402,10 @@ export interface IngestReport {
 /** What the shelf needs from a source. `mock.ts` implements the same shape for previews. */
 export interface SkillSource {
   readonly label: string;
-  search(query: string, limit: number): Promise<SkillRow[]>;
+  /** One page of the current query. `offset` pages through the whole catalogue. */
+  search(query: string, limit: number, offset?: number): Promise<SkillRow[]>;
+  /** How many rows the query matches — the whole shelf when it is empty. */
+  count(query: string): Promise<number>;
   load(id: string): Promise<SkillDetail>;
   status(): Promise<SourceStatus[]>;
   indexRepo?(repo: string): Promise<IngestReport>;
@@ -385,6 +427,26 @@ export const api = {
       return { root: path, name: path.split(/[\\/]/).pop() || path, db: "(browser preview)" };
     }
     return call<ProjectInfo>("project_open", { path });
+  },
+
+  /** The native folder picker. Returns null when the user cancels or in the browser preview. */
+  async pickProjectFolder(): Promise<string | null> {
+    if (!isTauri()) return null;
+    const { open } = await import("@tauri-apps/plugin-dialog");
+    const picked = await open({ directory: true, multiple: false, title: "Open a project folder" });
+    return typeof picked === "string" ? picked : null;
+  },
+
+  /** Create a folder under the workspace root and open it. */
+  async createProject(name: string): Promise<ProjectInfo> {
+    if (!isTauri()) throw new Error("Create a workspace from the desktop app, not the browser preview.");
+    return call<ProjectInfo>("project_create", { name });
+  },
+
+  /** Where "New workspace" puts folders: `%USERPROFILE%\\Rigel` on Windows. */
+  async workspaceRoot(): Promise<string> {
+    if (!isTauri()) return "~/Rigel";
+    return call<string>("project_workspace_root");
   },
 
   async listSessions(project: string): Promise<Session[]> {
@@ -441,7 +503,8 @@ export const api = {
     session: string,
     agent: string,
     prompt: string,
-    model?: string | null,
+    model?: string,
+    effort?: string,
   ): Promise<TurnReply> {
     return call<TurnReply>("turn_send", {
       project,
@@ -449,6 +512,7 @@ export const api = {
       agent,
       prompt,
       model: model ?? null,
+      effort: effort ?? null,
     });
   },
 
@@ -467,7 +531,8 @@ export const api = {
     prompt: string,
     spendMicros: number,
     capMicros: number | null,
-    model?: string | null,
+    model?: string,
+    effort?: string,
   ): Promise<TurnQuote> {
     if (!isTauri()) return previewQuote(prompt, spendMicros, capMicros);
     return call<TurnQuote>("turn_estimate", {
@@ -475,6 +540,7 @@ export const api = {
       session,
       prompt,
       model: model ?? null,
+      effort: effort ?? null,
     });
   },
 
@@ -576,6 +642,7 @@ export const api = {
         unattended_default: false,
         provider: "omniroute",
         model: "gpt-5.6-sol-medium",
+        effort: "medium",
       };
     }
     return call<Settings>("settings_get");
@@ -585,14 +652,88 @@ export const api = {
     if (!isTauri()) return settings;
     return call<Settings>("settings_set", { settings });
   },
+
+  /** The provider's live model catalogue for the picker. */
+  async listModels(): Promise<string[]> {
+    if (!isTauri()) {
+      return [
+        "gpt-5.6-sol-low",
+        "gpt-5.6-sol-medium",
+        "gpt-5.6-sol-high",
+        "openai/gpt-4.1-mini",
+        "anthropic/claude-sonnet-4.5",
+      ];
+    }
+    return call<string[]>("models_list");
+  },
+
+  /** The vendor chat server the Chat tab fronts. Same boundary as the router above. */
+  agentChat: {
+    async status(project: string | null): Promise<AgentChatStatus> {
+      if (!isTauri()) {
+        return { running: true, authed: true, origin: "(browser preview)", dir: null };
+      }
+      return call<AgentChatStatus>("chat_status", { project });
+    },
+
+    async start(project: string | null): Promise<AgentChatStatus> {
+      if (!isTauri()) throw new Error("Start the chat server from the desktop app, not the browser preview.");
+      return call<AgentChatStatus>("chat_start", { project });
+    },
+
+    async channels(): Promise<string[]> {
+      if (!isTauri()) return ["general", "review", "debate"];
+      return call<string[]>("chat_channels");
+    },
+
+    async agents(): Promise<Record<string, AgentChatAgent>> {
+      if (!isTauri()) {
+        return {
+          claude: { available: true, busy: false, label: "Claude", color: "#da7756", role: "reviewer" },
+          codex: { available: true, busy: false, label: "Codex", color: "#10a37f", role: "reviewer" },
+        };
+      }
+      return call<Record<string, AgentChatAgent>>("chat_agents");
+    },
+
+    async messages(channel: string, sinceId = 0): Promise<AgentChatMessage[]> {
+      if (!isTauri()) return sinceId > 0 ? [] : PREVIEW_CHAT_MESSAGES;
+      return call<AgentChatMessage[]>("chat_messages", { channel, since_id: sinceId, limit: 100 });
+    },
+
+    async send(channel: string, text: string): Promise<void> {
+      if (!isTauri()) {
+        PREVIEW_CHAT_MESSAGES.push({
+          id: Date.now(),
+          sender: "user",
+          text,
+          time: new Date().toTimeString().slice(0, 8),
+          kind: "chat",
+          channel,
+        });
+        return;
+      }
+      await call<void>("chat_send", { channel, text });
+    },
+
+    /** Start the room's agents on a hidden console; returns what was launched. */
+    async startAgents(project: string | null): Promise<string[]> {
+      if (!isTauri()) throw new Error("Start agents from the desktop app, not the browser preview.");
+      return call<string[]>("chat_start_agents", { project });
+    },
+  },
 };
 
 /** The real shelf: SQLite FTS5 and the blob store, through the Rust core. */
 export class TauriSkillSource implements SkillSource {
   readonly label = "index.db";
 
-  async search(query: string, limit = 100): Promise<SkillRow[]> {
-    return call<SkillRow[]>("skills_search", { query, limit });
+  async search(query: string, limit = 100, offset = 0): Promise<SkillRow[]> {
+    return call<SkillRow[]>("skills_search", { query, limit, offset });
+  }
+
+  async count(query: string): Promise<number> {
+    return call<number>("skills_count", { query });
   }
 
   async load(id: string): Promise<SkillDetail> {

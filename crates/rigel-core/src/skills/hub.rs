@@ -52,10 +52,23 @@ impl SkillsMpSource {
         query: &str,
         limit: usize,
     ) -> Result<Vec<SkillRecord>, SkillsError> {
+        self.search_records_page(query, limit as u32, 1).await
+    }
+
+    /// SkillsMP accepts `limit` in `1..=50` and pages results with `page=<n>` (verified
+    /// 21 Oct 2026: page 2 returns 50 rows with zero ids overlapping page 1). A page beyond
+    /// the end returns an empty `skills` array, which the sweep uses as the stop signal.
+    pub async fn search_records_page(
+        &self,
+        query: &str,
+        limit: u32,
+        page: u32,
+    ) -> Result<Vec<SkillRecord>, SkillsError> {
         let url = format!(
-            "{SKILLSMP_BASE}/api/v1/skills/search?q={}&limit={}&sortBy=stars",
+            "{SKILLSMP_BASE}/api/v1/skills/search?q={}&limit={}&sortBy=stars&page={}",
             encode_query(query),
-            limit.clamp(1, 100)
+            limit.clamp(1, 50),
+            page
         );
         let body = self.http.get_json(&url, false).await?;
         Ok(parse_skillsmp(&body))

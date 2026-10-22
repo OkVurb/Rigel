@@ -192,6 +192,7 @@ mod tests {
             tools: vec![],
             max_tokens: None,
             temperature: 0.0,
+            effort: None,
         };
 
         for expected in ["one", "two"] {

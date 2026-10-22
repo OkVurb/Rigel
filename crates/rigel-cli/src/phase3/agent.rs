@@ -563,6 +563,50 @@ pub async fn run_agent(dir: &Path, command: AgentCommand) -> ExitCode {
             .await
         }
 
+        AgentCommand::Register {
+            project,
+            session,
+            harness,
+            role,
+            json: as_json,
+        } => {
+            let service = match SessionService::open(&project).await {
+                Ok(service) => service,
+                Err(error) => return crate::fail(error),
+            };
+            let session_row = match resolve_session(&service, session.as_deref()).await {
+                Ok(session) => session,
+                Err(error) => {
+                    eprintln!("rigel: {error}");
+                    return ExitCode::from(1);
+                }
+            };
+            match service
+                .register_agent_with(&session_row.id, &harness, Some(&role), None)
+                .await
+            {
+                Ok(agent) => {
+                    if as_json {
+                        println!(
+                            "{}",
+                            serde_json::to_string(&json!({
+                                "session_id": agent.session_id,
+                                "agent_id": agent.id,
+                                "harness": agent.harness,
+                                "role": agent.role,
+                                "status": agent.status,
+                            }))
+                            .unwrap_or_default()
+                        );
+                    } else {
+                        println!("agent_id={}", agent.id);
+                    }
+                    ExitCode::SUCCESS
+                }
+                Err(error) => crate::fail(error),
+            }
+        }
+
         AgentCommand::Run {
             project,
             session,
@@ -696,6 +740,8 @@ pub async fn run_agent(dir: &Path, command: AgentCommand) -> ExitCode {
                 cancels,
                 project_root: project.clone(),
                 model_name: label,
+                // The CLI has no --effort yet; only the desktop app sets one (D28).
+                effort: None,
                 max_steps,
                 subagents: SubagentPolicy::default(),
                 depth: 0,

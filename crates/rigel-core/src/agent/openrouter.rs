@@ -92,6 +92,9 @@ impl OpenRouterModel {
         if let Some(tokens) = request.max_tokens {
             body["max_tokens"] = json!(tokens);
         }
+        if let Some(effort) = &request.effort {
+            body["reasoning_effort"] = json!(effort);
+        }
         body
     }
 
@@ -380,6 +383,7 @@ mod tests {
             tools: vec![],
             max_tokens: Some(64),
             temperature: 0.0,
+            effort: None,
         };
 
         let mut text = String::new();
@@ -420,6 +424,7 @@ mod tests {
             tools: vec![],
             max_tokens: None,
             temperature: 0.0,
+            effort: None,
         };
         let cancel = CancellationToken::new();
         cancel.cancel();
@@ -427,5 +432,28 @@ mod tests {
         let error = model.chat(request, &cancel, &mut sink).await.unwrap_err();
         assert!(matches!(error, ModelError::Cancelled));
         assert!(seen.lock().unwrap().is_empty());
+    }
+
+    /// D28: effort is a separate field on the wire, never a suffix on the model id.
+    #[tokio::test]
+    async fn effort_is_sent_as_reasoning_effort() {
+        let (base, seen) = fake_provider().await;
+        let model = OpenRouterModel::with_base_url("test-key", base);
+        let request = ChatRequest {
+            model: "openai/gpt-4.1-mini".to_string(),
+            messages: vec![ChatMessage::user("hi")],
+            tools: vec![],
+            max_tokens: None,
+            temperature: 0.0,
+            effort: Some("high".to_string()),
+        };
+        let cancel = CancellationToken::new();
+        let mut sink = |_: Delta| {};
+        model.chat(request, &cancel, &mut sink).await.unwrap();
+
+        let calls = seen.lock().unwrap();
+        let body = calls.last().expect("a request body");
+        assert!(body.contains("\"reasoning_effort\":\"high\""), "{body}");
+        assert!(body.contains("\"model\":\"openai/gpt-4.1-mini\""), "{body}");
     }
 }

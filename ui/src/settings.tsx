@@ -7,6 +7,7 @@ import {
   type OmnirouteStatus,
   type Settings,
 } from "./api";
+import { ModelControls } from "./modelpicker";
 
 interface Props {
   keys: KeyStatus | null;
@@ -291,6 +292,18 @@ export default function SettingsView({ keys, onKeys, onNotice }: Props) {
     }
   };
 
+  const saveModel = async (model: string, effort: string) => {
+    if (!settings) return;
+    const next = { ...settings, model, effort };
+    setSettings(next);
+    try {
+      setSettings(await api.saveSettings(next));
+      onNotice(`Default model: ${model} · ${effort} effort.`);
+    } catch (problem) {
+      setError(problem instanceof Error ? problem.message : String(problem));
+    }
+  };
+
   const refreshServer = async () => {
     try {
       setServer(await api.omnirouteStatus());
@@ -560,11 +573,18 @@ export default function SettingsView({ keys, onKeys, onNotice }: Props) {
         </section>
 
         <section className="settings-section">
-          <h3>Model</h3>
+          <h3>Model and effort</h3>
+          <ModelControls
+            model={settings?.model ?? "gpt-5.6-sol-medium"}
+            effort={settings?.effort ?? "medium"}
+            disabled={!settings}
+            onModel={(model) => void saveModel(model, settings?.effort ?? "medium")}
+            onEffort={(effort) => void saveModel(settings?.model ?? "gpt-5.6-sol-medium", effort)}
+          />
           <p className="fine">
-            The native agent's default is <code>{settings?.model ?? "gpt-5.6-sol-medium"}</code>;
-            override it per turn with <code>--model</code>. Subagents are pinned to the cheap
-            allowlist and cannot be pointed at an expensive model.
+            Saved as the default for native turns. Effort is sent separately as
+            <code> reasoning_effort</code>; it is not baked into the model id. Subagents stay on
+            the cheap allowlist and cannot be pointed at an expensive model.
           </p>
         </section>
       </main>

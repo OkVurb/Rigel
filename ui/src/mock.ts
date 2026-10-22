@@ -219,7 +219,7 @@ function detailFor(row: SkillRow): SkillDetail {
 export class PreviewSkillSource implements SkillSource {
   readonly label = "sample rows (browser preview)";
 
-  async search(query: string): Promise<SkillRow[]> {
+  private matches(query: string): SkillRow[] {
     const q = query.trim().toLowerCase();
     if (!q) return ROWS;
     return ROWS.filter(
@@ -228,6 +228,14 @@ export class PreviewSkillSource implements SkillSource {
         row.description.toLowerCase().includes(q) ||
         (row.repo ?? "").toLowerCase().includes(q),
     );
+  }
+
+  async search(query: string, limit = 100, offset = 0): Promise<SkillRow[]> {
+    return this.matches(query).slice(offset, offset + limit);
+  }
+
+  async count(query: string): Promise<number> {
+    return this.matches(query).length;
   }
 
   async load(id: string): Promise<SkillDetail> {
