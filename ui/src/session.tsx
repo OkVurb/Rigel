@@ -78,7 +78,8 @@ export default function SessionView({
   const [patches, setPatches] = useState<Patch[]>(() => (tauri ? [] : previewPatches));
   const [stream, setStream] = useState<Record<string, string>>({});
   const [liveTurn, setLiveTurn] = useState<Turn | null>(null);
-  const [filter, setFilter] = useState<string | null>(null);
+  // D40: one transcript, or two side by side. Never more than two, and never a grid.
+  const [shown, setShown] = useState<string[]>([]);
   const [raw, setRaw] = useState(false);
   const [text, setText] = useState("");
   const [quote, setQuote] = useState<TurnQuote | null>(null);
@@ -606,16 +607,55 @@ export default function SessionView({
 
   /* -------------------------------- render ------------------------------- */
 
-  // Subagent turns are fetched for the roster and replay, but the transcript shows the
-  // conversation: children are summarised under the turn that spawned them.
+  const toggleShown = useCallback((id: string) => {
+    setShown((current) =>
+      current.includes(id)
+        ? current.filter((entry) => entry !== id)
+        : current.length < 2
+          ? [...current, id]
+          : // A third selection replaces the older pane; the cap is what keeps two readable.
+            [current[1], id],
+    );
+  }, []);
+
+  // D40: a subagent is an agent of its own, spawned by a turn of another agent. The parent turn
+  // names the row it hangs under, so the roster nests instead of listing children as peers.
+  const roster = useMemo(() => {
+    const parentOf = new Map<string, string>();
+    for (const entry of turns) {
+      const parentTurn = entry.turn.parent_turn_id;
+      if (!parentTurn) continue;
+      const parent = turns.find((candidate) => candidate.turn.id === parentTurn);
+      if (parent && parent.turn.agent_id !== entry.turn.agent_id) {
+        parentOf.set(entry.turn.agent_id, parent.turn.agent_id);
+      }
+    }
+    const children = new Map<string, Agent[]>();
+    const roots: Agent[] = [];
+    for (const agent of agents) {
+      const parent = parentOf.get(agent.id);
+      if (parent && agents.some((candidate) => candidate.id === parent)) {
+        children.set(parent, [...(children.get(parent) ?? []), agent]);
+      } else {
+        roots.push(agent);
+      }
+    }
+    const rows: { agent: Agent; nested: boolean }[] = [];
+    for (const root of roots) {
+      rows.push({ agent: root, nested: false });
+      for (const child of children.get(root.id) ?? []) {
+        rows.push({ agent: child, nested: true });
+      }
+    }
+    return rows;
+  }, [agents, turns]);
+
+  // Subagent turns are fetched for the roster and replay, but the conversation view shows the
+  // top-level turns: children are summarised under the turn that spawned them. A pane for the
+  // subagent itself is the exception — there, its own turns are exactly what it is for.
   const shownTurns = useMemo(
-    () =>
-      turns.filter(
-        (entry) =>
-          entry.turn.parent_turn_id === null &&
-          (filter === null || entry.turn.agent_id === filter),
-      ),
-    [turns, filter],
+    () => turns.filter((entry) => entry.turn.parent_turn_id === null),
+    [turns],
   );
   const live = liveTurn !== null;
   const percent = capMicros ? Math.min(100, (spendMicros / capMicros) * 100) : 0;
@@ -669,9 +709,10 @@ export default function SessionView({
             </button>
           ) : (
             <div className="roster-actions">
-              <button className={filter === null ? "chip on" : "chip"} onClick={() => setFilter(null)}>
+              <button className={shown.length === 0 ? "chip on" : "chip"} onClick={() => setShown([])}>
                 all agents
               </button>
+              {shown.length === 2 ? <span className="fine">two transcripts side by side</span> : null}
               {session.status === "interrupted" ? (
                 <>
                   <button className="chip warn" onClick={() => void resume(false)} disabled={busy}>
@@ -687,17 +728,35 @@ export default function SessionView({
         </div>
 
         <div className="rows">
-          {agents.map((agent) => (
+          {roster.map(({ agent, nested }) => (
             <button
               key={agent.id}
-              className={`row agent-row${filter === agent.id ? " on" : ""}`}
-              onClick={() => setFilter(filter === agent.id ? null : agent.id)}
+              className={`row agent-row${nested ? " nested" : ""}${shown.includes(agent.id) ? " on" : ""}`}
+              onClick={() => toggleShown(agent.id)}
+              title={
+                nested
+                  ? "A subagent: spawned by the turn above it and billed to this row"
+                  : undefined
+              }
             >
               <span className={`status-dot ${agent.status}`} title={agent.status} />
               <span className="row-text">
                 <span className="row-name">
+                  {nested ? (
+                    <span className="nest-mark" aria-hidden="true">
+                      ↳
+                    </span>
+                  ) : null}
                   {agent.role ?? "agent"}
                   <span className="tag">{agent.harness}</span>
+                  {observedOnly(agent) ? (
+                    <span
+                      className="tag observed"
+                      title="Rigel shows this agent's turns but cannot send it new work yet; harness turns arrive with P4.10."
+                    >
+                      observed only
+                    </span>
+                  ) : null}
                 </span>
                 <span className="row-desc">{agent.model ?? "no model"}</span>
               </span>
@@ -713,6 +772,14 @@ export default function SessionView({
           <span className={`status-dot ${live ? "running" : "idle"}`} />
           <span>{live ? `turn ${liveTurn?.seq} running` : "idle"}</span>
           <span className="grow" />
+          {/* D40 lists claims beside spend. The claim ledger is Phase 8, so the roster says so
+              instead of rendering an empty column that would read as "nobody holds any files". */}
+          <span
+            className="claim-state"
+            title="File claims arrive with the coordinator's claim ledger (Phase 8). Until then there is nothing to show, which is not the same as no claims."
+          >
+            claims not tracked yet
+          </span>
           <span className="mono">{compact(agents.reduce((n, a) => n + a.tokens_in + a.tokens_out, 0))} tok</span>
         </div>
       </aside>
@@ -780,69 +847,49 @@ export default function SessionView({
             </p>
           </section>
         ) : (
-          <section className="transcript" aria-label="Transcript">
-            {shownTurns.length === 0 ? (
-              <p className="empty">No turns yet. Ask for something small first.</p>
-            ) : null}
-
-            {shownTurns.map((entry) => {
-              const children = turns.filter(
-                (candidate) => candidate.turn.parent_turn_id === entry.turn.id,
-              );
-              const childSpend = children.reduce(
-                (sum, child) => sum + (child.turn.usage?.cost_micros ?? 0),
-                0,
-              );
-              return (
-              <article className="turn" key={entry.turn.id}>
-                <header className="turn-head">
-                  <span className="turn-seq">turn {entry.turn.seq}</span>
-                  <span className={`pill ${entry.turn.status}`}>{entry.turn.status}</span>
-                  {entry.turn.stop_reason && entry.turn.stop_reason !== entry.turn.status ? (
-                    <span className="turn-stop">{entry.turn.stop_reason}</span>
-                  ) : null}
-                  <span className="grow" />
-                  {children.length > 0 ? (
-                    <span className="turn-subagents" title="Child turns are billed to their own agents">
-                      {children.length} subagent{children.length === 1 ? "" : "s"} · {money(childSpend)}
-                    </span>
-                  ) : null}
-                  {entry.turn.usage ? (
-                    <span className="mono turn-cost">
-                      {money(entry.turn.usage.cost_micros)} · {compact(entry.turn.usage.input_tokens + entry.turn.usage.output_tokens)} tok
-                    </span>
-                  ) : null}
-                </header>
-
-                {entry.turn.prompt ? (
-                  <div className="msg user">
-                    <span className="gutter">you</span>
-                    <div className="msg-body">{entry.turn.prompt}</div>
-                  </div>
-                ) : null}
-
-                {entry.items.map((item) => (
-                  <ItemRow key={item.id} item={item} raw={raw} />
-                ))}
-
-                {stream[entry.turn.id] ? (
-                  <div className="msg assistant">
-                    <span className="gutter">rigel</span>
-                    <div className="msg-body streaming">{stream[entry.turn.id]}</div>
-                  </div>
-                ) : null}
-
-                {raw ? (
-                  <details className="raw">
-                    <summary>raw turn json</summary>
-                    <pre>{JSON.stringify(entry.turn, null, 2)}</pre>
-                  </details>
-                ) : null}
-              </article>
-              );
-            })}
+          <div className="transcripts">
+            <div className={shown.length === 2 ? "transcript-panes split" : "transcript-panes"}>
+              {(shown.length === 0 ? [null] : shown).map((id) => {
+                const agent =
+                  id === null ? null : (agents.find((candidate) => candidate.id === id) ?? null);
+                const entries =
+                  id === null
+                    ? shownTurns
+                    : turns.filter((entry) => entry.turn.agent_id === id);
+                return (
+                  <section
+                    key={id ?? "all"}
+                    className="transcript"
+                    aria-label={agent ? `${agent.role ?? agent.harness} transcript` : "Transcript"}
+                  >
+                    {agent ? (
+                      <header className="pane-head">
+                        <span className="row-name">
+                          {agent.role ?? "agent"}
+                          <span className="tag">{agent.harness}</span>
+                        </span>
+                        <span className="grow" />
+                        <span className="mono">{money(agent.spend_micros)}</span>
+                      </header>
+                    ) : null}
+                    {entries.length === 0 ? (
+                      <p className="empty">No turns yet. Ask for something small first.</p>
+                    ) : null}
+                    {entries.map((entry) => (
+                      <TurnCard
+                        key={entry.turn.id}
+                        entry={entry}
+                        turns={turns}
+                        raw={raw}
+                        stream={stream}
+                      />
+                    ))}
+                  </section>
+                );
+              })}
+            </div>
             <div ref={bottomRef} />
-          </section>
+          </div>
         )}
 
         {session && nearCap ? (
@@ -1047,6 +1094,81 @@ export default function SessionView({
         </section>
       </aside>
     </>
+  );
+}
+
+/**
+ * Only the native agent accepts a turn today; the harnesses are watched until P4.10 wires their
+ * turns. D40 wants that difference visible, so a harness row says so rather than looking sendable.
+ */
+function observedOnly(agent: Agent): boolean {
+  return agent.harness !== "native";
+}
+
+/** One turn as it appears in a transcript pane. Both panes of a comparison use it. */
+function TurnCard({
+  entry,
+  turns,
+  raw,
+  stream,
+}: {
+  entry: TurnTranscript;
+  turns: TurnTranscript[];
+  raw: boolean;
+  stream: Record<string, string>;
+}) {
+  const children = turns.filter((candidate) => candidate.turn.parent_turn_id === entry.turn.id);
+  const childSpend = children.reduce(
+    (sum, child) => sum + (child.turn.usage?.cost_micros ?? 0),
+    0,
+  );
+  return (
+    <article className="turn">
+      <header className="turn-head">
+        <span className="turn-seq">turn {entry.turn.seq}</span>
+        <span className={`pill ${entry.turn.status}`}>{entry.turn.status}</span>
+        {entry.turn.stop_reason && entry.turn.stop_reason !== entry.turn.status ? (
+          <span className="turn-stop">{entry.turn.stop_reason}</span>
+        ) : null}
+        <span className="grow" />
+        {children.length > 0 ? (
+          <span className="turn-subagents" title="Child turns are billed to their own agents">
+            {children.length} subagent{children.length === 1 ? "" : "s"} · {money(childSpend)}
+          </span>
+        ) : null}
+        {entry.turn.usage ? (
+          <span className="mono turn-cost">
+            {money(entry.turn.usage.cost_micros)} ·{" "}
+            {compact(entry.turn.usage.input_tokens + entry.turn.usage.output_tokens)} tok
+          </span>
+        ) : null}
+      </header>
+
+      {entry.turn.prompt ? (
+        <div className="msg user">
+          <span className="gutter">you</span>
+          <div className="msg-body">{entry.turn.prompt}</div>
+        </div>
+      ) : null}
+
+      {entry.items.map((item) => (
+        <ItemRow key={item.id} item={item} raw={raw} />
+      ))}
+
+      {stream[entry.turn.id] ? (
+        <div className="msg assistant">
+          <span className="gutter">rigel</span>
+          <div className="msg-body streaming">{stream[entry.turn.id]}</div>
+        </div>
+      ) : null}
+
+      {raw ? (
+        <details className="raw">
+          <summary>raw turn json</summary>
+          <pre>{JSON.stringify(entry.turn, null, 2)}</pre>
+        </details>
+      ) : null}
+    </article>
   );
 }
 

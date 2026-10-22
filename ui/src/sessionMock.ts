@@ -51,6 +51,21 @@ export const previewAgents: Agent[] = [
     tokens_in: 2_900,
     tokens_out: 180,
   },
+  // A harness agent: Rigel shows its turns but cannot send it work until the harness turns land
+  // (P4.10), so the roster labels it "observed only".
+  {
+    id: "agent-preview-reviewer",
+    session_id: previewSession.id,
+    harness: "claude",
+    role: "reviewer",
+    model: "claude-sonnet-4.5",
+    status: "idle",
+    started_at: ago(20),
+    spend_cents: 0,
+    spend_micros: 2_400,
+    tokens_in: 3_100,
+    tokens_out: 240,
+  },
 ];
 
 const turnOne: Turn = {
@@ -184,6 +199,27 @@ const childItems: Item[] = [
   },
 ];
 
+const turnReview: Turn = {
+  id: "turn-preview-review",
+  agent_id: "agent-preview-reviewer",
+  parent_turn_id: null,
+  seq: 1,
+  status: "completed",
+  prompt: "Review the patch from the worker: is the ordering fix the whole story?",
+  started_at: ago(3),
+  completed_at: ago(2),
+  usage: {
+    input_tokens: 3_100,
+    cached_input_tokens: 2_400,
+    output_tokens: 240,
+    reasoning_tokens: 0,
+    cost_micros: 2_400,
+    provider_micros: 2_400,
+    source: "provider",
+  },
+  stop_reason: "completed",
+};
+
 export const previewTranscript: TurnTranscript[] = [
   { turn: turnOne, items },
   {
@@ -237,6 +273,23 @@ export const previewTranscript: TurnTranscript[] = [
     ],
   },
   { turn: turnChild, items: childItems },
+  {
+    turn: turnReview,
+    items: [
+      {
+        id: "item-preview-review-1",
+        turn_id: turnReview.id,
+        seq: 1,
+        kind: "message",
+        status: "complete",
+        body: {
+          role: "assistant",
+          text: "The ordering fix is right, but the test still asserts on a cached hash. Clear the cache in the same test or it will pass for the wrong reason.",
+        },
+        created_at: ago(2),
+      },
+    ],
+  },
 ];
 
 export const previewBudget: BudgetSnapshot = {
