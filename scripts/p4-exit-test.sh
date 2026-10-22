@@ -5,6 +5,7 @@
 #   2. Codex runs a turn that records a command item with its exit code and input tokens
 #   3. Cursor and Cline run ACP turns through the same client, with their own keys
 #   4. killing one agent mid-turn leaves the others running; resume marks only that turn
+#   5. every turn left a command item, and Claude keeps the CLI's own cost
 #
 # The turns are driven through fixture binaries so the script is deterministic and needs no
 # vendor account. Point --exe at the real CLIs (or drop the flag) to run the same script live.
@@ -13,10 +14,11 @@ cd "$(dirname "$0")/.."
 
 echo "== build =="
 cargo build -q -p rigel-cli --bin rigel
-cargo build -q -p rigel-adapters --bin fake-codex --bin fake-acp
+cargo build -q -p rigel-adapters --bin fake-codex --bin fake-acp --bin fake-claude
 cli="$PWD/target/debug/rigel"
 codex_fake="$PWD/target/debug/fake-codex.exe"
 acp_fake="$PWD/target/debug/fake-acp.exe"
+claude_fake="$PWD/target/debug/fake-claude.exe"
 
 project="$(mktemp -d)"
 logs="$(mktemp -d)"
@@ -165,6 +167,27 @@ for harness in ("codex", "cursor", "cline"):
     )
 print(f"   {by_harness}")
 PY
+
+echo "== 7: Claude runs a turn and keeps the CLI's own cost =="
+ANTHROPIC_API_KEY=sk-ant-p4   "$cli" --data-dir "$logs/data" claude run --project "$project" --session "$session"   --prompt "say pong" --exe "$claude_fake" --json > "$logs/claude.json"
+python - "$logs/claude.json" "$project/.rigel/rigel.db" "$session" <<'PYEOF'
+import json, sqlite3, sys
+out = json.load(open(sys.argv[1], encoding="utf-8"))
+assert out["ok"], out
+assert out["text"] == "pong", out
+usage = out["recorded_usage"]
+assert usage and usage["input_tokens"] > 0, usage
+assert usage["provider_micros"], "the CLI cost is recorded, not only estimated"
+assert usage["source"] == "provider", usage
+db, session = sys.argv[2], sys.argv[3]
+row = sqlite3.connect(db).execute(
+    "SELECT a.harness, a.role, t.status FROM turns t JOIN agents a ON a.id = t.agent_id"
+    " WHERE a.session_id = ? AND a.harness = 'claude'",
+    (session,),
+).fetchone()
+assert row == ("claude", "claude", "completed"), row
+print(f"   claude turn {out['turn'][:8]} billed {usage['provider_micros']} micro-dollars (provider)")
+PYEOF
 
 echo
 echo "P4 exit test: ok"
