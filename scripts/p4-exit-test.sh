@@ -28,7 +28,7 @@ echo "session $session"
 
 echo "== 1: doctor lists every harness =="
 set +e
-"$cli" --data-dir "$logs/data" doctor --json > "$logs/doctor.json"
+"$cli" doctor --json --project "$project" > "$logs/doctor.json"
 doctor_code=$?
 set -e
 [ "$doctor_code" -le 1 ] || { echo "doctor failed ($doctor_code)"; cat "$logs/doctor.json"; exit 1; }

@@ -60,6 +60,11 @@ pub const INDEX_MIGRATIONS: &[Migration] = &[
         name: "0002_remote_cache",
         sql: include_str!("../../../migrations/index/0002_remote_cache.sql"),
     },
+    Migration {
+        version: 3,
+        name: "0003_tools",
+        sql: include_str!("../../../migrations/index/0003_tools.sql"),
+    },
 ];
 
 #[derive(Debug, thiserror::Error)]

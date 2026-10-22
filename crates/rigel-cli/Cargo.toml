@@ -16,6 +16,7 @@ rigel-adapters = { path = "../rigel-adapters" }
 rigel-core = { path = "../rigel-core" }
 rigel-mcp = { path = "../rigel-mcp" }
 serde_json = { workspace = true }
+sqlx = { workspace = true }
 tokio = { workspace = true }
 
 [dev-dependencies]

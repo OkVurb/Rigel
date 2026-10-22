@@ -18,7 +18,9 @@ pub mod session;
 pub mod skills;
 pub mod snapshot;
 pub mod storage;
+pub mod toolchain;
 pub mod tree;
+pub mod update;
 pub mod worktree;
 pub use agent::{
     AgentError, ApprovalScope, Cancels, ChatMessage, ChatRequest, CommandApprover, CommandDecision,
@@ -57,6 +59,15 @@ pub use snapshot::{
     SnapshotError, SnapshotKind, SnapshotService,
 };
 pub use storage::{StorageError, Store, default_index_dir};
+pub use toolchain::{
+    Decision, Environment, Host, InstallPlan, InstallRecord, Manager, Pin, Requirement,
+    RequirementSource, RunOutcome, Runner, SourceKind, SystemEnvironment, SystemRunner, TOOLS,
+    ToolError, ToolService, ToolStatus, TrustFactor, TrustReport, requirements, tool_by_alias,
+    tool_by_id, trust_for,
+};
+pub use update::{
+    PUBKEY_FILE as UPDATE_PUBKEY_FILE, UpdateCheck, UpdateError, UpdateManifest, UpdateSettings,
+};
 pub use worktree::{
     MergeLine, MergeReport, MergeStatus, WORKTREES_DIR, Worktree, WorktreeError, WorktreeService,
 };

@@ -15,8 +15,11 @@ use rigel_core::{
 use serde_json::json;
 
 mod claims;
+mod doctor;
 mod harness;
 mod phase3;
+mod tools;
+mod update;
 mod worktree;
 
 use harness::{CodexCommand, HarnessCommand};
@@ -35,8 +38,10 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
-    /// Report local state.
+    /// Report local state. Exit 0 is all clear, 1 has warnings, 2 has failures.
     Doctor {
+        #[arg(long, value_name = "PATH", default_value = ".")]
+        project: PathBuf,
         #[arg(long)]
         json: bool,
     },
@@ -93,6 +98,24 @@ enum Command {
     Claim {
         #[command(subcommand)]
         command: claims::ClaimCommand,
+    },
+
+    /// Tools on this machine: what is present, what a skill needs, what to install.
+    Tools {
+        #[command(subcommand)]
+        command: tools::ToolCommand,
+    },
+
+    /// The arithmetic behind an install decision.
+    Trust {
+        #[command(subcommand)]
+        command: tools::TrustCommand,
+    },
+
+    /// Signed updates, off by default.
+    Update {
+        #[command(subcommand)]
+        command: update::UpdateCommand,
     },
 
     /// One private git checkout per agent, merged back through the patch pipeline.
@@ -270,96 +293,10 @@ async fn main() -> ExitCode {
     let dir = data_dir(&cli);
 
     match cli.command {
-        Command::Doctor { json: as_json } => {
-            let index = match SkillIndex::open(&dir).await {
-                Ok(index) => index,
-                Err(error) => return skills_failure(error, as_json),
-            };
-            let stats = match index.stats().await {
-                Ok(stats) => stats,
-                Err(error) => return skills_failure(error, as_json),
-            };
-            // P4.1: one probe for all four harnesses, cached in the data directory. It is a
-            // report, not a gate: `doctor` stays useful on a machine with none installed.
-            let harnesses = rigel_adapters::registry::probe_all(
-                &rigel_core::credentials::KeychainCredentialStore,
-            )
-            .await;
-
-            if as_json {
-                println!(
-                    "{}",
-                    json!({
-                        "ok": true,
-                        "version": env!("CARGO_PKG_VERSION"),
-                        "server": "rigel",
-                        "index": {
-                            "skills": stats.skills,
-                            "with_body": stats.with_body,
-                            "clusters": stats.clusters,
-                            "blobs": stats.blobs,
-                            "sources": stats.sources,
-                        },
-                        "checks": [],
-                        "harnesses": harnesses,
-                    })
-                );
-            } else {
-                println!("rigel {}", env!("CARGO_PKG_VERSION"));
-                println!(
-                    "  index: {} skills ({} with a body)",
-                    stats.skills, stats.with_body
-                );
-                println!(
-                    "  blobs: {} files, {} KB",
-                    stats.blobs,
-                    stats.blob_bytes / 1024
-                );
-                for source in &stats.sources {
-                    println!(
-                        "  source {}: {:?}  last sync {}",
-                        source.id,
-                        source.state,
-                        source
-                            .last_sync_at
-                            .map(rigel_core::skills::fmt_time)
-                            .unwrap_or_else(|| "never".to_string())
-                    );
-                }
-                for info in &harnesses {
-                    let name = rigel_adapters::registry::display_name(info.harness);
-                    if !info.installed {
-                        println!(
-                            "  harness {name}: not installed — {}",
-                            info.install_hint.as_deref().unwrap_or("no install hint")
-                        );
-                        continue;
-                    }
-                    let auth = match info.auth_mode {
-                        rigel_adapters::AuthMode::ApiKey => info
-                            .provider
-                            .as_deref()
-                            .map(|provider| format!("API key · {provider}"))
-                            .unwrap_or_else(|| "API key".to_string()),
-                        rigel_adapters::AuthMode::Subscription => info
-                            .provider
-                            .as_deref()
-                            .map(|provider| format!("Needs API key · {provider}"))
-                            .unwrap_or_else(|| "Needs API key".to_string()),
-                        rigel_adapters::AuthMode::None => "no key detected".to_string(),
-                    };
-                    println!(
-                        "  harness {name}: {} · {auth} · {}",
-                        info.version.as_deref().unwrap_or("unknown version"),
-                        info.path
-                            .as_ref()
-                            .map(|path| path.display().to_string())
-                            .unwrap_or_default()
-                    );
-                }
-            }
-            ExitCode::SUCCESS
-        }
+        Command::Doctor {
+            project,
+            json: as_json,
+        } => doctor::run(&project, &dir, as_json).await,
 
         Command::Migrate { project } => match Store::open_project(&project).await {
             Ok(store) => {
@@ -391,6 +328,12 @@ async fn main() -> ExitCode {
         Command::Codex { command } => harness::run_codex(command).await,
 
         Command::Harness { command } => harness::run_harness(command, &dir).await,
+
+        Command::Tools { command } => tools::run_tools(&dir, command).await,
+
+        Command::Trust { command } => tools::run_trust(command),
+
+        Command::Update { command } => update::run(&dir, command).await,
 
         Command::Worktree { command } => worktree::run(&dir, command).await,
 

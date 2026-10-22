@@ -57,6 +57,21 @@ pub fn delete(provider: &str) -> Result<(), KeyError> {
     }
 }
 
+/// Whether the OS credential store can be read at all.
+///
+/// Asks for a name no real provider uses. `NoEntry` is the healthy answer: the store answered.
+/// Any other error means every key Rigel writes will fail, which is worth a warning in
+/// `doctor` before the user finds out at the end of a long prompt.
+pub fn available() -> Result<(), String> {
+    match keyring::Entry::new(SERVICE, "__rigel_doctor") {
+        Ok(entry) => match entry.get_password() {
+            Ok(_) | Err(keyring::Error::NoEntry) => Ok(()),
+            Err(error) => Err(error.to_string()),
+        },
+        Err(error) => Err(error.to_string()),
+    }
+}
+
 /// Whether a usable key exists, for the settings screen. Never returns the key.
 pub fn present(provider: &str) -> bool {
     get_from(&KeychainCredentialStore, provider).is_ok()

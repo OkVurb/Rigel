@@ -10,12 +10,20 @@ one made things worse. Star counts and install numbers surface none of that.
 
 ## Status
 
-Phase 0 through **Phase 3 — the native agent, chat and the bill — are complete**. The desktop shell
-searches a local SQLite index over skill bodies stored as content-addressed files and works with the
-network off; the Session surface runs a native agent with streamed tool calls, a persisted transcript,
-replay, a compare-and-swap patch journal, a pre-turn cost estimate and a cap that stops work
-within one turn. See the ticked
-checklist in [handoff.md](docs/handoff.md) for what each item means.
+Phases 0–6 are complete. The window has five surfaces and one database per project:
+
+- **Session** — the native agent and the harness roster, streaming tool calls into a persisted
+  transcript with replay, a live model picker, a pre-turn quote and a cap that stops within one turn.
+- **Shelf** — the skill index: search, static review, evidence, variants, all offline against
+  `index.db`.
+- **Diff** — the merged, attributed view of what every agent changed, with per-patch revert, the
+  conflict strip and the claim list.
+- **Tools** — what is present on this machine, what a skill needs (with the line that said so),
+  the trust arithmetic behind an install, and the ledger of what ran and what was queued.
+- **Doctor** — one row per check and an exit code: `0` clear, `1` warnings, `2` failures.
+
+Phase 7 (hardening and release) is in progress; see the ticked checklist in
+[handoff.md](docs/handoff.md) for what each item means and what is deliberately left open.
 
 The index is not the endpoint. The direction, settled in the interview: **one place where several
 agents work on the same code together**, with this catalogue as the capability layer they call into.
@@ -74,6 +82,26 @@ cargo run -q -p rigel-cli -- snapshot restore <snapshot-id> --project .
 cargo run -q -p rigel-cli -- patch list --project .
 cargo run -q -p rigel-cli -- session resume --project . --id <session-id>
 
+# the claim ledger: advisory, never a lock
+cargo run -q -p rigel-cli -- claim list --json
+cargo run -q -p rigel-cli -- claim release src/lib.rs --agent <agent-id>
+
+# tools: what is here, what a skill needs, what an install would run
+cargo run -q -p rigel-cli -- tools list
+cargo run -q -p rigel-cli -- tools which ripgrep --json
+cargo run -q -p rigel-cli -- tools requirements <skill-id>     # names the source line
+cargo run -q -p rigel-cli -- trust explain ripgrep            # the arithmetic, not a number
+cargo run -q -p rigel-cli -- tools install ripgrep            # exact command first, then a prompt
+cargo run -q -p rigel-cli -- tools install ripgrep --unattended # queues; never runs
+cargo run -q -p rigel-cli -- tools ledger
+
+# a report with an exit code: 0 clear, 1 warnings, 2 failures
+cargo run -q -p rigel-cli -- doctor --project . --json
+
+# updates are off until asked for; the manifest is signed and hash-checked
+cargo run -q -p rigel-cli -- update status
+cargo run -q -p rigel-cli -- update check --manifest ./release.json
+
 cd ui && npm install && npm run dev   # renderer in a browser, sample rows
 bash scripts/dev.sh                    # desktop shell, secrets from Infisical (INFISICAL.md)
 cargo run -p rigel-app                 # the same, without Infisical: keychain or shell env
@@ -128,11 +156,21 @@ The prototype's Discover view talks to two marketplaces that send no CORS header
 | MCP | **real**: stdio server scoped to `--session` and `--agent`, sharing the same tools |
 | Codex harness | **real**: `rigel codex probe` and one turn through `codex app-server`, with `codex exec --json` as the tested fallback; Rigel writes the router `-c` overrides itself (verified against Codex 0.162.1) |
 | Cursor/Cline harness | **real protocol**: `rigel agent acp --harness cursor|cline` drives one ACP turn, records session updates and both sides of every permission request, and refuses a subscription-only identity; each harness takes its own key (`CURSOR_API_KEY`, `CLINE_API_KEY`) and is probed separately. An ACP run asks on the CLI's stdin, and the window card is the native agent's surface. Verified against a scripted ACP agent — neither CLI is installed on this machine |
+| Claims | **real**: `acquire` / `heartbeat` / `release`, a tombstone on release, staleness reported and never auto-released, 24 h expiry; `rigel claim list\|release`, MCP `rigel_claim` / `rigel_release` / `rigel_who` |
+| Attribution | **real**: a 250 ms watcher that hashes changed files, names the writer or marks `ambiguous`, and records a conflict when a claimed path moves under someone else |
+| Diff | **real**: conflict strip with both names and hashes, claims with stale rows, unverified counts, per-patch revert |
+| Tools and trust | **real**: twelve curated tools probed per host, cached with path and SHA-256; requirements inferred from `allowed-tools` and body commands with their line; the five-factor arithmetic printed by `rigel trust explain`; approval-gated installs with exit code and duration in the ledger; unattended queues; apt shown and refused |
+| Doctor | **real**: index and project integrity, schema versions, blob rows vs files, stale claims, budget reconcile, keychain, config age, one row per harness, tool hash pins, unfinished installs, update switch; exit 0/1/2 |
+| Updates | **real but off**: an Ed25519 manifest check over `version / url / sha256`, an artifact SHA-256 check, a switch that defaults off, and no automatic request |
 | Prototype migration | `rigel skills import --from` + [the export snippet](docs/migrating-prototype-index.md) |
 | Discover / Targets / Dependencies (prototype) | still the Phase 0 browser app; Phase 6 ports them |
 
 ## Docs
 
+- [CONTRIBUTING.md](CONTRIBUTING.md) — build, checks, layout and the rules for a schema change
+- [SECURITY.md](SECURITY.md) — the threat model, every network call, and what is not defended
+- [ARCHITECTURE.md](ARCHITECTURE.md) — the pieces, the two databases, the write path and a turn
+- [docs/PLATFORMS.md](docs/PLATFORMS.md) — Windows support, signing, and what macOS/Linux mean here
 - [qa/p2.md](docs/qa/p2.md) — the Phase 2 exit test, with recorded results
 - [qa/p3.md](docs/qa/p3.md) — the Phase 3 exit test: killed turn, resume, idempotent patch, the cap
 - [migrating-prototype-index.md](docs/migrating-prototype-index.md) — moving the `skilldb:` rows into SQLite
@@ -154,6 +192,8 @@ The prototype's Discover view talks to two marketplaces that send no CORS header
 - `bash scripts/dev.sh` — local dev: the desktop shell under `infisical run --env=dev`, with the setup steps in [INFISICAL.md](INFISICAL.md)
 - `bash scripts/p3-exit-test.sh` — the Phase 3 exit test; needs a built `rigel` and `python`
 - `bash scripts/p5-exit-test.sh` — two agents on one file: conflict in two seconds, no "locked"
+- `bash scripts/p6-exit-test.sh` — a missing tool, a shim package manager, approval and the queue
+- `bash scripts/p7-exit-test.sh` — doctor, licence files, installer config, updates and no network
 - `scripts/fixtures/p4-subagents.json` — a scripted parent that delegates to two cheap readers; `rigel agent run --script` prints their bills
 
 ## Limits, stated plainly
@@ -196,3 +236,9 @@ Rigel, named for the bright anchor star in the mark. The Phase 0 document is tit
 the prototype still uses `skilldb:` keys; both are now historical. Phase 2 moved that data into
 `index.db` — see [the migration note](docs/migrating-prototype-index.md) — and nothing in `crates/`
 or `ui/` reads those keys.
+
+## Licence
+
+MIT OR Apache-2.0, at your option. The workspace, every crate and the renderer carry the same
+expression; the texts are in [LICENSE-MIT](LICENSE-MIT) and [LICENSE-APACHE](LICENSE-APACHE).
+No contributor licence agreement, and no telemetry to opt out of.

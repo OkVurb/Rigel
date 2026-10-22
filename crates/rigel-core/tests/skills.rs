@@ -723,7 +723,14 @@ async fn a_version_1_index_upgrades_to_0002_in_place() {
         .fetch_one(index.store().pool())
         .await
         .unwrap();
-    assert_eq!(version, 2);
+    let latest = INDEX_MIGRATIONS
+        .last()
+        .expect("at least one migration")
+        .version;
+    assert_eq!(
+        version, latest,
+        "a Phase 1 index upgrades to the current schema"
+    );
 
     // The new columns and the cache table exist after the upgrade.
     let columns: Vec<String> = sqlx::query("PRAGMA table_info(skills)")

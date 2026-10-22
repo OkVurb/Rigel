@@ -1,0 +1,12 @@
+{
+  "name": "hyper-rigel",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Opt-in loopback bridge that lets Rigel open a project in Hyper",
+  "main": "index.js",
+  "keywords": ["hyper", "hyper-plugin"],
+  "license": "MIT OR Apache-2.0",
+  "scripts": {
+    "test": "node --test"
+  }
+}
