@@ -110,6 +110,9 @@ pub struct ModelDeliberator {
     model_name: String,
     session: SessionService,
     budget: Arc<BudgetService>,
+    /// The session's reasoning effort, so the advisory round runs at the same level as the turn
+    /// it is advising (D28). `None` leaves the provider default.
+    effort: Option<String>,
 }
 
 impl ModelDeliberator {
@@ -118,12 +121,14 @@ impl ModelDeliberator {
         model_name: impl Into<String>,
         session: SessionService,
         budget: Arc<BudgetService>,
+        effort: Option<String>,
     ) -> Self {
         Self {
             model,
             model_name: model_name.into(),
             session,
             budget,
+            effort,
         }
     }
 
@@ -137,9 +142,7 @@ impl ModelDeliberator {
             tools: Vec::new(),
             max_tokens: Some(320),
             temperature: 0.2,
-            // The advisory round runs on the parent's model but not on a turn, so it has no
-            // effort to inherit here; the provider default applies.
-            effort: None,
+            effort: self.effort.clone(),
         };
         let mut text = String::new();
         let mut usage = Usage::default();
@@ -275,9 +278,12 @@ mod tests {
     use super::{Deliberator, ModelDeliberator};
     use crate::agent::ScriptedModel;
     use crate::agent::destructive::{Finding, classify};
+    use crate::agent::model::{ChatRequest, Delta, DeltaSink, Model, ModelError};
     use crate::{BudgetService, Cancels, SessionService};
+    use async_trait::async_trait;
     use std::path::Path;
-    use std::sync::Arc;
+    use std::sync::{Arc, Mutex};
+    use tokio_util::sync::CancellationToken;
 
     const SCRIPT: &str = r#"{
       "steps": [
@@ -302,7 +308,7 @@ mod tests {
             cancels as Arc<dyn crate::InterruptSink>,
         ));
         let model = Arc::new(ScriptedModel::from_json(SCRIPT).unwrap());
-        let deliberator = ModelDeliberator::new(model, "script", service.clone(), budget);
+        let deliberator = ModelDeliberator::new(model, "script", service.clone(), budget, None);
         let findings: Vec<Finding> = classify(
             "git push --force origin main",
             Path::new("/work/demo"),
@@ -335,6 +341,78 @@ mod tests {
         assert!(round.note.contains("human approval still decides"));
     }
 
+    /// Records the effort on every request it receives, and answers in one chunk.
+    struct EffortSpy {
+        seen: Mutex<Vec<Option<String>>>,
+    }
+
+    #[async_trait]
+    impl Model for EffortSpy {
+        fn id(&self) -> String {
+            "effort-spy".to_string()
+        }
+
+        async fn chat(
+            &self,
+            request: ChatRequest,
+            _cancel: &CancellationToken,
+            on_delta: &mut DeltaSink<'_>,
+        ) -> Result<(), ModelError> {
+            self.seen.lock().unwrap().push(request.effort.clone());
+            on_delta(Delta::Text("one opinion".to_string()));
+            on_delta(Delta::Finish("stop".to_string()));
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn the_advisory_round_sends_the_sessions_effort() {
+        let tmp = tempfile::tempdir().unwrap();
+        let service = SessionService::open(tmp.path()).await.unwrap();
+        let session = service.start(Some("native"), Some(25)).await.unwrap();
+        let agent = service
+            .register_agent(&session.id, "native", Some("worker"))
+            .await
+            .unwrap();
+        let cancels = Arc::new(Cancels::new());
+        let budget = Arc::new(BudgetService::new(
+            service.pool().clone(),
+            cancels as Arc<dyn crate::InterruptSink>,
+        ));
+        let spy = Arc::new(EffortSpy {
+            seen: Mutex::new(Vec::new()),
+        });
+        let deliberator = ModelDeliberator::new(
+            spy.clone(),
+            "effort-spy",
+            service.clone(),
+            budget,
+            Some("high".to_string()),
+        );
+
+        let findings: Vec<Finding> = classify(
+            "git push --force origin main",
+            Path::new("/work/demo"),
+            Path::new("/work/demo"),
+        );
+        let round = deliberator
+            .deliberate(
+                &agent.id,
+                "git push --force origin main",
+                Path::new("/work/demo"),
+                &findings,
+            )
+            .await;
+
+        assert_eq!(round.positions.len(), 3);
+        let seen = spy.seen.lock().unwrap().clone();
+        assert_eq!(seen.len(), 3, "advocate, opponent and referee");
+        assert!(
+            seen.iter().all(|effort| effort.as_deref() == Some("high")),
+            "every advisory request carries the session's effort: {seen:?}"
+        );
+    }
+
     #[tokio::test]
     async fn a_model_failure_is_recorded_as_an_unavailable_advisor() {
         let tmp = tempfile::tempdir().unwrap();
@@ -354,7 +432,7 @@ mod tests {
             {"error": "provider down"}, {"error": "provider down"}, {"error": "provider down"}
         ]}"#;
         let model = Arc::new(ScriptedModel::from_json(script).unwrap());
-        let deliberator = ModelDeliberator::new(model, "script", service.clone(), budget);
+        let deliberator = ModelDeliberator::new(model, "script", service.clone(), budget, None);
 
         let round = deliberator
             .deliberate(&agent.id, "rm -rf /", Path::new("/work/demo"), &[])

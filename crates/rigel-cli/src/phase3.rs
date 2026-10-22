@@ -42,6 +42,10 @@ pub enum AgentCommand {
         provider: Option<String>,
         #[arg(long)]
         model: Option<String>,
+        /// Reasoning effort sent as `reasoning_effort` on every step: low, medium or high (D28).
+        /// Separate from the model id; omitted leaves the provider default.
+        #[arg(long, value_name = "LEVEL")]
+        effort: Option<String>,
         /// How a `run_command` or `fetch_url` request is answered. Defaults to `ask`, or `deny` under --json.
         #[arg(long, value_enum)]
         approval: Option<acp::ApprovalChoice>,

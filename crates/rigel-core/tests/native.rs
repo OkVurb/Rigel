@@ -5,7 +5,7 @@
 //! coordinator, the tools, the budget service, the patch pipeline and the session store are
 //! the production ones.
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
@@ -778,4 +778,82 @@ async fn concurrent_usage_is_counted_once_per_charge() {
         assert_eq!(agent.spend_micros, 500);
     }
     assert!(budget.reconcile(&session.id).await.unwrap().ok);
+}
+
+/// Records the effort on every request and answers in one step.
+struct EffortRecorder {
+    seen: Mutex<Vec<Option<String>>>,
+}
+
+#[async_trait]
+impl Model for EffortRecorder {
+    fn id(&self) -> String {
+        "effort-recorder".to_string()
+    }
+
+    async fn chat(
+        &self,
+        request: ChatRequest,
+        _cancel: &CancellationToken,
+        on_delta: &mut DeltaSink<'_>,
+    ) -> Result<(), ModelError> {
+        self.seen.lock().unwrap().push(request.effort.clone());
+        on_delta(Delta::Text("done.
+".to_string()));
+        on_delta(Delta::Finish("stop".to_string()));
+        Ok(())
+    }
+}
+
+#[tokio::test]
+async fn the_coordinators_effort_reaches_every_step_request() {
+    let tmp = repo();
+    let service = SessionService::open(tmp.path()).await.unwrap();
+    let session = service.start(Some("native"), Some(25)).await.unwrap();
+    let agent = service
+        .register_agent(&session.id, "native", Some("worker"))
+        .await
+        .unwrap();
+
+    let cancels = Arc::new(Cancels::new());
+    let budget = Arc::new(BudgetService::new(
+        service.pool().clone(),
+        cancels.clone() as Arc<dyn rigel_core::InterruptSink>,
+    ));
+    let tools = Tools::new(
+        tmp.path().to_path_buf(),
+        service.clone(),
+        budget.clone(),
+        tmp.path().join("index"),
+        StopAt::Never,
+    );
+    let model = Arc::new(EffortRecorder {
+        seen: Mutex::new(Vec::new()),
+    });
+    let run = Coordinator {
+        session: service.clone(),
+        budget,
+        tools,
+        model: model.clone(),
+        sink: Arc::new(rigel_core::NullSink),
+        cancels,
+        project_root: tmp.path().to_path_buf(),
+        model_name: "effort-recorder".to_string(),
+        effort: Some("low".to_string()),
+        max_steps: 3,
+        subagents: rigel_core::agent::SubagentPolicy::default(),
+        depth: 0,
+        parent_cancel: None,
+    }
+    .run(&session.id, &agent.id, "say done")
+    .await
+    .unwrap();
+
+    assert_eq!(run.stop, StopReason::Completed);
+    let seen = model.seen.lock().unwrap().clone();
+    assert!(!seen.is_empty(), "the model must have been asked at least once");
+    assert!(
+        seen.iter().all(|effort| effort.as_deref() == Some("low")),
+        "every step request carries the coordinator's effort: {seen:?}"
+    );
 }

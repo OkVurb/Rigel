@@ -964,3 +964,52 @@ fn fail(error: impl std::fmt::Display) -> ExitCode {
     eprintln!("rigel: {error}");
     ExitCode::from(2)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{AgentCommand, Cli, Command};
+
+    #[test]
+    fn agent_run_takes_the_effort_separately_from_the_model() {
+        let cli = <Cli as clap::Parser>::try_parse_from([
+            "rigel",
+            "agent",
+            "run",
+            "--prompt",
+            "say pong",
+            "--model",
+            "gpt-5.6-sol",
+            "--effort",
+            "high",
+        ])
+        .expect("--effort is part of agent run");
+        match cli.command {
+            Command::Agent {
+                command:
+                    AgentCommand::Run {
+                        effort,
+                        model,
+                        prompt,
+                        ..
+                    },
+            } => {
+                assert_eq!(effort.as_deref(), Some("high"));
+                assert_eq!(model.as_deref(), Some("gpt-5.6-sol"));
+                assert_eq!(prompt, "say pong");
+            }
+            _ => panic!("expected `rigel agent run`"),
+        }
+    }
+
+    #[test]
+    fn agent_run_without_an_effort_leaves_the_provider_default() {
+        let cli = <Cli as clap::Parser>::try_parse_from(["rigel", "agent", "run", "--prompt", "x"])
+            .expect("effort is optional");
+        match cli.command {
+            Command::Agent {
+                command: AgentCommand::Run { effort, .. },
+            } => assert_eq!(effort, None),
+            _ => panic!("expected `rigel agent run`"),
+        }
+    }
+}

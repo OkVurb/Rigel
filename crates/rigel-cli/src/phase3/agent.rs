@@ -616,12 +616,20 @@ pub async fn run_agent(dir: &Path, command: AgentCommand) -> ExitCode {
             script,
             provider,
             model,
+            effort,
             approval,
             crash_after_journal,
             max_steps,
             json: as_json,
         } => {
             let provider = provider_name(provider);
+            // One allowlist for both surfaces: Settings refuses anything else (D28).
+            if let Some(level) = &effort
+                && !matches!(level.as_str(), "low" | "medium" | "high")
+            {
+                eprintln!("rigel: unknown effort `{level}`; use low, medium or high");
+                return ExitCode::from(1);
+            }
             // A machine-readable run has nobody to ask, so the default is no. An explicit
             // `--approval allow` is the only way a command runs unattended.
             let approval = approval.unwrap_or(if as_json {
@@ -719,6 +727,7 @@ pub async fn run_agent(dir: &Path, command: AgentCommand) -> ExitCode {
                     label.clone(),
                     service.clone(),
                     budget.clone(),
+                    effort.clone(),
                 ))
             };
             let tools = Tools::new(
@@ -740,8 +749,7 @@ pub async fn run_agent(dir: &Path, command: AgentCommand) -> ExitCode {
                 cancels,
                 project_root: project.clone(),
                 model_name: label,
-                // The CLI has no --effort yet; only the desktop app sets one (D28).
-                effort: None,
+                effort: effort.clone(),
                 max_steps,
                 subagents: SubagentPolicy::default(),
                 depth: 0,
