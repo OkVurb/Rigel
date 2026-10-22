@@ -13,6 +13,7 @@ mod ops;
 mod snapshot;
 mod trust;
 
+pub(crate) use agent::parse_scope_answer;
 pub use agent::run_agent;
 pub use ops::{run_keys, run_mcp, run_memory, run_patch};
 pub use snapshot::{SnapshotCommand, run_snapshot};

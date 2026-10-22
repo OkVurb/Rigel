@@ -2207,3 +2207,72 @@ input {
   gap: 8px;
   margin-top: 12px;
 }
+
+/* approval card (P4.10e) */
+
+.approval-card {
+  flex: 0 0 auto;
+  margin: 12px 0 0;
+  padding: 10px 12px;
+  border: 1px solid rgba(233, 162, 59, 0.45);
+  border-radius: 8px;
+  background: rgba(233, 162, 59, 0.06);
+}
+
+.approval-card header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.approval-card header .grow {
+  flex: 1;
+}
+
+.approval-title {
+  color: var(--text);
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+
+.approval-wait {
+  color: var(--accent);
+  font-family: var(--mono);
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+
+.approval-meta {
+  margin: 4px 0 0;
+  color: var(--faint);
+  font-size: 11px;
+}
+
+.approval-rows {
+  margin: 6px 0 0;
+  padding: 0;
+  list-style: none;
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.approval-rows li {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 2px;
+}
+
+.approval-note {
+  margin: 6px 0 0;
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.approval-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 10px;
+}

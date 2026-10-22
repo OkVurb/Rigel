@@ -295,6 +295,7 @@ pub async fn run_mcp(dir: &Path, project: PathBuf, session: String, agent: Strin
         session_id: session,
         agent_id: agent,
         index_dir: dir.to_path_buf(),
+        approval_wait: std::time::Duration::from_secs(600),
     };
     let stdin = tokio::io::BufReader::new(tokio::io::stdin());
     let stdout = tokio::io::stdout();

@@ -19,7 +19,9 @@ use serde_json::{Value, json};
 use tokio::io::AsyncReadExt;
 use tokio::process::Command as ProcessCommand;
 
-use super::approval::{CommandApprover, CommandDecision, CommandRequest, DenyCommands};
+use super::approval::{
+    ApprovalScope, CommandApprover, CommandDecision, CommandRequest, DenyCommands, Scopes,
+};
 use super::deliberation::{Deliberator, NoDeliberation};
 use super::egress::{DenyOrigins, Egress, OriginApprover};
 use super::model::ToolSpec;
@@ -61,6 +63,9 @@ pub struct Tools {
     egress: Egress,
     /// The three-advisor round for destructive commands. Defaults to saying it is unavailable.
     deliberator: Arc<dyn Deliberator>,
+    /// Answers already given at session, project or always scope (N2). Shared with every tool
+    /// set built from this one, so `session` means the session and not the turn.
+    scopes: Scopes,
 }
 
 #[derive(Debug, Clone)]
@@ -111,6 +116,7 @@ impl Tools {
         stop_at: StopAt,
     ) -> Self {
         let pipeline = PatchPipeline::new(&root, session.pool().clone());
+        let scopes = Scopes::new(&root, &index_dir);
         Self {
             root,
             session,
@@ -123,7 +129,14 @@ impl Tools {
             commands: Arc::new(DenyCommands),
             egress: Egress::new(Arc::new(DenyOrigins), index_dir.clone()),
             deliberator: Arc::new(NoDeliberation),
+            scopes,
         }
+    }
+
+    /// Share an approval store, so grants made in one surface are honoured in another.
+    pub fn with_scopes(mut self, scopes: Scopes) -> Self {
+        self.scopes = scopes;
+        self
     }
 
     /// Install the approval surface a `run_command` needs. Without one the tool exists and
@@ -157,9 +170,10 @@ impl Tools {
             stop_at: StopAt::Never,
             reads: Mutex::new(HashMap::new()),
             read_only: true,
-            commands: Arc::new(DenyCommands),
+            commands: self.commands.clone(),
             egress: self.egress.clone(),
-            deliberator: Arc::new(NoDeliberation),
+            deliberator: self.deliberator.clone(),
+            scopes: self.scopes.clone(),
         }
     }
 
@@ -717,9 +731,12 @@ impl Tools {
         // The classifier runs before anyone is asked, so the prompt can name the policy rows
         // the command matches (D32). It never decides by itself whether the command runs.
         let destructive = super::destructive::classify(text, &cwd, &root);
+        // Text the user already approved is not asked again and does not pay for advice nobody
+        // will read; a fresh question still gets both.
+        let granted = self.scopes.granted(text);
         // Advice is gathered before the prompt so the human sees it, and it is recorded before
         // the decision so a denial still leaves an audit trail. It cannot allow anything.
-        let deliberation = if destructive.is_empty() {
+        let deliberation = if destructive.is_empty() || granted.is_some() {
             None
         } else {
             Some(
@@ -736,28 +753,44 @@ impl Tools {
             destructive: destructive.clone(),
             deliberation: deliberation.clone(),
         };
-        if self.commands.approve(&request).await != CommandDecision::AllowOnce {
-            // A refusal is still a command item: the transcript should show what was asked
-            // for and that it did not run, not only an error with no text.
-            return ToolOutcome {
-                ok: false,
-                body: json!({
-                    "ok": false,
-                    "error": {
-                        "code": "DENIED",
-                        "message": format!("the user did not approve `{text}`; nothing ran"),
-                    },
-                    "command": text,
-                    "cwd": relative,
-                    "timeout_secs": timeout_secs,
-                    "approved": false,
-                    "destructive": destructive,
-                    "deliberation": deliberation,
-                }),
-                kind: ItemKind::Command,
-                stop: false,
-            };
-        }
+        // A grant from an earlier answer at session/project/always scope means the question is
+        // not asked again (N2). The key is the exact text, so a near-miss still asks.
+        let scope = match granted {
+            Some(scope) => scope,
+            None => match self.commands.approve(&request).await {
+                CommandDecision::Allow(scope) => {
+                    // A store that cannot write is not permission to widen the answer: the
+                    // command still runs, but only once.
+                    if self.scopes.remember(text, scope).is_err() {
+                        ApprovalScope::Once
+                    } else {
+                        scope
+                    }
+                }
+                CommandDecision::Deny => {
+                    // A refusal is still a command item: the transcript should show what was
+                    // asked for and that it did not run, not only an error with no text.
+                    return ToolOutcome {
+                        ok: false,
+                        body: json!({
+                            "ok": false,
+                            "error": {
+                                "code": "DENIED",
+                                "message": format!("the user did not approve `{text}`; nothing ran"),
+                            },
+                            "command": text,
+                            "cwd": relative,
+                            "timeout_secs": timeout_secs,
+                            "approved": false,
+                            "destructive": destructive,
+                            "deliberation": deliberation,
+                        }),
+                        kind: ItemKind::Command,
+                        stop: false,
+                    };
+                }
+            },
+        };
 
         // A destructive command only gets to run after a snapshot of the work that has no other
         // copy (D32). A snapshot that cannot be taken refuses the command rather than pretending
@@ -860,6 +893,7 @@ impl Tools {
                 "ok": ok,
                 "command": text,
                 "approved": true,
+                "scope": scope.as_str(),
                 "destructive": destructive,
                 "deliberation": deliberation,
                 "snapshot": snapshot,

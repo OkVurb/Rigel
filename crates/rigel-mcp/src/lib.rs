@@ -11,6 +11,8 @@
 use std::io;
 use std::path::PathBuf;
 
+use rigel_core::Scopes;
+use rigel_core::agent::approval::{ApprovalBus, PendingApproval};
 use rigel_core::budget::BudgetService;
 use rigel_core::memory::{MemoryService, WriteMode};
 use rigel_core::patches::{PatchError, PatchPipeline};
@@ -39,6 +41,7 @@ pub const TOOL_NAMES: &[&str] = &[
 ];
 
 pub const ADVERTISED_TOOLS: &[&str] = &[
+    "rigel_approve",
     "rigel_skills_search",
     "rigel_skill_load",
     "rigel_patch_propose",
@@ -58,6 +61,9 @@ pub struct McpContext {
     pub session_id: String,
     pub agent_id: String,
     pub index_dir: PathBuf,
+    /// How long `rigel_approve` waits for a human before refusing. A question with no surface
+    /// listening must not hold the harness open forever.
+    pub approval_wait: std::time::Duration,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -183,6 +189,54 @@ async fn call(ctx: &McpContext, name: &str, args: Value) -> Result<Value, Value>
     let budget = BudgetService::with_null_interrupt(service.pool().clone());
 
     match name {
+        // Claude Code's `--permission-prompt-tool` contract: the tool result's text is JSON
+        // with a `behavior` of `allow` or `deny` (P4.10). Rigel answers from its scope store;
+        // when nothing is granted the question goes to the approval channel, and a question
+        // nobody answers is a refusal.
+        "rigel_approve" => {
+            let tool_name = args
+                .get("tool_name")
+                .and_then(Value::as_str)
+                .ok_or_else(|| failure("BAD_ARGUMENTS", "tool_name is required"))?;
+            let input = args.get("input").cloned().unwrap_or_else(|| json!({}));
+            let key = format!(
+                "claude:{tool_name}:{}",
+                serde_json::to_string(&input).unwrap_or_default()
+            );
+            let scopes = Scopes::new(&ctx.project_root, &ctx.index_dir);
+            let title = input
+                .get("command")
+                .and_then(Value::as_str)
+                .map(str::to_string)
+                .unwrap_or_else(|| format!("use {tool_name}"));
+            let scope = match scopes.granted(&key) {
+                Some(scope) => Some(scope),
+                None => {
+                    let bus = ApprovalBus::new(&ctx.index_dir);
+                    let pending = PendingApproval::now("claude", &key, title)
+                        .with_detail(json!({ "tool": tool_name, "input": input }));
+                    match bus.ask(pending, ctx.approval_wait).await {
+                        Ok(scope) => {
+                            let _ = scopes.remember(&key, scope);
+                            Some(scope)
+                        }
+                        Err(_) => None,
+                    }
+                }
+            };
+            Ok(match scope {
+                Some(scope) => json!({
+                    "behavior": "allow",
+                    "updatedInput": input,
+                    "scope": scope.as_str(),
+                }),
+                None => json!({
+                    "behavior": "deny",
+                    "message": "the user did not approve this tool call in Rigel; nothing ran",
+                }),
+            })
+        }
+
         "rigel_skills_search" => {
             let query = args
                 .get("query")
@@ -356,6 +410,20 @@ async fn call(ctx: &McpContext, name: &str, args: Value) -> Result<Value, Value>
 fn specs() -> Vec<Value> {
     let all = vec![
         json!({
+            "name": "rigel_approve",
+            "description": "Answer a permission request for a tool call. Returns {behavior: allow|deny} and, when allowed, the unchanged input. Rigel's scope store decides; a question nobody answers is a denial.",
+            "inputSchema": {
+                "type": "object",
+                "required": ["tool_name", "input"],
+                "properties": {
+                    "tool_name": { "type": "string" },
+                    "input": { "type": "object" },
+                    "tool_use_id": { "type": "string" },
+                    "permission_suggestions": { "type": "array" }
+                }
+            }
+        }),
+        json!({
             "name": "rigel_skills_search",
             "description": "Search the local skill index. Offline. Returns id, grade, and whether a claim is unmeasured.",
             "inputSchema": {
@@ -447,6 +515,7 @@ mod tests {
             session_id: session.id,
             agent_id: agent.id,
             index_dir: tmp.path().join("index"),
+            approval_wait: std::time::Duration::from_millis(150),
         };
         (tmp, ctx)
     }
@@ -473,6 +542,73 @@ mod tests {
             !names.contains(&"rigel_claim"),
             "not advertised before Phase 5"
         );
+    }
+
+    #[tokio::test]
+    async fn approve_publishes_a_question_and_allows_when_it_is_answered() {
+        let (tmp, ctx) = context().await;
+        let bus = ApprovalBus::new(&ctx.index_dir);
+        let responder = bus.clone();
+        let waiter = tokio::spawn(async move {
+            let mut open = Vec::new();
+            for _ in 0..50 {
+                open = responder.pending();
+                if !open.is_empty() {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+            assert_eq!(open.len(), 1, "the card sees one question");
+            assert_eq!(open[0].key, "claude:Bash:{\"command\":\"cargo test\"}");
+            responder
+                .answer(&open[0].id, Some(rigel_core::ApprovalScope::Project))
+                .unwrap();
+        });
+
+        let body = call(
+            &ctx,
+            "rigel_approve",
+            json!({ "tool_name": "Bash", "input": { "command": "cargo test" } }),
+        )
+        .await
+        .expect("a decision is not an error");
+        waiter.await.unwrap();
+
+        assert_eq!(body["behavior"], "allow");
+        assert_eq!(body["scope"], "project");
+        assert_eq!(body["updatedInput"]["command"], "cargo test");
+
+        // The grant is in the store, so the same input is allowed without a second question.
+        let again = call(
+            &ctx,
+            "rigel_approve",
+            json!({ "tool_name": "Bash", "input": { "command": "cargo test" } }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(again["behavior"], "allow");
+        assert!(bus.pending().is_empty());
+        drop(tmp);
+    }
+
+    #[tokio::test]
+    async fn approve_denies_when_nobody_answers() {
+        let (_tmp, ctx) = context().await;
+        let body = call(
+            &ctx,
+            "rigel_approve",
+            json!({ "tool_name": "Bash", "input": { "command": "rm -rf build" } }),
+        )
+        .await
+        .expect("a refusal is a decision, not a transport error");
+        assert_eq!(body["behavior"], "deny");
+        assert!(
+            body["message"]
+                .as_str()
+                .unwrap()
+                .contains("did not approve")
+        );
+        assert!(ApprovalBus::new(&ctx.index_dir).pending().is_empty());
     }
 
     #[tokio::test]

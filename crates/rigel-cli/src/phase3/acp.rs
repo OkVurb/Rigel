@@ -28,7 +28,9 @@ use async_trait::async_trait;
 use clap::ValueEnum;
 use rigel_adapters::acp::{AcpConfig, AcpEvent, ApprovalDecision, ApprovalRequest, Approver};
 use rigel_adapters::{AcpClient, AdapterError, Harness};
-use rigel_core::{BudgetService, CostSource, ItemKind, SessionService, Usage, credentials};
+use rigel_core::{
+    ApprovalScope, BudgetService, CostSource, ItemKind, Scopes, SessionService, Usage, credentials,
+};
 use serde_json::{Value, json};
 use tokio::sync::mpsc;
 
@@ -82,14 +84,47 @@ pub struct AcpArgs {
 }
 
 /// Ask on a terminal, pre-answer when told to, and fail closed otherwise.
+///
+/// An `Always` answer is also kept in the scope store, so a second identical request is answered
+/// without a prompt even when the agent only ever offers `allow_once` (P4.10d).
 pub struct CliApprover {
     mode: ApprovalChoice,
     events: mpsc::UnboundedSender<AcpEvent>,
+    scopes: Scopes,
 }
 
 impl CliApprover {
-    fn new(mode: ApprovalChoice, events: mpsc::UnboundedSender<AcpEvent>) -> Self {
-        Self { mode, events }
+    fn new(mode: ApprovalChoice, events: mpsc::UnboundedSender<AcpEvent>, scopes: Scopes) -> Self {
+        Self {
+            mode,
+            events,
+            scopes,
+        }
+    }
+}
+
+/// The kind, the exact title and the raw input, so a standing grant covers one request shape and
+/// not every request from the same tool.
+fn approval_key(request: &ApprovalRequest) -> String {
+    format!(
+        "acp:{}:{}:{}",
+        request.kind.as_deref().unwrap_or("tool"),
+        request.title,
+        request
+            .raw_input
+            .as_ref()
+            .map(|input| input.to_string())
+            .unwrap_or_default()
+    )
+}
+
+fn decision_for(scope: ApprovalScope) -> ApprovalDecision {
+    match scope {
+        ApprovalScope::Once => ApprovalDecision::AllowOnce,
+        // ACP's strongest answer is its own session grant; project and always are Rigel's.
+        ApprovalScope::Session | ApprovalScope::Project | ApprovalScope::Always => {
+            ApprovalDecision::AllowAlways
+        }
     }
 }
 
@@ -99,10 +134,23 @@ impl Approver for CliApprover {
         let _ = self.events.send(AcpEvent::PermissionRequested {
             request: request.clone(),
         });
+        let key = approval_key(request);
         let decision = match self.mode {
             ApprovalChoice::Allow => ApprovalDecision::AllowOnce,
             ApprovalChoice::Deny => ApprovalDecision::RejectOnce,
-            ApprovalChoice::Ask => ask(request).await,
+            // A standing answer is replayed without asking again.
+            ApprovalChoice::Ask => match self.scopes.granted(&key) {
+                Some(scope) => decision_for(scope),
+                None => {
+                    let decision = ask(request).await;
+                    if decision == ApprovalDecision::AllowAlways {
+                        // A store that cannot write is not permission to widen: this answer
+                        // still holds for this request only.
+                        let _ = self.scopes.remember(&key, ApprovalScope::Session);
+                    }
+                    decision
+                }
+            },
         };
         let _ = self.events.send(AcpEvent::PermissionResolved {
             tool_call_id: request.tool_call_id.clone(),
@@ -215,7 +263,11 @@ pub async fn run(args: AcpArgs) -> ExitCode {
     });
     // The approver and the client's own callback write to one channel, so the recorder sees the
     // round trip in order: request, decision, then the turn's next update.
-    let approver = Arc::new(CliApprover::new(approval, events.clone()));
+    let approver = Arc::new(CliApprover::new(
+        approval,
+        events.clone(),
+        Scopes::new(&cwd, rigel_core::default_index_dir()),
+    ));
     let mut client = match AcpClient::spawn(config, approver).await {
         Ok(client) => client,
         Err(error) => return harness_error(harness, error),
@@ -733,7 +785,12 @@ mod tests {
     #[tokio::test]
     async fn the_approver_emits_both_sides_of_a_permission_round_trip() {
         let (tx, mut rx) = mpsc::unbounded_channel();
-        let approver = CliApprover::new(ApprovalChoice::Allow, tx);
+        let dir = tempfile::tempdir().unwrap();
+        let approver = CliApprover::new(
+            ApprovalChoice::Allow,
+            tx,
+            Scopes::new(dir.path(), dir.path().join("index")),
+        );
         let request = ApprovalRequest {
             tool_call_id: "call-2".into(),
             title: "Remove build".into(),

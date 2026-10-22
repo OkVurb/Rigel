@@ -267,3 +267,36 @@ async fn a_missing_binary_is_probed_not_errored() {
     assert!(info.version.is_none());
     assert!(info.install_hint.is_some());
 }
+
+#[tokio::test]
+async fn the_permission_tool_and_its_mcp_config_are_passed_together() {
+    let dir = tempfile::tempdir().unwrap();
+    let mcp_config = dir.path().join("rigel-mcp.json");
+    std::fs::write(&mcp_config, "{}").unwrap();
+    let config = config(dir.path()).with_permission_tool(&mcp_config, "mcp__rigel__rigel_approve");
+    run(config, None).await.expect("the turn still answers");
+
+    let args = std::fs::read_to_string(dir.path().join("args.txt")).unwrap();
+    let argv: Vec<&str> = args.lines().collect();
+    let config_at = argv
+        .iter()
+        .position(|arg| *arg == "--mcp-config")
+        .expect("--mcp-config is passed");
+    assert_eq!(argv[config_at + 1], mcp_config.display().to_string());
+    let tool_at = argv
+        .iter()
+        .position(|arg| *arg == "--permission-prompt-tool")
+        .expect("--permission-prompt-tool is passed");
+    assert_eq!(argv[tool_at + 1], "mcp__rigel__rigel_approve");
+    // The prompt must stay last: everything before it is a flag Claude parses.
+    assert_eq!(argv.last(), Some(&"say pong"));
+}
+
+#[tokio::test]
+async fn without_a_permission_tool_no_mcp_arguments_are_invented() {
+    let dir = tempfile::tempdir().unwrap();
+    run(config(dir.path()), None).await.expect("plain turn");
+    let args = std::fs::read_to_string(dir.path().join("args.txt")).unwrap();
+    assert!(!args.contains("--mcp-config"), "argv: {args:?}");
+    assert!(!args.contains("--permission-prompt-tool"), "argv: {args:?}");
+}

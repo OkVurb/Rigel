@@ -8,10 +8,9 @@
 //!
 //! What the fixtures pin, and what they deliberately do not:
 //!
-//! - Claude and Codex emit tool calls and approval requests that neither adapter normalises yet
-//!   (P4.8 for tool calls, P4.10 for approvals). Their fixtures record those lines and assert the
-//!   adapter ignores them — silently, inventing no text — so the gap is visible and P4.8/P4.10
-//!   have an exact wire shape to work from.
+//! - Codex's approval request is answered in place: the fixture pins that the question is
+//!   recorded with the refusal and that no item claims the command ran. Claude's permission round
+//!   trip runs through its own MCP tool, whose contract is tested in `rigel-mcp`, not here.
 //! - "Interrupt" is each protocol's own signature: ACP acknowledges `cancelled` on the prompt
 //!   response, while Claude and Codex app-server die mid-stream, which is what a killed child
 //!   looks like from Rigel's side.
@@ -298,16 +297,27 @@ async fn codex_fixtures_replay_through_the_adapter() {
                 assert_eq!(events.len(), 3, "{scenario}: nothing else was invented");
             }
             "approval" => {
-                // The app-server approval request is a server-initiated JSON-RPC call. Until
-                // P4.10 routes it to the Approver it is ignored, so the fake turn completes; the
-                // fixture exists so the shape (and the force-push command) is visible.
+                // P4.10: the server-initiated request is answered in place with a scope. With no
+                // approver installed the answer is a refusal, which is recorded as an Approval
+                // event; no item may claim the command ran.
                 let turn = outcome.expect("a finished turn");
                 assert_eq!(turn.text, "Waiting for approval.", "{scenario}");
+                let asked: Vec<_> = events
+                    .iter()
+                    .filter_map(|event| match event {
+                        CodexEvent::Approval { request, decision } => {
+                            Some((request.clone(), *decision))
+                        }
+                        _ => None,
+                    })
+                    .collect();
+                assert_eq!(asked.len(), 1, "{scenario}: one question, one answer");
+                assert_eq!(asked[0].0.title, "git push --force origin main", "{scenario}");
+                assert_eq!(asked[0].0.tool_call_id, "c2", "{scenario}");
+                assert_eq!(asked[0].1, ApprovalDecision::RejectOnce, "{scenario}");
                 assert!(
-                    events
-                        .iter()
-                        .all(|event| !format!("{event:?}").contains("git push")),
-                    "{scenario}: no event may claim the command ran"
+                    !events.iter().any(|event| matches!(event, CodexEvent::Item(_))),
+                    "{scenario}: nothing ran, so there is no command item"
                 );
             }
             "error" => {

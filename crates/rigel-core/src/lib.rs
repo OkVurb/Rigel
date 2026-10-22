@@ -18,10 +18,10 @@ pub mod snapshot;
 pub mod storage;
 pub mod tree;
 pub use agent::{
-    AgentError, Cancels, ChatMessage, ChatRequest, CommandApprover, CommandDecision,
+    AgentError, ApprovalScope, Cancels, ChatMessage, ChatRequest, CommandApprover, CommandDecision,
     CommandRequest, Coordinator, DEFAULT_MAX_STEPS, Deliberation, Deliberator, Delta, Finding,
     Model, ModelDeliberator, ModelError, NoDeliberation, OpenRouterModel, OriginApprover,
-    OriginDecision, OriginRequest, POLICIES, Policy, Position, ScriptedModel, ServerStatus,
+    OriginDecision, OriginRequest, POLICIES, Policy, Position, Scopes, ScriptedModel, ServerStatus,
     StopReason, SubagentPolicy, ToolCall, ToolOutcome, ToolSpec, Tools, TurnRun, classify,
 };
 pub use budget::{

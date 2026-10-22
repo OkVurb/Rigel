@@ -7,8 +7,9 @@ use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use rigel_core::{
-    BudgetService, Cancels, CommandApprover, CommandDecision, CommandRequest, Deliberation,
-    Deliberator, Finding, ItemKind, Position, SessionService, StopAt, ToolOutcome, Tools,
+    ApprovalScope, BudgetService, Cancels, CommandApprover, CommandDecision, CommandRequest,
+    Deliberation, Deliberator, Finding, ItemKind, Position, Scopes, SessionService, StopAt,
+    ToolOutcome, Tools,
 };
 
 /// Records every request it sees, then answers with one fixed decision.
@@ -104,7 +105,7 @@ async fn run(tools: &Tools, args: serde_json::Value) -> ToolOutcome {
 #[tokio::test]
 async fn an_approved_command_runs_and_records_its_exit_code() {
     let tmp = tempfile::tempdir().unwrap();
-    let approver = Recorder::new(CommandDecision::AllowOnce);
+    let approver = Recorder::new(CommandDecision::ALLOW_ONCE);
     let tools = tools(tmp.path(), approver.clone()).await;
 
     let outcome = run(
@@ -227,7 +228,7 @@ async fn deliberation_runs_only_for_destructive_commands_and_is_recorded() {
 #[tokio::test]
 async fn a_cwd_outside_the_project_is_refused_before_anyone_is_asked() {
     let tmp = tempfile::tempdir().unwrap();
-    let approver = Recorder::new(CommandDecision::AllowOnce);
+    let approver = Recorder::new(CommandDecision::ALLOW_ONCE);
     let tools = tools(tmp.path(), approver.clone()).await;
 
     let outcome = run(
@@ -249,7 +250,7 @@ async fn a_cwd_outside_the_project_is_refused_before_anyone_is_asked() {
 #[tokio::test]
 async fn a_command_that_outlives_its_timeout_is_killed() {
     let tmp = tempfile::tempdir().unwrap();
-    let approver = Recorder::new(CommandDecision::AllowOnce);
+    let approver = Recorder::new(CommandDecision::ALLOW_ONCE);
     let tools = tools(tmp.path(), approver.clone()).await;
 
     // Both spend about five seconds doing nothing; the tool is told to allow one.
@@ -286,4 +287,46 @@ async fn the_timeout_is_clamped_to_the_documented_maximum() {
     // Denied, so the clamp is observed on the request rather than on the run.
     assert_eq!(outcome.body["error"]["code"], "DENIED");
     assert_eq!(approver.requests()[0].timeout_secs, 600);
+}
+
+#[tokio::test]
+async fn a_session_grant_answers_the_next_identical_command_without_asking() {
+    let tmp = tempfile::tempdir().unwrap();
+    let approver = Recorder::new(CommandDecision::Allow(ApprovalScope::Session));
+    let tools = tools(tmp.path(), approver.clone())
+        .await
+        .with_scopes(Scopes::new(tmp.path(), tmp.path().join("index")));
+
+    let first = run(&tools, serde_json::json!({ "command": "echo twice" })).await;
+    let second = run(&tools, serde_json::json!({ "command": "echo twice" })).await;
+
+    assert!(first.ok && second.ok, "{:?}", second.body);
+    assert_eq!(first.body["scope"], "session");
+    assert_eq!(second.body["scope"], "session");
+    // The question was asked once: the second run used the grant, not the approver.
+    assert_eq!(approver.requests().len(), 1);
+}
+
+#[tokio::test]
+async fn a_project_grant_survives_a_new_tool_set_and_a_near_miss_still_asks() {
+    let tmp = tempfile::tempdir().unwrap();
+    let approver = Recorder::new(CommandDecision::Deny);
+    let scopes = Scopes::new(tmp.path(), tmp.path().join("index"));
+    scopes
+        .remember("echo pinned", ApprovalScope::Project)
+        .unwrap();
+
+    // A second tool set, as a restarted process would build, reads the same file.
+    let tools = tools(tmp.path(), approver.clone())
+        .await
+        .with_scopes(scopes.clone());
+    let granted = run(&tools, serde_json::json!({ "command": "echo pinned" })).await;
+    let near_miss = run(&tools, serde_json::json!({ "command": "echo pinned!" })).await;
+
+    assert!(granted.ok, "{:?}", granted.body);
+    assert_eq!(granted.body["scope"], "project");
+    assert_eq!(near_miss.body["error"]["code"], "DENIED");
+    // Only the near miss was asked about; one character is enough to make it a new command.
+    assert_eq!(approver.requests().len(), 1);
+    assert_eq!(approver.requests()[0].command, "echo pinned!");
 }

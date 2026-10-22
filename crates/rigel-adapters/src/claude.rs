@@ -12,8 +12,10 @@
 //! refuses to spawn when no key exists. A child that somehow reports a different
 //! `apiKeySource` is killed at its first event.
 //!
-//! Approvals are *not* part of this adapter yet: P4.10 wires the permission tool. Until then a
-//! tool that needs permission fails closed inside Claude Code, which is the safe default.
+//! Approvals go through `--permission-prompt-tool mcp__rigel__rigel_approve`, with the Rigel MCP
+//! server supplied by `--mcp-config` (P4.10). Claude then asks Rigel instead of failing closed;
+//! Rigel's tool answers `allow` or `deny` from the shared scope store, and a question nobody
+//! answers becomes `deny`. Without that wiring a tool that needs permission still fails closed.
 //!
 //! Events observed against Claude Code 2.1.251 on 21 Oct 2026:
 //! `system/init` (session id, model, `apiKeySource`), `stream_event` wrapping Anthropic SSE
@@ -72,6 +74,11 @@ pub struct ClaudeConfig {
     pub env: BTreeMap<String, Secret>,
     /// Existence means a vendor login exists. Rigel never reads it, and `--bare` never uses it.
     pub vendor_login: Option<PathBuf>,
+    /// A generated MCP config naming Rigel's own stdio server. Required for approvals.
+    pub mcp_config: Option<PathBuf>,
+    /// The permission tool to name, e.g. `mcp__rigel__rigel_approve`. Only used with
+    /// `mcp_config`; both or neither.
+    pub permission_prompt_tool: Option<String>,
 }
 
 impl fmt::Debug for ClaudeConfig {
@@ -85,6 +92,8 @@ impl fmt::Debug for ClaudeConfig {
             .field("timeout", &self.timeout)
             .field("env", &self.env)
             .field("vendor_login", &self.vendor_login)
+            .field("mcp_config", &self.mcp_config)
+            .field("permission_prompt_tool", &self.permission_prompt_tool)
             .finish()
     }
 }
@@ -103,7 +112,21 @@ impl ClaudeConfig {
             timeout: Duration::from_secs(180),
             env: BTreeMap::new(),
             vendor_login: default_vendor_login(),
+            mcp_config: None,
+            permission_prompt_tool: None,
         }
+    }
+
+    /// Name the permission tool Rigel answers, and the MCP config that defines it. Passing
+    /// only one of the two is a wiring mistake, so the pair is set together.
+    pub fn with_permission_tool(
+        mut self,
+        mcp_config: impl Into<PathBuf>,
+        tool: impl Into<String>,
+    ) -> Self {
+        self.mcp_config = Some(mcp_config.into());
+        self.permission_prompt_tool = Some(tool.into());
+        self
     }
 
     /// Resolve the harness credential into this process environment. Missing storage leaves the
@@ -212,6 +235,14 @@ impl ClaudeAdapter {
             .args(["--permission-mode", self.config.permission_mode.as_str()]);
         if let Some(model) = &self.config.model {
             command.args(["--model", model]);
+        }
+        // Both arguments are needed for the permission round trip: the config defines the
+        // server, the tool name says which of its tools answers a permission question.
+        if let (Some(config), Some(tool)) =
+            (&self.config.mcp_config, &self.config.permission_prompt_tool)
+        {
+            command.arg("--mcp-config").arg(config);
+            command.arg("--permission-prompt-tool").arg(tool);
         }
         command.arg(prompt);
 

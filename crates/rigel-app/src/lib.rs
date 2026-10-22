@@ -18,12 +18,14 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use rigel_core::agent::approval::{ApprovalBus, PendingApproval};
 use rigel_core::agent::{Cancels, Coordinator, DEFAULT_MAX_STEPS, fixed_context_chars};
 use rigel_core::{
-    Agent, AgentEvent, BudgetService, EventSink, InterruptSink, MemoryFile, MemoryService, Model,
-    OpenRouterModel, Patch, PatchPipeline, ResumeOutcome, Session, SessionService, SkillDetail,
-    SkillIndex, SkillsError, StopAt, Store, SubagentPolicy, SyncPolicy, Turn, TurnQuote,
-    TurnTranscript, Usage, WriteMode, credentials, skills::search::SearchHit,
+    Agent, AgentEvent, ApprovalScope, BudgetService, CommandApprover, CommandDecision,
+    CommandRequest, EventSink, InterruptSink, MemoryFile, MemoryService, Model, OpenRouterModel,
+    Patch, PatchPipeline, ResumeOutcome, Scopes, Session, SessionService, SkillDetail, SkillIndex,
+    SkillsError, StopAt, Store, SubagentPolicy, SyncPolicy, Tools, Turn, TurnQuote, TurnTranscript,
+    Usage, WriteMode, credentials, skills::search::SearchHit,
 };
 use serde::{Deserialize, Serialize};
 use tauri::{Emitter, State};
@@ -499,13 +501,21 @@ fn turn_send(
     let turn = tauri::async_runtime::block_on(service.append_turn(&agent, Some(&prompt)))
         .map_err(message)?;
 
-    let tools = rigel_core::Tools::new(
+    // The window is the approval surface (P4.10e): a command is published to the channel the card
+    // reads, and the turn waits for the user's scope. Nothing is allowed by default, and a card
+    // nobody answers is a refusal.
+    let tools = Tools::new(
         root.clone(),
         service.clone(),
         budget.clone(),
         index_dir(),
         StopAt::Never,
-    );
+    )
+    .with_scopes(Scopes::new(&root, index_dir()))
+    .with_command_approval(Arc::new(WindowApprover {
+        app: app.clone(),
+        bus: ApprovalBus::new(index_dir()),
+    }));
     let coordinator = Coordinator {
         session: service.clone(),
         budget,
@@ -571,6 +581,78 @@ fn turn_send(
         turn: returned,
         budget_cents: cap,
     })
+}
+
+/* -------------------------------- approvals ------------------------------- */
+
+/// Answers `run_command` from the window instead of from a terminal.
+///
+/// The question goes onto the approval channel, the card lists it, and this waits for the scope
+/// the user picked. Tools already holds the grants, so a "session" answer is checked there before
+/// this is ever called; here every question is new. End of turn, a closed window or ten minutes of
+/// silence all end as a refusal.
+struct WindowApprover {
+    app: tauri::AppHandle,
+    bus: ApprovalBus,
+}
+
+#[async_trait::async_trait]
+impl CommandApprover for WindowApprover {
+    async fn approve(&self, request: &CommandRequest) -> CommandDecision {
+        let key = format!("command:{}", request.command);
+        let pending = PendingApproval::now("command", &key, &request.command).with_detail(
+            serde_json::json!({
+                "cwd": request.cwd.display().to_string(),
+                "project_root": request.project_root.display().to_string(),
+                "timeout_secs": request.timeout_secs,
+                "destructive": request.destructive.iter().map(|finding| {
+                    serde_json::json!({ "id": finding.id, "summary": finding.summary })
+                }).collect::<Vec<_>>(),
+                "deliberation": request.deliberation.as_ref().map(|round| {
+                    serde_json::json!({
+                        "note": round.note,
+                        "positions": round.positions.iter().map(|position| {
+                            serde_json::json!({ "stance": position.stance, "text": position.text })
+                        }).collect::<Vec<_>>(),
+                    })
+                }),
+            }),
+        );
+        // Nudge the card immediately; it also polls, so a missed event is not a lost question.
+        let _ = self.app.emit("rigel://approval", &pending);
+        match self
+            .bus
+            .ask(pending, std::time::Duration::from_secs(600))
+            .await
+        {
+            Ok(scope) => CommandDecision::Allow(scope),
+            Err(_) => CommandDecision::Deny,
+        }
+    }
+}
+
+/// Every open question, oldest first. The card polls this after a turn starts.
+#[tauri::command]
+fn approval_pending() -> Vec<PendingApproval> {
+    ApprovalBus::new(index_dir()).pending()
+}
+
+/// Answer one question. `None` is a refusal, which is also what an unknown scope means: an
+/// unreadable answer never becomes an allow.
+#[tauri::command]
+fn approval_answer(id: String, scope: Option<String>) -> Result<(), String> {
+    let scope = match scope.as_deref() {
+        None | Some("deny") | Some("reject") => None,
+        Some(text) => match ApprovalScope::parse(text) {
+            Some(scope) => Some(scope),
+            None => {
+                return Err(format!(
+                    "`{text}` is not a scope: once, session, project, always"
+                ));
+            }
+        },
+    };
+    ApprovalBus::new(index_dir()).answer(&id, scope)
 }
 
 #[tauri::command]
@@ -1047,6 +1129,8 @@ pub fn run() {
             agent_stop,
             turn_send,
             turn_cancel,
+            approval_pending,
+            approval_answer,
             turn_estimate,
             budget_get,
             budget_set,

@@ -5,7 +5,16 @@
  * nothing here is billed, persisted or streamed. The view labels it "sample transcript".
  */
 
-import type { Agent, BudgetSnapshot, Item, Patch, Session, Turn, TurnTranscript } from "./api";
+import type {
+  Agent,
+  BudgetSnapshot,
+  Item,
+  Patch,
+  PendingApproval,
+  Session,
+  Turn,
+  TurnTranscript,
+} from "./api";
 
 const now = Date.now();
 const ago = (minutes: number) => now - minutes * 60_000;
@@ -318,5 +327,23 @@ export const previewPatches: Patch[] = [
     created_at: ago(5),
     applied_at: ago(5),
     reverted_at: null,
+  },
+];
+
+/** A sample question for the approval card; the browser preview answers it locally. */
+export const previewApprovals: PendingApproval[] = [
+  {
+    id: "preview-1",
+    key: "command:cargo test --workspace",
+    kind: "command",
+    title: "cargo test --workspace",
+    detail: {
+      cwd: "/work/rigel",
+      project_root: "/work/rigel",
+      timeout_secs: 120,
+      destructive: [],
+      deliberation: null,
+    },
+    requested_at: Date.now(),
   },
 ];

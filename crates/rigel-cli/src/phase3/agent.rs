@@ -3,10 +3,10 @@ use std::process::ExitCode;
 use std::sync::Arc;
 
 use rigel_core::{
-    AgentEvent, BudgetService, Cancels, CommandApprover, CommandDecision, CommandRequest,
-    Coordinator, Deliberator, EventSink, Model, ModelDeliberator, NoDeliberation, OpenRouterModel,
-    OriginApprover, OriginDecision, OriginRequest, ScriptedModel, SessionService, StopAt,
-    StopReason, SubagentPolicy, Tools, credentials,
+    AgentEvent, ApprovalScope, BudgetService, Cancels, CommandApprover, CommandDecision,
+    CommandRequest, Coordinator, Deliberator, EventSink, Model, ModelDeliberator, NoDeliberation,
+    OpenRouterModel, OriginApprover, OriginDecision, OriginRequest, ScriptedModel, SessionService,
+    StopAt, StopReason, SubagentPolicy, Tools, credentials,
 };
 use serde_json::json;
 
@@ -168,10 +168,10 @@ fn tool_result(body: &serde_json::Value) -> &serde_json::Value {
 
 /// Answers the two tools that leave the patch journal: `run_command` and `fetch_url`.
 ///
-/// A command's exact text, directory and timeout are printed first, and only an explicit `a`,
-/// `y` or `yes` lets it run. A fetch prints the URL and its origin, and asks for a scope: once,
-/// this session, or always (persisted under the index dir). End of input, an unreadable line or
-/// anything else denies — the same rule the ACP prompt follows.
+/// A command's exact text, directory and timeout are printed first, and only an explicit `o`,
+/// `y` or `yes` lets it run. Both questions ask for a scope — once, session, project or always
+/// (N2) — and the answer is returned with the decision so the tool set can remember it. End of
+/// input, an unreadable line or anything else denies, the same rule the ACP prompt follows.
 struct CliApprover {
     mode: acp::ApprovalChoice,
 }
@@ -180,7 +180,8 @@ struct CliApprover {
 impl CommandApprover for CliApprover {
     async fn approve(&self, request: &CommandRequest) -> CommandDecision {
         match self.mode {
-            acp::ApprovalChoice::Allow => CommandDecision::AllowOnce,
+            // A pre-answered run is still one run: `--approve yes` must not leave a grant behind.
+            acp::ApprovalChoice::Allow => CommandDecision::ALLOW_ONCE,
             acp::ApprovalChoice::Deny => CommandDecision::Deny,
             acp::ApprovalChoice::Ask => ask_command(request).await,
         }
@@ -250,7 +251,7 @@ fn format_command(request: &CommandRequest) -> String {
         None => String::new(),
     };
     format!(
-        "\nThe agent wants to run a command:\n  {}\n  cwd: {} (inside {})\n  timeout: {}s{}{}\n  [a]llow once  [r]eject  (anything else rejects):",
+        "\nThe agent wants to run a command:\n  {}\n  cwd: {} (inside {})\n  timeout: {}s{}{}\n  [o]nce  [s]ession  [p]roject  [a]lways  [r]eject  (anything else rejects):",
         request.command,
         acp::plain_path(request.cwd.clone()).display(),
         acp::plain_path(request.project_root.clone()).display(),
@@ -260,11 +261,24 @@ fn format_command(request: &CommandRequest) -> String {
     )
 }
 
-/// One line to one decision. Only an explicit yes allows.
+/// The scope letters every Rigel prompt accepts. Shared with the harness approver so a user
+/// learns one alphabet, not one per surface.
+pub(crate) fn parse_scope_answer(line: &str) -> Option<ApprovalScope> {
+    Some(match line.trim().to_ascii_lowercase().as_str() {
+        "o" | "y" | "yes" | "once" => ApprovalScope::Once,
+        "s" | "session" => ApprovalScope::Session,
+        "p" | "project" => ApprovalScope::Project,
+        "a" | "always" => ApprovalScope::Always,
+        _ => return None,
+    })
+}
+
+/// One line to one decision. Only an explicit yes allows, and it allows for exactly as long as
+/// the letter says.
 fn parse_command_answer(line: &str) -> CommandDecision {
-    match line.trim() {
-        "a" | "y" | "yes" => CommandDecision::AllowOnce,
-        _ => CommandDecision::Deny,
+    match parse_scope_answer(line) {
+        Some(scope) => CommandDecision::Allow(scope),
+        None => CommandDecision::Deny,
     }
 }
 
@@ -850,7 +864,7 @@ mod tests {
     use super::{
         CommandDecision, format_command, format_origin, parse_command_answer, parse_origin_answer,
     };
-    use rigel_core::{CommandRequest, OriginDecision, OriginRequest};
+    use rigel_core::{ApprovalScope, CommandRequest, OriginDecision, OriginRequest};
     use std::path::PathBuf;
 
     fn request() -> CommandRequest {
@@ -887,13 +901,28 @@ mod tests {
     }
 
     #[test]
-    fn only_an_explicit_yes_allows_once() {
-        for yes in ["a", "y", "yes", "  a  \n"] {
-            assert_eq!(parse_command_answer(yes), CommandDecision::AllowOnce);
-        }
-        // `A` is the ACP prompt's "always allow"; this prompt has no such scope, so it is a
-        // rejection rather than a silent upgrade.
-        for no in ["", "n", "no", "A\n", "allow\n", "always", "r", "\n"] {
+    fn an_explicit_answer_allows_for_exactly_the_scope_it_names() {
+        assert_eq!(
+            parse_command_answer("y"),
+            CommandDecision::Allow(ApprovalScope::Once)
+        );
+        assert_eq!(
+            parse_command_answer("  o  \n"),
+            CommandDecision::Allow(ApprovalScope::Once)
+        );
+        assert_eq!(
+            parse_command_answer("s"),
+            CommandDecision::Allow(ApprovalScope::Session)
+        );
+        assert_eq!(
+            parse_command_answer("project"),
+            CommandDecision::Allow(ApprovalScope::Project)
+        );
+        assert_eq!(
+            parse_command_answer("A"),
+            CommandDecision::Allow(ApprovalScope::Always)
+        );
+        for no in ["", "n", "no", "allow", "r", "\n", "yes please"] {
             assert_eq!(parse_command_answer(no), CommandDecision::Deny);
         }
     }

@@ -17,6 +17,7 @@ path = "src/main.rs"
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
+async-trait = { workspace = true }
 rigel-adapters = { path = "../rigel-adapters" }
 rigel-core = { path = "../rigel-core" }
 reqwest = { workspace = true }

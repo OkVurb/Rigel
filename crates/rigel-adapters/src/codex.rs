@@ -19,6 +19,7 @@ use std::collections::BTreeMap;
 use std::fmt;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
+use std::sync::Arc;
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
@@ -32,8 +33,8 @@ use rigel_core::credentials::{CredentialStore, Secret, get_from};
 
 use crate::normalise::{self, NormalItem};
 use crate::{
-    Adapter, AdapterError, ApprovalPolicy, AuthMode, Harness, HarnessInfo, SandboxMode,
-    credential_spec,
+    Adapter, AdapterError, ApprovalDecision, ApprovalOption, ApprovalPolicy, ApprovalRequest,
+    Approver, AuthMode, DenyAll, Harness, HarnessInfo, SandboxMode, credential_spec,
 };
 
 /// The model Rigel defaults to. The `-medium` suffix is OmniRoute's effort convention (Q74).
@@ -140,7 +141,7 @@ impl CodexConfig {
 
 /// Normalised progress from one Codex turn. The item pipeline maps these onto `ItemKind`;
 /// nothing here knows about sessions or the database.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum CodexEvent {
     Started {
         thread_id: String,
@@ -159,6 +160,12 @@ pub enum CodexEvent {
     /// A tool call, file change, plan or other item already sorted into one of the ten kinds
     /// (§5.2, P4.8).
     Item(NormalItem),
+    /// Codex paused on an approval and Rigel answered. Recorded after the fact so the
+    /// transcript shows what was asked and what the user said (N2).
+    Approval {
+        request: ApprovalRequest,
+        decision: ApprovalDecision,
+    },
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -184,14 +191,28 @@ pub struct TurnResult {
     pub fell_back: bool,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct CodexAdapter {
     config: CodexConfig,
+    /// Who answers `item/commandExecution/requestApproval` and its file-change twin. The
+    /// default refuses, which is the right answer when nothing is watching the screen.
+    approver: Arc<dyn Approver>,
 }
 
 impl CodexAdapter {
     pub fn new(config: CodexConfig) -> Self {
-        Self { config }
+        Self {
+            config,
+            approver: Arc::new(DenyAll),
+        }
+    }
+
+    /// Install the surface that answers Codex's approval requests. Codex only understands
+    /// accept / accept-for-session / decline, so a project or always grant is remembered by
+    /// Rigel's store and replayed as `accept` for each new request.
+    pub fn with_approver(mut self, approver: Arc<dyn Approver>) -> Self {
+        self.approver = approver;
+        self
     }
 
     pub fn config(&self) -> &CodexConfig {
@@ -357,6 +378,39 @@ impl CodexAdapter {
                 let _ = child.kill().await;
                 let _ = child.wait().await;
                 return Err(Failure::RequiresApiKey);
+            }
+
+            // A request from the server carries both an `id` and a `method`. It must be answered
+            // in place: treating it as a response to one of our ids would re-send a request and
+            // leave Codex waiting forever.
+            if message.get("method").is_some() {
+                let method = message
+                    .get("method")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default();
+                if let Some(request) = approval_of(method, &message["params"]) {
+                    let decision = self.approver.approve(&request).await;
+                    respond(
+                        &mut stdin,
+                        message.get("id").cloned().unwrap_or(Value::Null),
+                        json!({ "decision": codex_decision(decision) }),
+                    )
+                    .await?;
+                    on_event(CodexEvent::Approval { request, decision });
+                    continue;
+                }
+                // Any other server request is answered with an error rather than silence, so
+                // the harness does not hang on a feature this adapter does not implement.
+                if message.get("id").is_some() {
+                    respond_error(
+                        &mut stdin,
+                        message.get("id").cloned().unwrap_or(Value::Null),
+                        -32601,
+                        &format!("{method} is not implemented by rigel"),
+                    )
+                    .await?;
+                    continue;
+                }
             }
 
             if let Some(id) = message.get("id").and_then(Value::as_u64) {
@@ -640,6 +694,18 @@ fn redact_event(event: CodexEvent, secrets: &[Secret]) -> CodexEvent {
             item.kind,
             crate::redact_json(&item.body, secrets),
         )),
+        CodexEvent::Approval { request, decision } => CodexEvent::Approval {
+            request: ApprovalRequest {
+                tool_call_id: request.tool_call_id,
+                title: redact_text(&request.title, secrets),
+                kind: request.kind,
+                raw_input: request
+                    .raw_input
+                    .map(|input| crate::redact_json(&input, secrets)),
+                options: request.options,
+            },
+            decision,
+        },
     }
 }
 
@@ -652,8 +718,24 @@ fn is_subscription_notification(message: &Value) -> bool {
         )
 }
 
-async fn send(stdin: &mut ChildStdin, id: u64, method: &str, params: Value) -> Result<(), Failure> {
-    let line = json!({ "jsonrpc": "2.0", "id": id, "method": method, "params": params });
+/// Answer a server-initiated request. The id is echoed as it arrived: app-server ids are
+/// integers today, but a string id must not be re-typed as a number.
+async fn respond(stdin: &mut ChildStdin, id: Value, result: Value) -> Result<(), Failure> {
+    let line = json!({ "jsonrpc": "2.0", "id": id, "result": result });
+    write_line(stdin, &line).await
+}
+
+async fn respond_error(
+    stdin: &mut ChildStdin,
+    id: Value,
+    code: i64,
+    message: &str,
+) -> Result<(), Failure> {
+    let line = json!({ "jsonrpc": "2.0", "id": id, "error": { "code": code, "message": message } });
+    write_line(stdin, &line).await
+}
+
+async fn write_line(stdin: &mut ChildStdin, line: &Value) -> Result<(), Failure> {
     stdin
         .write_all(format!("{line}\n").as_bytes())
         .await
@@ -662,6 +744,80 @@ async fn send(stdin: &mut ChildStdin, id: u64, method: &str, params: Value) -> R
         .flush()
         .await
         .map_err(|error| Failure::BeforeTurn(format!("could not flush to codex: {error}")))
+}
+
+async fn send(stdin: &mut ChildStdin, id: u64, method: &str, params: Value) -> Result<(), Failure> {
+    let line = json!({ "jsonrpc": "2.0", "id": id, "method": method, "params": params });
+    write_line(stdin, &line).await
+}
+
+/// Codex's four approval methods, as one request shape. The command is the title because it is
+/// what the user has to read; `reason` stands in when a harness version omits the text.
+fn approval_of(method: &str, params: &Value) -> Option<ApprovalRequest> {
+    let kind = match method {
+        "item/commandExecution/requestApproval" | "execCommandApproval" => "command",
+        "item/fileChange/requestApproval" | "applyPatchApproval" => "file_change",
+        _ => return None,
+    };
+    let reason = params
+        .get("reason")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let command = params.get("command").map(|command| match command {
+        Value::Array(parts) => parts
+            .iter()
+            .filter_map(Value::as_str)
+            .collect::<Vec<_>>()
+            .join(" "),
+        Value::String(text) => text.clone(),
+        other => other.to_string(),
+    });
+    let title = match command.as_deref() {
+        Some(text) if !text.trim().is_empty() => text.to_string(),
+        _ if !reason.trim().is_empty() => reason.to_string(),
+        _ if kind == "file_change" => "apply a file change".to_string(),
+        _ => "run a command".to_string(),
+    };
+    let tool_call_id = params
+        .get("itemId")
+        .or_else(|| params.get("callId"))
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_string();
+    Some(ApprovalRequest {
+        tool_call_id,
+        title,
+        kind: Some(kind.to_string()),
+        raw_input: Some(params.clone()),
+        // Exactly what Codex can express. A project or always grant is Rigel's own scope and is
+        // replayed here as `accept`, never silently widened to the harness's session grant.
+        options: vec![
+            ApprovalOption {
+                option_id: "accept".to_string(),
+                name: "Allow once".to_string(),
+                kind: "allow_once".to_string(),
+            },
+            ApprovalOption {
+                option_id: "acceptForSession".to_string(),
+                name: "Allow for this Codex session".to_string(),
+                kind: "allow_always".to_string(),
+            },
+            ApprovalOption {
+                option_id: "decline".to_string(),
+                name: "Reject".to_string(),
+                kind: "reject_once".to_string(),
+            },
+        ],
+    })
+}
+
+fn codex_decision(decision: ApprovalDecision) -> &'static str {
+    match decision {
+        ApprovalDecision::AllowOnce => "accept",
+        ApprovalDecision::AllowAlways => "acceptForSession",
+        ApprovalDecision::RejectOnce | ApprovalDecision::RejectAlways => "decline",
+        ApprovalDecision::Cancel => "cancel",
+    }
 }
 
 async fn next_line(

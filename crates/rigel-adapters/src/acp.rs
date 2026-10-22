@@ -971,17 +971,25 @@ fn approval_from(params: &Value, secrets: &[Secret]) -> ApprovalRequest {
     }
 }
 
-/// Map a decision onto the options the agent actually offered. If the exact kind is missing the
-/// request is cancelled: an approval is never widened to a broader scope than the user chose, and
-/// narrowing an allow to a once-only yes is not the caller's decision to make.
+/// Map a decision onto the options the agent actually offered (P4.10d).
+///
+/// A permission is never widened: if the user chose "once" and only "always" is offered, the
+/// request is cancelled. It may be narrowed — an "always" the agent cannot express becomes its
+/// "once", and Rigel remembers the grant itself, so the next ask is answered from the store.
 fn outcome_for(options: &[ApprovalOption], decision: ApprovalDecision) -> Value {
     if decision == ApprovalDecision::Cancel {
         return json!({ "outcome": "cancelled" });
     }
     let wanted = decision.wants();
+    let fallback = match wanted {
+        "allow_always" => Some("allow_once"),
+        "reject_always" => Some("reject_once"),
+        _ => None,
+    };
     let found = options
         .iter()
         .find(|option| option.kind == wanted)
+        .or_else(|| fallback.and_then(|kind| options.iter().find(|option| option.kind == kind)))
         .map(|option| option.option_id.clone());
     match found {
         Some(option_id) => json!({ "outcome": "selected", "optionId": option_id }),
@@ -1023,6 +1031,45 @@ mod tests {
         assert_eq!(
             outcome_for(&options, ApprovalDecision::Cancel),
             json!({ "outcome": "cancelled" })
+        );
+    }
+
+    #[test]
+    fn a_scope_the_agent_cannot_express_is_narrowed_but_never_widened() {
+        let once_only = vec![ApprovalOption {
+            option_id: "a".into(),
+            name: "Allow once".into(),
+            kind: "allow_once".into(),
+        }];
+        // "Always" becomes the agent's once, and Rigel remembers the grant itself.
+        assert_eq!(
+            outcome_for(&once_only, ApprovalDecision::AllowAlways),
+            json!({ "outcome": "selected", "optionId": "a" })
+        );
+        assert_eq!(
+            outcome_for(&once_only, ApprovalDecision::AllowOnce),
+            json!({ "outcome": "selected", "optionId": "a" })
+        );
+
+        let always_only = vec![ApprovalOption {
+            option_id: "b".into(),
+            name: "Always".into(),
+            kind: "allow_always".into(),
+        }];
+        // The reverse would widen a one-off yes into a standing grant, so it cancels.
+        assert_eq!(
+            outcome_for(&always_only, ApprovalDecision::AllowOnce),
+            json!({ "outcome": "cancelled" })
+        );
+
+        let reject_always = vec![ApprovalOption {
+            option_id: "r".into(),
+            name: "Never".into(),
+            kind: "reject_once".into(),
+        }];
+        assert_eq!(
+            outcome_for(&reject_always, ApprovalDecision::RejectAlways),
+            json!({ "outcome": "selected", "optionId": "r" })
         );
     }
 

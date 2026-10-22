@@ -8,11 +8,18 @@ use std::io::Write;
 use std::path::PathBuf;
 use std::process::ExitCode;
 
+use async_trait::async_trait;
 use clap::Subcommand;
 use rigel_adapters::registry::{self, CACHE_FILE};
-use rigel_adapters::{Adapter, AdapterError, CodexAdapter, CodexConfig, CodexEvent, Transport};
+use rigel_adapters::{
+    Adapter, AdapterError, ApprovalDecision, ApprovalRequest, Approver, CodexAdapter, CodexConfig,
+    CodexEvent, Transport,
+};
 use rigel_core::credentials::KeychainCredentialStore;
+use rigel_core::{ApprovalScope, Scopes};
 use serde_json::json;
+
+use crate::phase3::parse_scope_answer;
 
 #[derive(Subcommand)]
 pub enum CodexCommand {
@@ -246,11 +253,16 @@ async fn run(options: RunOptions) -> ExitCode {
     }
 
     let credential_provider = config.credential_provider().to_string();
+    let project = config.cwd.clone();
     config.inject_credential(&KeychainCredentialStore);
 
-    let adapter = CodexAdapter::new(config);
+    // Codex asks before it writes; the same four scopes as the native agent answer here (N2).
+    let adapter = CodexAdapter::new(config).with_approver(std::sync::Arc::new(HarnessApprover {
+        scopes: Scopes::new(&project, rigel_core::default_index_dir()),
+    }));
     let mut notices = Vec::new();
     let mut items = Vec::new();
+    let mut approvals = Vec::new();
     let mut streamed = false;
 
     let outcome = adapter
@@ -270,6 +282,22 @@ async fn run(options: RunOptions) -> ExitCode {
             // P4.8: every normalised item is reported, so `rigel codex run --json` shows the
             // commands and file changes a turn actually made.
             CodexEvent::Item(item) => items.push(item),
+            CodexEvent::Approval { request, decision } => {
+                if !as_json {
+                    println!(
+                        "  approval  {} ({}) -> {}",
+                        request.title,
+                        request.kind.as_deref().unwrap_or("tool"),
+                        decision_name(decision)
+                    );
+                }
+                approvals.push(json!({
+                    "id": request.tool_call_id,
+                    "title": request.title,
+                    "kind": request.kind,
+                    "decision": decision_name(decision),
+                }));
+            }
             CodexEvent::Started { .. } | CodexEvent::Message { .. } => {}
         })
         .await;
@@ -292,6 +320,7 @@ async fn run(options: RunOptions) -> ExitCode {
                         "usage": result.usage,
                         "duration_ms": result.duration.as_millis() as u64,
                         "notices": notices,
+                        "approvals": approvals,
                         "items": items.iter().map(|item| json!({
                             "kind": item.kind.as_str(),
                             "body": item.body,
@@ -348,5 +377,97 @@ async fn run(options: RunOptions) -> ExitCode {
             }
             ExitCode::from(2)
         }
+    }
+}
+
+fn decision_name(decision: ApprovalDecision) -> &'static str {
+    match decision {
+        ApprovalDecision::AllowOnce => "allow_once",
+        ApprovalDecision::AllowAlways => "allow_session",
+        ApprovalDecision::RejectOnce => "reject_once",
+        ApprovalDecision::RejectAlways => "reject_always",
+        ApprovalDecision::Cancel => "cancelled",
+    }
+}
+
+/// Answers a harness's own approval request with one of Rigel's four scopes.
+///
+/// Codex can only express "once" and "for this session", so a project or always grant is kept
+/// in Rigel's store and replayed as `acceptForSession`: the next request for the same text is
+/// answered without a prompt, and the harness is never told a scope it does not have.
+struct HarnessApprover {
+    scopes: Scopes,
+}
+
+impl HarnessApprover {
+    /// The key is the kind plus the exact text the user read, so approving a command never
+    /// approves a file change that happens to share its title.
+    fn key(request: &ApprovalRequest) -> String {
+        format!(
+            "{}:{}",
+            request.kind.as_deref().unwrap_or("tool"),
+            request.title
+        )
+    }
+}
+
+/// Rigel's scope as the harness's own vocabulary. Codex's session grant is the strongest answer
+/// its protocol carries, so project and always are sent as that; Rigel's store is what makes
+/// them outlive the Codex process.
+fn decision_for(scope: ApprovalScope) -> ApprovalDecision {
+    match scope {
+        ApprovalScope::Once => ApprovalDecision::AllowOnce,
+        ApprovalScope::Session | ApprovalScope::Project | ApprovalScope::Always => {
+            ApprovalDecision::AllowAlways
+        }
+    }
+}
+
+#[async_trait]
+impl Approver for HarnessApprover {
+    async fn approve(&self, request: &ApprovalRequest) -> ApprovalDecision {
+        let key = Self::key(request);
+        if let Some(scope) = self.scopes.granted(&key) {
+            return decision_for(scope);
+        }
+        let asked = request.clone();
+        let Some(scope) = tokio::task::spawn_blocking(move || ask_harness(&asked))
+            .await
+            .ok()
+            .flatten()
+        else {
+            // End of input, an unreadable line or anything else: reject. Never allow by accident.
+            return ApprovalDecision::RejectOnce;
+        };
+        if scope != ApprovalScope::Once {
+            // A store that cannot write is not permission to widen: the answer still holds for
+            // this one request.
+            let _ = self.scopes.remember(&key, scope);
+        }
+        decision_for(scope)
+    }
+}
+
+/// Print the request exactly as the harness sent it and read one answer from stdin. Anything
+/// other than an explicit scope letter is a rejection, which is the same rule the native prompt
+/// follows.
+fn ask_harness(request: &ApprovalRequest) -> Option<ApprovalScope> {
+    eprintln!(
+        "\n{} wants to {}:\n  {}{}\n  [o]nce  [s]ession  [p]roject  [a]lways  [r]eject  (anything else rejects):",
+        "the harness",
+        request.kind.as_deref().unwrap_or("do something"),
+        request.title,
+        match &request.raw_input {
+            Some(input) if !input.is_null() => format!(
+                "\n  input: {}",
+                input.to_string().chars().take(600).collect::<String>()
+            ),
+            _ => String::new(),
+        }
+    );
+    let mut line = String::new();
+    match std::io::stdin().read_line(&mut line) {
+        Ok(0) | Err(_) => None,
+        Ok(_) => parse_scope_answer(&line),
     }
 }

@@ -30,7 +30,9 @@ pub mod pricing;
 pub mod scripted;
 pub mod tools;
 
-pub use approval::{CommandApprover, CommandDecision, CommandRequest, DenyCommands};
+pub use approval::{
+    ApprovalScope, CommandApprover, CommandDecision, CommandRequest, DenyCommands, Scopes,
+};
 pub use coordinator::{
     AgentError, Cancels, Coordinator, DEFAULT_MAX_STEPS, DEFAULT_SUBAGENT_MODEL, SUBAGENT_MODELS,
     StopReason, SubagentPolicy, TurnRun, fixed_context_chars,

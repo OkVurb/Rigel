@@ -203,3 +203,73 @@ async fn a_missing_binary_is_not_installed() {
     assert!(info.version.is_none());
     assert!(info.install_hint.is_some());
 }
+
+/// Answers every approval with one fixed decision and remembers what it was asked.
+struct RecordingApprover {
+    decision: rigel_adapters::ApprovalDecision,
+    seen: std::sync::Mutex<Vec<rigel_adapters::ApprovalRequest>>,
+}
+
+#[async_trait::async_trait]
+impl rigel_adapters::Approver for RecordingApprover {
+    async fn approve(
+        &self,
+        request: &rigel_adapters::ApprovalRequest,
+    ) -> rigel_adapters::ApprovalDecision {
+        self.seen.lock().unwrap().push(request.clone());
+        self.decision
+    }
+}
+
+#[tokio::test]
+async fn an_app_server_approval_request_is_answered_in_place() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("APPROVAL_COMMAND"), "rm -rf build").unwrap();
+    let approver = std::sync::Arc::new(RecordingApprover {
+        decision: rigel_adapters::ApprovalDecision::AllowAlways,
+        seen: std::sync::Mutex::new(Vec::new()),
+    });
+    let adapter =
+        CodexAdapter::new(config(dir.path(), Transport::AppServer)).with_approver(approver.clone());
+
+    let mut approvals = Vec::new();
+    let result = adapter
+        .run_turn("clean the build", |event| {
+            if let CodexEvent::Approval { request, decision } = event {
+                approvals.push((request.title, decision));
+            }
+        })
+        .await
+        .expect("the turn finishes after the approval");
+
+    // The question carried the exact command, as an array joined into one line.
+    let seen = approver.seen.lock().unwrap();
+    assert_eq!(seen.len(), 1);
+    assert_eq!(seen[0].title, "bash -lc rm -rf build");
+    assert_eq!(seen[0].kind.as_deref(), Some("command"));
+    assert_eq!(seen[0].tool_call_id, "item-9");
+    // Rigel's strongest grant is `acceptForSession`; Codex has no project or global scope.
+    assert_eq!(result.text, "decision=acceptForSession");
+    assert_eq!(
+        approvals,
+        vec![(
+            "bash -lc rm -rf build".to_string(),
+            rigel_adapters::ApprovalDecision::AllowAlways
+        )]
+    );
+}
+
+#[tokio::test]
+async fn an_unanswered_approval_never_runs_the_command() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("APPROVAL_COMMAND"), "rm -rf build").unwrap();
+    let adapter = CodexAdapter::new(config(dir.path(), Transport::AppServer));
+
+    // No approver is installed, so the default refuses rather than leaving Codex waiting.
+    let result = adapter
+        .run_turn("clean the build", |_| {})
+        .await
+        .expect("the turn still finishes");
+
+    assert_eq!(result.text, "decision=decline");
+}

@@ -8,7 +8,9 @@ import {
   type AgentEvent,
   type BudgetSnapshot,
   type Item,
+  type ApprovalAnswer,
   type Patch,
+  type PendingApproval,
   type Session,
   type Settings,
   type Turn,
@@ -17,7 +19,14 @@ import {
   type TurnTranscript,
 } from "./api";
 import { ModelControls } from "./modelpicker";
-import { previewAgents, previewBudget, previewPatches, previewSession, previewTranscript } from "./sessionMock";
+import {
+  previewAgents,
+  previewApprovals,
+  previewBudget,
+  previewPatches,
+  previewSession,
+  previewTranscript,
+} from "./sessionMock";
 
 interface Props {
   project: string;
@@ -97,6 +106,10 @@ export default function SessionView({
   const [swarmTask, setSwarmTask] = useState("");
   const [swarmTargets, setSwarmTargets] = useState<SwarmTarget[] | null>(null);
   const [swarmPicked, setSwarmPicked] = useState<string[]>([]);
+  // The commands waiting on this window (P4.10e). Empty is the normal state.
+  const [approvals, setApprovals] = useState<PendingApproval[]>(() =>
+    tauri ? [] : previewApprovals.map((pending) => ({ ...pending })),
+  );
 
   const spendMicros = budget?.session_micros ?? (session ? session.spend_cents * 10_000 : 0);
   const capMicros = budget?.cap_micros ?? (session?.budget_cents ? session.budget_cents * 10_000 : null);
@@ -113,6 +126,37 @@ export default function SessionView({
   useEffect(() => {
     projectRef.current = project;
   }, [project]);
+
+  // A command can be asked for at any moment while a turn runs, so the card polls. In the
+  // browser the same call returns the sample queue, which is how this state is inspectable.
+  useEffect(() => {
+    let alive = true;
+    const tick = async () => {
+      try {
+        const open = await api.approvals.pending();
+        if (alive) setApprovals(open);
+      } catch {
+        // A window that cannot read the channel shows no card; the command stays refused.
+      }
+    };
+    void tick();
+    const timer = window.setInterval(() => void tick(), 1500);
+    return () => {
+      alive = false;
+      window.clearInterval(timer);
+    };
+  }, [project, session?.id]);
+
+  const answer = async (pending: PendingApproval, scope: ApprovalAnswer) => {
+    // The row disappears as soon as it is answered, whatever the answer: a question that has
+    // been decided must never look open.
+    setApprovals((open) => open.filter((row) => row.id !== pending.id));
+    try {
+      await api.approvals.answer(pending.id, scope);
+    } catch (problem) {
+      setError(problem instanceof Error ? problem.message : String(problem));
+    }
+  };
 
   /* ------------------------------ load state ------------------------------ */
 
@@ -824,6 +868,10 @@ export default function SessionView({
           </div>
         </header>
 
+        {approvals.map((pending) => (
+          <ApprovalCard key={pending.id} pending={pending} onAnswer={answer} />
+        ))}
+
         <p className="notice" role="status">
           {error
             ? error
@@ -1103,6 +1151,74 @@ export default function SessionView({
  */
 function observedOnly(agent: Agent): boolean {
   return agent.harness !== "native";
+}
+
+
+/**
+ * One command waiting on this window.
+ *
+ * The exact text is the title, because that is what a grant is keyed by: the four scope buttons
+ * are the only way to answer, and "reject" is the default in spirit even though it is styled as
+ * one button among five. Destructive rows and the advisors' note are shown here, before consent.
+ */
+function ApprovalCard({
+  pending,
+  onAnswer,
+}: {
+  pending: PendingApproval;
+  onAnswer: (pending: PendingApproval, scope: ApprovalAnswer) => void;
+}) {
+  const detail = pending.detail ?? {};
+  const cwd = typeof detail.cwd === "string" ? detail.cwd : null;
+  const timeout = typeof detail.timeout_secs === "number" ? detail.timeout_secs : null;
+  const destructive = Array.isArray(detail.destructive)
+    ? (detail.destructive as { id?: string; summary?: string }[])
+    : [];
+  const deliberation =
+    detail.deliberation && typeof detail.deliberation === "object"
+      ? (detail.deliberation as { note?: string })
+      : null;
+  return (
+    <section className="approval-card" aria-label="Approval required">
+      <header>
+        <span className={`pill ${destructive.length > 0 ? "failed" : "running"}`}>{pending.kind}</span>
+        <span className="approval-title mono">{pending.title}</span>
+        <span className="grow" />
+        <span className="approval-wait">waiting for you</span>
+      </header>
+      <p className="approval-meta mono">
+        {cwd ? `cwd ${cwd}` : null}
+        {timeout ? ` · ${timeout}s` : null}
+      </p>
+      {destructive.length > 0 ? (
+        <ul className="approval-rows">
+          {destructive.map((row, index) => (
+            <li key={`${row.id ?? "row"}-${index}`}>
+              <span className="pill danger">{row.id ?? "policy"}</span> {row.summary ?? ""}
+            </li>
+          ))}
+        </ul>
+      ) : null}
+      {deliberation?.note ? <p className="approval-note">{deliberation.note}</p> : null}
+      <div className="approval-actions">
+        <button className="chip" onClick={() => onAnswer(pending, "once")}>
+          Allow once
+        </button>
+        <button className="chip" onClick={() => onAnswer(pending, "session")}>
+          This session
+        </button>
+        <button className="chip" onClick={() => onAnswer(pending, "project")}>
+          This project
+        </button>
+        <button className="chip" onClick={() => onAnswer(pending, "always")}>
+          Always
+        </button>
+        <button className="chip danger" onClick={() => onAnswer(pending, "deny")}>
+          Reject
+        </button>
+      </div>
+    </section>
+  );
 }
 
 /** One turn as it appears in a transcript pane. Both panes of a comparison use it. */

@@ -9,6 +9,8 @@
  * drift out of sync, and the same JSON the CLI prints under `--json`.
  */
 
+import { previewApprovals } from "./sessionMock";
+
 export interface Session {
   id: string;
   project_root: string;
@@ -435,8 +437,26 @@ export interface SkillSource {
   indexRepo?(repo: string): Promise<IngestReport>;
 }
 
+
+/** One question waiting for a human: a command, or a harness tool call (N2). */
+export interface PendingApproval {
+  id: string;
+  /** The exact text a grant is keyed by, so a near-miss asks again. */
+  key: string;
+  kind: string;
+  title: string;
+  detail: Record<string, unknown> | null;
+  requested_at: number;
+}
+
+export type ApprovalAnswer = "once" | "session" | "project" | "always" | "deny";
+
 export const isTauri = (): boolean =>
   typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
+
+
+/** The browser preview's queue. Answering removes the row; nothing is sent anywhere. */
+let previewQueue: PendingApproval[] = previewApprovals.map((pending) => ({ ...pending }));
 
 async function call<T>(command: string, args?: Record<string, unknown>): Promise<T> {
   const { invoke } = await import("@tauri-apps/api/core");
@@ -445,6 +465,22 @@ async function call<T>(command: string, args?: Record<string, unknown>): Promise
 
 export const api = {
   isTauri,
+
+  /** The approval card: every open question, oldest first (P4.10e). */
+  approvals: {
+    async pending(): Promise<PendingApproval[]> {
+      if (!isTauri()) return previewQueue;
+      return call<PendingApproval[]>("approval_pending");
+    },
+    /** Answer one question. A refusal is `null` on the wire, never an unknown string. */
+    async answer(id: string, scope: ApprovalAnswer): Promise<void> {
+      if (!isTauri()) {
+        previewQueue = previewQueue.filter((pending) => pending.id !== id);
+        return;
+      }
+      return call<void>("approval_answer", { id, scope: scope === "deny" ? null : scope });
+    },
+  },
 
   async openProject(path: string): Promise<ProjectInfo> {
     if (!isTauri()) {
