@@ -607,6 +607,52 @@ pub async fn run_agent(dir: &Path, command: AgentCommand) -> ExitCode {
             }
         }
 
+        AgentCommand::Trust {
+            project,
+            dry_run,
+            json: as_json,
+        } => match super::trust::trust_claude(&project, dry_run) {
+            Ok(report) => {
+                if as_json {
+                    println!(
+                        "{}",
+                        serde_json::to_string(&json!({
+                            "settings": report.settings,
+                            "settings_changed": report.settings_changed,
+                            "global": report.global,
+                            "global_changed": report.global_changed,
+                            "servers": report.servers,
+                            "dry_run": report.dry_run,
+                            "notes": report.notes,
+                        }))
+                        .unwrap_or_default()
+                    );
+                } else {
+                    let state = |changed: bool| match (changed, dry_run) {
+                        (true, true) => "would write",
+                        (true, false) => "written",
+                        (false, _) => "unchanged",
+                    };
+                    println!("servers: {}", report.servers.join(", "));
+                    println!("{} ({})", report.settings, state(report.settings_changed));
+                    match &report.global {
+                        Some(path) => {
+                            println!("{path} (project entry {})", state(report.global_changed))
+                        }
+                        None => println!("~/.claude.json (not found)"),
+                    }
+                    for note in &report.notes {
+                        println!("· {note}");
+                    }
+                }
+                ExitCode::SUCCESS
+            }
+            Err(error) => {
+                eprintln!("rigel: {error}");
+                ExitCode::from(1)
+            }
+        },
+
         AgentCommand::Run {
             project,
             session,

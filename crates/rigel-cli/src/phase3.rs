@@ -11,6 +11,7 @@ mod acp;
 mod agent;
 mod ops;
 mod snapshot;
+mod trust;
 
 pub use agent::run_agent;
 pub use ops::{run_keys, run_mcp, run_memory, run_patch};
@@ -98,6 +99,21 @@ pub enum AgentCommand {
         /// The harness's own name for this worker, e.g. `claude`.
         #[arg(long, default_value = "chat")]
         role: String,
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Trust the project's `.mcp.json` servers for Claude Code's interactive session.
+    ///
+    /// `claude -p --mcp-config …` reads the config outright, but the TUI only exposes the servers
+    /// the project has trusted, so the six rigel tools show up as one. This records the decision
+    /// in `.claude/settings.local.json` and in `~/.claude.json` for this project.
+    Trust {
+        #[arg(long, value_name = "PATH", default_value = ".")]
+        project: PathBuf,
+        /// Print what would be written and change nothing.
+        #[arg(long)]
+        dry_run: bool,
         #[arg(long)]
         json: bool,
     },
