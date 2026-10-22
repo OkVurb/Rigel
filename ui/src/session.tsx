@@ -10,10 +10,12 @@ import {
   type Item,
   type Patch,
   type Session,
+  type Settings,
   type Turn,
   type TurnQuote,
   type TurnTranscript,
 } from "./api";
+import { ModelControls } from "./modelpicker";
 import { previewAgents, previewBudget, previewPatches, previewSession, previewTranscript } from "./sessionMock";
 
 interface Props {
@@ -22,6 +24,8 @@ interface Props {
   onActive: (session: Session | null) => void;
   onNotice: (notice: string) => void;
   onOpenSettings?: () => void;
+  onChooseProject?: () => void;
+  onSwarm?: (task: string) => Promise<void>;
 }
 
 const money = (micros: number | null | undefined): string =>
@@ -58,6 +62,8 @@ export default function SessionView({
   onActive,
   onNotice,
   onOpenSettings,
+  onChooseProject,
+  onSwarm,
 }: Props) {
   const tauri = isTauri();
   const [session, setSession] = useState<Session | null>(() => (tauri ? null : previewSession));
@@ -77,9 +83,13 @@ export default function SessionView({
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [starting, setStarting] = useState(false);
+  const [defaults, setDefaults] = useState<Settings | null>(null);
+  const [swarming, setSwarming] = useState(false);
 
   const spendMicros = budget?.session_micros ?? (session ? session.spend_cents * 10_000 : 0);
   const capMicros = budget?.cap_micros ?? (session?.budget_cents ? session.budget_cents * 10_000 : null);
+  const model = defaults?.model ?? "gpt-5.6-sol-medium";
+  const effort = defaults?.effort ?? "medium";
 
   const sessionRef = useRef<Session | null>(session);
   const projectRef = useRef(project);
@@ -181,6 +191,39 @@ export default function SessionView({
     // refetch the transcript on each save.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [tauri, project]);
+
+  // The saved default (D28). The picker writes through the same settings command as Settings.
+  useEffect(() => {
+    let live = true;
+    api
+      .getSettings()
+      .then((next) => live && setDefaults(next))
+      .catch(() => live && setDefaults(null));
+    return () => {
+      live = false;
+    };
+  }, []);
+
+  const applyModel = useCallback(
+    async (nextModel: string, nextEffort: string) => {
+      const base: Settings = defaults ?? {
+        theme: "dark",
+        default_budget_cents: 500,
+        unattended_default: false,
+        provider: "omniroute",
+        model: nextModel,
+        effort: nextEffort,
+      };
+      const next = { ...base, model: nextModel, effort: nextEffort };
+      setDefaults(next);
+      try {
+        setDefaults(await api.saveSettings(next));
+      } catch (problem) {
+        setError(problem instanceof Error ? problem.message : String(problem));
+      }
+    },
+    [defaults],
+  );
 
   /* ------------------------------- events -------------------------------- */
 
@@ -330,7 +373,15 @@ export default function SessionView({
     let cancelled = false;
     const timer = setTimeout(() => {
       api
-        .quoteTurn(projectRef.current, session.id, prompt, spendMicros, capMicros)
+        .quoteTurn(
+          projectRef.current,
+          session.id,
+          prompt,
+          spendMicros,
+          capMicros,
+          model,
+          effort,
+        )
         .then((next) => {
           if (!cancelled) setQuote(next);
         })
@@ -342,7 +393,7 @@ export default function SessionView({
       cancelled = true;
       clearTimeout(timer);
     };
-  }, [session, text, spendMicros, capMicros]);
+  }, [session, text, spendMicros, capMicros, model, effort]);
 
   /* ------------------------------- actions ------------------------------- */
 
@@ -436,10 +487,10 @@ export default function SessionView({
     try {
       let worker = agents[0];
       if (!worker) {
-        worker = await api.spawnAgent(project, session.id, "worker");
+        worker = await api.spawnAgent(project, session.id, "worker", model);
         setAgents([worker]);
       }
-      const reply = await api.sendTurn(project, session.id, worker.id, prompt);
+      const reply = await api.sendTurn(project, session.id, worker.id, prompt, model, effort);
       setLiveTurn(reply.turn);
       setTurns((previous) => [
         ...previous,
@@ -454,7 +505,26 @@ export default function SessionView({
     } finally {
       setBusy(false);
     }
-  }, [text, session, busy, tauri, agents, project]);
+  }, [text, session, busy, tauri, agents, project, model, effort]);
+
+  /** The swarm button hands the typed task to every available room agent. */
+  const swarm = useCallback(async () => {
+    if (!onSwarm) return;
+    const task = text.trim();
+    if (!task) {
+      onNotice("Type the swarm task in the composer first.");
+      return;
+    }
+    setSwarming(true);
+    setError(null);
+    try {
+      await onSwarm(task);
+    } catch (problem) {
+      setError(problem instanceof Error ? problem.message : String(problem));
+    } finally {
+      setSwarming(false);
+    }
+  }, [onSwarm, text, onNotice]);
 
   const cancel = useCallback(async () => {
     if (!liveTurn) return;
@@ -531,6 +601,13 @@ export default function SessionView({
         </aside>
         <main className="detail session-main">
           <p className="empty">No project open.</p>
+          {onChooseProject ? (
+            <div className="gate-actions">
+              <button className="primary" onClick={onChooseProject}>
+                Open a folder…
+              </button>
+            </div>
+          ) : null}
         </main>
         <aside className="inspector" />
       </>
@@ -616,6 +693,12 @@ export default function SessionView({
             </p>
           </div>
           <div className="session-tools">
+            <ModelControls
+              model={model}
+              effort={effort}
+              onModel={(next) => void applyModel(next, effort)}
+              onEffort={(next) => void applyModel(model, next)}
+            />
             {keyPresent === false && onOpenSettings ? (
               <button className="chip warn" onClick={onOpenSettings}>
                 Add key
@@ -764,9 +847,21 @@ export default function SessionView({
                 rows={2}
                 disabled={live}
               />
-              <button className="primary" onClick={() => void send()} disabled={live || !text.trim()}>
-                {live ? "Running…" : "Send"}
-              </button>
+              <div className="composer-actions">
+                {onSwarm ? (
+                  <button
+                    className="chip swarm"
+                    title="Send this task to every available agent in the room"
+                    onClick={() => void swarm()}
+                    disabled={live || swarming || !text.trim()}
+                  >
+                    {swarming ? "Waking…" : "Swarm"}
+                  </button>
+                ) : null}
+                <button className="primary" onClick={() => void send()} disabled={live || !text.trim()}>
+                  {live ? "Running…" : "Send"}
+                </button>
+              </div>
             </div>
             {text.trim() && quote ? (
               <p

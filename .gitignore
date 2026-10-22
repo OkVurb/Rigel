@@ -26,3 +26,10 @@ screenshots/*.tmp.png
 
 # Tauri build output
 crates/rigel-app/gen/
+vendor/
+
+# Claude Code local settings (machine-specific approvals)
+.claude/settings.local.json
+
+# Local MCP wiring for the chat agents: absolute paths and per-machine agent ids
+.mcp.json

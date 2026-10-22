@@ -14,6 +14,7 @@ import {
   type SkillSource,
   type SourceStatus,
 } from "./api";
+import ChatView from "./agentchat";
 import { RigelMark } from "./mark";
 import { PreviewSkillSource } from "./mock";
 import SessionView from "./session";
@@ -22,21 +23,25 @@ import SettingsView from "./settings";
 const ICONS = {
   shelf: "M10 2.5 17 6.5v7l-7 4-7-4v-7l7-4ZM3 6.5l7 4 7-4M10 10.5v7",
   session: "M3 4.5h14M3 9.5h14M3 14.5h9",
+  chat: "M6 3.5h8a2.5 2.5 0 0 1 2.5 2.5v5a2.5 2.5 0 0 1-2.5 2.5H9.5L6 16.5v-3H6a2.5 2.5 0 0 1-2.5-2.5V6A2.5 2.5 0 0 1 6 3.5ZM6.5 8.5h.01M10 8.5h.01M13.5 8.5h.01",
   diff: "M6 3v14M14 3v14M3 7h6M11 13h6",
   settings:
     "M10 12.5a2.5 2.5 0 1 0 0-5 2.5 2.5 0 0 0 0 5ZM10 2.5v2M10 15.5v2M2.5 10h2M15.5 10h2",
 } as const;
 
-type View = "shelf" | "session" | "diff" | "settings";
+type View = "shelf" | "session" | "chat" | "diff" | "settings";
 
 const VIEWS: { id: View; label: string; d: string; phase: string }[] = [
   { id: "shelf", label: "Shelf", d: ICONS.shelf, phase: "P2" },
   { id: "session", label: "Session", d: ICONS.session, phase: "P3" },
+  { id: "chat", label: "Chat", d: ICONS.chat, phase: "P6" },
   { id: "diff", label: "Diff", d: ICONS.diff, phase: "P5" },
   { id: "settings", label: "Settings", d: ICONS.settings, phase: "P3" },
 ];
 
-const LIMIT = 100;
+/** Rows fetched per page. The index has ~10k skills; the list pages as it scrolls. */
+const PAGE = 250;
+const LAST_PROJECT = "rigel.lastProject";
 
 export default function App() {
   const source: SkillSource = useMemo(
@@ -59,12 +64,19 @@ export default function App() {
   );
 
   const [view, setView] = useState<View>("shelf");
-  const [projectPath, setProjectPath] = useState("");
   const [project, setProject] = useState<ProjectInfo | null>(null);
   const [sessions, setSessions] = useState<Session[]>([]);
+  const [total, setTotal] = useState<number | null>(null);
+  const [loadingMore, setLoadingMore] = useState(false);
+  const loadingMoreRef = useRef(false);
+  const [newWorkspace, setNewWorkspace] = useState(false);
+  const [newName, setNewName] = useState("");
+  const [newRoot, setNewRoot] = useState("");
+  const [newBusy, setNewBusy] = useState(false);
   const [activeSession, setActiveSession] = useState<Session | null>(null);
   const [keys, setKeys] = useState<KeyStatus | null>(null);
   const [keyPromptDismissed, setKeyPromptDismissed] = useState(false);
+  const [swarmNotice, setSwarmNotice] = useState<string | null>(null);
 
   const setActive = useCallback((next: Session | null) => setActiveSession(next), []);
   const noticeFromSession = useCallback((next: string) => setNotice(next), []);
@@ -112,12 +124,16 @@ export default function App() {
     let live = true;
     setLoading(true);
     setSlow(false);
+    loadingMoreRef.current = false;
+    setLoadingMore(false);
+    setRows([]);
+    setTotal(null);
     const slowTimer = setTimeout(() => live && setSlow(true), 400);
     const timer = setTimeout(() => {
-      source
-        .search(query, LIMIT)
-        .then((next) => {
+      Promise.all([source.count(query), source.search(query, PAGE, 0)])
+        .then(([count, next]) => {
           if (!live) return;
+          setTotal(count);
           setRows(next);
           setError(null);
           setSelectedId((current) =>
@@ -142,6 +158,23 @@ export default function App() {
       clearTimeout(slowTimer);
     };
   }, [source, query, reload]);
+
+  /** The next page, appended only if no newer query has replaced the list meanwhile. */
+  const loadMore = useCallback(async () => {
+    if (loadingMoreRef.current || loading || error || total === null || rows.length >= total) return;
+    const offset = rows.length;
+    loadingMoreRef.current = true;
+    setLoadingMore(true);
+    try {
+      const next = await source.search(query, PAGE, offset);
+      setRows((current) => (current.length === offset ? [...current, ...next] : current));
+    } catch (problem) {
+      setError(problem instanceof Error ? problem.message : String(problem));
+    } finally {
+      loadingMoreRef.current = false;
+      setLoadingMore(false);
+    }
+  }, [loading, error, total, rows.length, source, query]);
 
   useEffect(() => {
     let live = true;
@@ -185,23 +218,129 @@ export default function App() {
 
   /* ---------------------------- actions --------------------------- */
 
-  const openProject = useCallback(async () => {
-    const path = projectPath.trim();
-    if (!path) return;
+  /** Adopt an opened project: persist it, load its sessions, say where it lives. */
+  const adoptProject = useCallback(async (info: ProjectInfo) => {
+    setProject(info);
     try {
-      const info = await api.openProject(path);
-      setProject(info);
-      const listed = await api.listSessions(path);
-      setSessions(listed);
-      setNotice(
-        isTauri()
-          ? `${info.name} · ${listed.length} session${listed.length === 1 ? "" : "s"}`
-          : `${info.name} · browser preview has no database`,
-      );
+      window.localStorage.setItem(LAST_PROJECT, info.root);
+    } catch {
+      // A read-only profile should not stop the project from opening.
+    }
+    const listed = await api.listSessions(info.root);
+    setSessions(listed);
+    setNotice(
+      isTauri()
+        ? `${info.name} · ${listed.length} session${listed.length === 1 ? "" : "s"}`
+        : `${info.name} · browser preview has no database`,
+    );
+  }, []);
+
+  const openPath = useCallback(
+    async (path: string) => {
+      if (!path) return;
+      try {
+        await adoptProject(await api.openProject(path));
+      } catch (problem) {
+        setNotice(problem instanceof Error ? problem.message : String(problem));
+      }
+    },
+    [adoptProject],
+  );
+
+  // D24: restore the last project on launch instead of asking again.
+  useEffect(() => {
+    if (!isTauri()) return;
+    let remembered = "";
+    try {
+      remembered = window.localStorage.getItem(LAST_PROJECT) ?? "";
+    } catch {
+      remembered = "";
+    }
+    if (remembered) void openPath(remembered);
+  }, [openPath]);
+
+  const chooseFolder = useCallback(async () => {
+    try {
+      const picked = await api.pickProjectFolder();
+      if (picked) await openPath(picked);
     } catch (problem) {
       setNotice(problem instanceof Error ? problem.message : String(problem));
     }
-  }, [projectPath]);
+  }, [openPath]);
+
+  const beginWorkspace = useCallback(async () => {
+    setNewWorkspace(true);
+    setNewName("");
+    try {
+      setNewRoot(await api.workspaceRoot());
+    } catch {
+      setNewRoot("");
+    }
+  }, []);
+
+  const createWorkspace = useCallback(async () => {
+    const name = newName.trim();
+    if (!name || newBusy) return;
+    setNewBusy(true);
+    try {
+      const info = await api.createProject(name);
+      setNewWorkspace(false);
+      await adoptProject(info);
+    } catch (problem) {
+      setNotice(problem instanceof Error ? problem.message : String(problem));
+    } finally {
+      setNewBusy(false);
+    }
+  }, [newName, newBusy, adoptProject]);
+
+  /** Swarm: hand one task to every available agent in the project's chat room. */
+  const swarm = useCallback(
+    async (task: string) => {
+      const target = project?.root ?? (isTauri() ? "" : "/preview/rigel");
+      if (!target) {
+        setSwarmNotice("Open a project before starting a swarm.");
+        setView("chat");
+        return;
+      }
+      setSwarmNotice("Waking the room…");
+      try {
+        const status = await api.agentChat.start(target);
+        if (!status.authed) {
+          setView("chat");
+          setSwarmNotice(
+            "The room is running outside Rigel. Close that server, then restart it from the Chat tab to let a swarm in.",
+          );
+          return;
+        }
+        const roster = await api.agentChat.agents();
+        const names = Object.entries(roster)
+          .filter(([, agent]) => agent.available)
+          .map(([name]) => name);
+        if (names.length === 0) {
+          setView("chat");
+          setSwarmNotice(
+            "No agent is online in the room yet. Start an agent terminal so it joins, then press Swarm again.",
+          );
+          return;
+        }
+        const mentions = names.map((name) => `@${name}`).join(" ");
+        await api.agentChat.send(
+          "general",
+          `${mentions} — swarm task. Work on this in parallel in the current project; coordinate here so you do not duplicate or overwrite each other.\n\n${task}`,
+        );
+        setView("chat");
+        setSwarmNotice(
+          `Swarm sent to ${names.length} agent${names.length === 1 ? "" : "s"}: ${names.join(
+            ", ",
+          )}. Watch #general.`,
+        );
+      } catch (problem) {
+        setView("chat");
+        setSwarmNotice(problem instanceof Error ? problem.message : String(problem));
+      }
+    },
+    [project],
+  );
 
   const indexRepo = useCallback(async () => {
     const repo = repoInput.trim();
@@ -232,6 +371,44 @@ export default function App() {
 
   const sessionProject = project?.root ?? (isTauri() ? "" : "/preview/rigel");
 
+  const workspaceForm = newWorkspace ? (
+    <form
+      className="workspace-form"
+      onSubmit={(event) => {
+        event.preventDefault();
+        void createWorkspace();
+      }}
+    >
+      <label>
+        <span>Workspace name</span>
+        <input
+          autoFocus
+          value={newName}
+          onChange={(event) => setNewName(event.target.value)}
+          onKeyDown={(event) => {
+            if (event.key === "Escape") setNewWorkspace(false);
+          }}
+          placeholder="my-workspace"
+          aria-label="Workspace name"
+          spellCheck={false}
+        />
+      </label>
+      <p className="fine">
+        {newRoot
+          ? `Creates ${newRoot}\\${newName.trim() || "<name>"} and opens it.`
+          : "Creates a folder under your home directory and opens it."}
+      </p>
+      <div className="workspace-form-actions">
+        <button className="primary" type="submit" disabled={newBusy || !newName.trim()}>
+          {newBusy ? "Creating…" : "Create workspace"}
+        </button>
+        <button className="chip" type="button" onClick={() => setNewWorkspace(false)}>
+          Cancel
+        </button>
+      </div>
+    </form>
+  ) : null;
+
   return (
     <div
       className={`shell${view === "session" ? " session" : ""}${
@@ -250,7 +427,10 @@ export default function App() {
             title={`${item.label} — ${item.phase}`}
             aria-label={item.label}
             aria-pressed={view === item.id}
-            onClick={() => setView(item.id)}
+            onClick={() => {
+              if (item.id !== "chat") setSwarmNotice(null);
+              setView(item.id);
+            }}
           >
             <svg
               width="18"
@@ -303,6 +483,15 @@ export default function App() {
           onActive={setActive}
           onNotice={noticeFromSession}
           onOpenSettings={() => setView("settings")}
+          onChooseProject={() => void chooseFolder()}
+          onSwarm={swarm}
+        />
+      ) : view === "chat" ? (
+        <ChatView
+          project={sessionProject}
+          notice={swarmNotice}
+          onNotice={setNotice}
+          onChooseProject={() => void chooseFolder()}
         />
       ) : view === "settings" ? (
         <SettingsView keys={keys} onKeys={setKeys} onNotice={setNotice} />
@@ -312,7 +501,13 @@ export default function App() {
         <div className="list-head">
           <div className="list-title">
             <h1>{view === "shelf" ? "Shelf" : view[0].toUpperCase() + view.slice(1)}</h1>
-            <span>{view === "shelf" ? `${rows.length} shown` : "Phase 2"}</span>
+            <span>
+              {view === "shelf"
+                ? total === null
+                  ? "…"
+                  : `${total.toLocaleString()} skills`
+                : "Phase 2"}
+            </span>
           </div>
 
           {view === "shelf" ? (
@@ -345,7 +540,17 @@ export default function App() {
         ) : null}
 
         {view === "shelf" ? (
-          <div className="rows" role="listbox" aria-label="Skills">
+          <div
+            className="rows"
+            role="listbox"
+            aria-label="Skills"
+            onScroll={(event) => {
+              const pane = event.currentTarget;
+              if (pane.scrollHeight - pane.scrollTop - pane.clientHeight < 400) {
+                void loadMore();
+              }
+            }}
+          >
             {rows.map((row) => (
               <button
                 key={row.id}
@@ -400,6 +605,16 @@ export default function App() {
                       : "Nothing here yet."}
               </p>
             ) : null}
+
+            {loadingMore ? <p className="empty subtle">Loading more…</p> : null}
+            {!loading && !loadingMore && error === null && total !== null && rows.length < total ? (
+              <button className="load-more" onClick={() => void loadMore()}>
+                Load more · {rows.length.toLocaleString()} of {total.toLocaleString()}
+              </button>
+            ) : null}
+            {!loading && total !== null && total > PAGE && rows.length >= total ? (
+              <p className="empty subtle">All {total.toLocaleString()} skills shown.</p>
+            ) : null}
           </div>
         ) : (
           <p className="empty">This surface arrives later in the plan.</p>
@@ -426,21 +641,44 @@ export default function App() {
           </div>
 
           <div className="open-project">
-            <input
-              value={projectPath}
-              onChange={(event) => setProjectPath(event.target.value)}
-              onKeyDown={(event) => {
-                if (event.key === "Enter") void openProject();
-              }}
-              placeholder="C:\path\to\repo"
-              aria-label="Project path"
-              spellCheck={false}
-            />
-            <button className="primary" onClick={() => void openProject()}>
-              Open
+            {project ? (
+              <button
+                className="project-current"
+                title={`${project.root} — click to switch folders`}
+                onClick={() => void chooseFolder()}
+              >
+                <span>project</span>
+                <strong>{project.name}</strong>
+              </button>
+            ) : null}
+            <button
+              className="primary"
+              onClick={() => void chooseFolder()}
+              disabled={!isTauri()}
+              title={
+                isTauri()
+                  ? "Choose a folder with the system picker"
+                  : "The desktop app has the folder picker"
+              }
+            >
+              {project ? "Switch folder…" : "Open folder…"}
+            </button>
+            <button
+              className="chip"
+              onClick={() => void beginWorkspace()}
+              disabled={!isTauri()}
+              title={
+                isTauri()
+                  ? "Create a workspace folder under your home directory"
+                  : "Available in the desktop app"
+              }
+            >
+              New workspace
             </button>
           </div>
         </header>
+
+        {workspaceForm}
 
         <p className="notice" role="status">
           {notice}
@@ -613,6 +851,7 @@ export default function App() {
         <span className="status-model">
           rigel {isTauri() ? "desktop" : "browser"}
           {view === "session" && activeSession ? " · native" : ""}
+          {view === "chat" ? " · chat" : ""}
         </span>
         <span className="sep">·</span>
         <span className="mono">
@@ -624,7 +863,7 @@ export default function App() {
         <span>
           {view === "session" && activeSession
             ? `session ${activeSession.id.slice(0, 8)}`
-            : `${rows.length} skills`}
+            : `${(total ?? rows.length).toLocaleString()} skills`}
         </span>
         <span className="sep">·</span>
         <span>

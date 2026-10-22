@@ -4,7 +4,7 @@
 CLI carries a source URL; every decision carries an ID that later sections cite. Where this document
 and an older doc disagree, this document wins — see [§3.3 Superseded](#33-superseded).
 
-**Last reviewed:** 20 Oct 2026.
+**Last reviewed:** 21 Oct 2026 (multi-agent chat probe added, §2.8).
 
 ---
 
@@ -163,6 +163,61 @@ replace the localStorage notes above.
 | **P4.6** Claude adapter | `crates/rigel-adapters/src/claude.rs`, `tests/claude.rs`, `tests/fixtures/fake_claude.rs` | NDJSON stream normalised into `Started` / `Delta` / `Message` / `Notice`; per-turn usage and `total_cost_usd`; argv, cwd and stream shapes pinned by 11 tests (prompt on argv, key never on argv, `--bare` present, subscription identity killed, key redacted out of every event, blocked turn surfaced, silent non-zero exit refused, a truncated stream without a `result` line rejected, an init line with no `apiKeySource` refused). Probe reports 2.1.251 against the real CLI |
 | **P4.3** ACP client | `crates/rigel-adapters/src/acp.rs`, `tests/acp.rs`, `tests/fixtures/fake_acp.rs` | JSON-RPC v1 client for `agent acp` / `cline --acp`; initialize → session/new → session/prompt; `session/update` normalised into message, thought, tool-call, plan, usage, notice and `unmapped` events; `session/request_permission` routed to an `Approver` and answered only with an option the agent offered, otherwise `cancelled`; 9 tests against a scripted agent (approval outcome on the wire, unoffered allow downgraded, protocol 99 refused, hung turn cancelled and acknowledged, a pending approval answered `cancelled`, relative cwd refused, no key no spawn) |
 
+### 2.8 Multi-agent chat — the P6 probe, verified 21 Oct 2026
+
+The phase 5/6 question was "can several real CLI agents share one room, under Rigel's rules,
+without a new protocol?" The answer is yes, and the working prototype is a tab in this app, not a
+side experiment. The long-form record is [qa/agentchattr-integration.md](qa/agentchattr-integration.md);
+the design draft is [multi-agent-channels-draft.md](multi-agent-channels-draft.md).
+
+| Piece | Where | What it does |
+|---|---|---|
+| Chat tab | `ui/src/agentchat.tsx`, rail entry in `ui/src/App.tsx`, styles in `ui/src/shell.css` | roster pills, channels, stream, composer; boots the room from the tab; never touches the server directly |
+| Swarm button | `ui/src/session.tsx` composer → `swarm` in `ui/src/App.tsx` | hands the typed task to **every available room agent at once** as one `@mention` broadcast on `#general`, then opens Chat with the outcome; a room that is unauthed or has no online agents refuses with a visible reason instead of pretending to fan out |
+| Core front | `crates/rigel-core/src/agent/agentchat.rs` | spawns `run.py` when the room is down (the OmniRoute contract), reads the session token from its stdout into core memory, exposes `status / channels / agents / messages / send` |
+| Tauri commands | `crates/rigel-app/src/lib.rs` | `chat_status / chat_start / chat_channels / chat_agents / chat_messages / chat_send`, registered in the handler |
+| Hidden agent launch | `agentchat::start_agents` (core), `chat_start_agents` (Tauri), **Start agents** in the roster | spawns every configured harness (`config.toml` + `config.local.toml`) that is installed, with `CREATE_NO_WINDOW` — a real console with no window, so the wrapper's `WriteConsoleInput` injection still drives the TUI. Unattended flags match the auto-approve bats; API agents without `api_key_env` are skipped. Zero console windows verified 22 Oct |
+| External agent rows | `rigel agent register` (`crates/rigel-cli/src/phase3.rs`, `phase3/agent.rs`) | mints an `agents` row for a harness so `rigel mcp --agent` is scoped and billed like a native agent |
+| MCP server | `crates/rigel-mcp/src/lib.rs` | stdio JSON-RPC; six advertised tools (`rigel_skills_search`, `rigel_skill_load`, `rigel_patch_propose`, `rigel_budget`, `rigel_memory_read`, `rigel_memory_write`); claim tools stay unadvertised until P5 |
+
+**Verified in the running desktop app (21 Oct, late):** `cargo run -p rigel-app` in dev mode
+(no tauri-cli on this machine; vite on :5173 is the dev server) → opened the project from the
+Shelf tab → Chat tab → **Start the chat server** → `running: true, authed: true` with the token
+held only in Rust → mentioned an agent → it replied in-channel.
+
+**Swarm verified (21 Oct, late):** with `claude`, `codex` and `phi4` online, one press sent the
+task to all three; each acknowledged in `#general` and they split production code from
+tests/verification without being told which to take. A follow-up broadcast stood them down with
+no file edits.
+
+**Rigel MCP from a mention — end to end:** Codex called `rigel_skills_search` and
+`rigel_memory_write` during the mention; the artifact is on disk at
+`.rigel/memory/<codex-agent-id>/topics/mention-check.md` and its chat reply quoted the real top
+hit (`skillhub:mattpocock-skills-setup-ts-deep-modules`) and the memory sha256. Claude's server
+and config are proven (raw stdio handshake lists all six tools; `claude -p --mcp-config …`
+returned the correct hit), but the **interactive TUI session** still exposes only
+`rigel_budget` — a Claude-Code-side gating quirk, recorded with evidence in the QA doc. Treat
+per-harness MCP trust as the friction to automate, not a Rigel protocol problem.
+
+**Operational traps future agents will hit (all fixed here, none obvious):**
+
+1. `vendor/agentchattr/config.toml` **`cwd` must be `"../.."`** (repo root). With `".."` the
+   wrapper's project merge reads `vendor/.mcp.json`, so `--mcp-config` never contains the rigel
+   servers, and Codex's "project" is `vendor/` too.
+2. **Codex 0.162.1 does not read `.mcp.json`.** Its servers live in `~/.codex/config.toml`
+   (`[mcp_servers.rigel-codex]`); the vendor README's `.mcp.json` instruction is stale.
+3. **Claude Code gates project MCP servers** behind approval. `.claude/settings.local.json`
+   (`enableAllProjectMcpServers`, gitignored) plus the `enabledMcpjsonServers` project entry in
+   `~/.claude.json` make them visible to fresh sessions/`claude mcp list`; the running TUI may
+   still lag.
+4. **One rigel server per agent.** Keeping `rigel-claude`, `rigel-codex` and a user-scope `rigel`
+   registered at once produces name collisions where only one tool survives in Claude's list.
+   `.mcp.json` now carries exactly `rigel-claude`; Codex has its own entry.
+5. **A restart can leave stale CLI sessions behind.** Each wrapper launch adds one; mentions
+   then route into a dead or tool-less ghost (the symptom: "tools not exposed" or silence).
+   Kill every `claude.exe` + `wrapper.py claude` before relaunching, and let the registry
+   heartbeat expire so the canonical `@claude`/`@codex` names free up.
+
 ---
 
 ## 3. Decisions of record
@@ -172,7 +227,7 @@ replace the localStorage notes above.
 | ID | Decision | Source |
 |---|---|---|
 | D1 | The unit is a **project-level session**; the UI shows windows onto a log. **Amended by D35:** a session idle for 24 h auto-ends, and resuming starts a new session. | Q17, Q83 |
-| D2 | Memory is **per agent and portable**; it lives in the repo as text. | Q18, Q47 |
+| D2 | Memory is **per agent and portable**; it lives in the repo as text. **Amended by D43:** the artifact is one central file with per-agent sections, not one file per agent. | Q18, Q47 |
 | D3 | The index is **local-only** and machine-specific. | Q56 |
 | D4 | Uploaded files are **context only**, never project content. | Q19 |
 | D5 | File claims are **advisory**: an MCP tool agents may call, plus violation detection. No locking. | Q14→Q31→Q51 |
@@ -180,7 +235,7 @@ replace the localStorage notes above.
 | D7 | Spawned agents run in **isolated worktrees**; the main session runs in the live tree. | Q52 |
 | D8 | Writes Rigel performs are **atomic and journalled**; direct harness writes are not. | Q33 |
 | D9 | Skills are invoked as **tools**, and skill versions are **pinned per session**. | Q38, Q39 |
-| D10 | Budget caps are mandatory and stop agents automatically. | Q25 |
+| D10 | Budget caps are mandatory and stop agents automatically. **Amended by D42:** default-on with an explicit, confirmed no-cap opt-out; unattended sessions still require a cap. | Q25 |
 | D11 | Sessions must **resume** after sleep or network loss, and be replayable from messages, tool calls and diffs. | Q45, Q46 |
 | D12 | Installs auto-proceed only above tunable **trust thresholds**, and only while the user is present. | Q41, Q54 |
 | D13 | Unattended mode bans **network installs and schema migrations**. | Q55 |
@@ -212,6 +267,35 @@ replace the localStorage notes above.
 | D39 | Codex's upstream is the **router**, confirmed by probe on 21 Oct (both `exec --json` and app-server passed with `wire_api="responses"`). Rigel writes the `-c` provider overrides itself — never `omniroute run`/`launch-codex`, which is broken here — and `codex.upstream` (`router` or `openai`) is a per-agent setting with **no silent fallback**: a down upstream refuses with a fix-it message (D27). | §15.5 |
 | D40 | Agent visibility is a **roster plus one split pane**: the roster lists every agent with spend and claims, and at most two transcripts sit side by side. No grids, no tabs. | §15.5 |
 | D41 | **SQLite locking is explicit.** WAL is set **once per file** when the store opens, never as a per-connection pragma: sqlx re-applies requested pragmas on every connection, and the journal-mode pragma takes an exclusive lock that `busy_timeout` cannot wait for — so a second opener fails at connect, and the attempt can invalidate a read snapshot mid-transaction. Any transaction that **reads before it writes** opens with `BEGIN IMMEDIATE`; a write-first transaction may stay deferred. | 21 Oct, storage audit |
+| D42 | The budget cap is a **first-class per-session setting** (default $5; subagents pool under it per D34), with an explicit **"no cap" value behind a one-time confirm**. Unattended mode still refuses sessions with no cap. Enforcement within a turn is unchanged; D10 keeps its default. | grilling round 3, 21 Oct |
+| D43 | Memory is **one central `MEMORY.md` at the project root with per-agent sections**, append-mostly, **unbounded on disk** — no size cap, watermarks or rotation. The implementation keeps the redaction validator (machine paths and secrets out) and the index rebuild; only the file split changes. | grilling round 3, 21 Oct |
+| D44 | The **whole file enters every turn's context** — no tail window, no FTS retrieval, no truncation. The file can grow forever on disk, but the token bill is the pre-turn estimate's job to show. If it gets big, the user decides what happens. | grilling round 3, 21 Oct |
+| D45 | Each agent's system prompt carries the **summary header of the central file with a pointer to it shown every turn**; the agents read the file on demand via a memory-read tool. No full-file per-turn injection for harness agents. | grilling round 3, 21 Oct |
+| D46 | Spawned Codex runs against a **Rigel-pinned temp skills root**: the session's pinned skills only, never the machine-wide set (D9). Pinning happens at session start; no mid-session mutation of what Codex sees. | grilling round 3, 21 Oct |
+| D47 | The interventions-per-completed-task metric (D17) renders **always in the status bar** alongside spend (N3 figures). Not roster-only, not end-of-session-only. | grilling round 3, 21 Oct |
+| D48 | The Cline Node sidecar (S4, P4.11) is **dropped**: ACP is the only path to Cline's approval surface; a vendored SDK is not maintained for marginal capability; Cline SDK-only features are unavailable and the roster says so. | grilling round 3, 21 Oct |
+| D49 | Code signing is **deferred**. 1.0 remains the signed-MSI line (D37 unchanged); no certificate is bought before external users exist. Interim distribution: local build + documented run steps. | grilling round 3, 21 Oct |
+| D50 | **The centrepiece is confirmed**: several agents on one project, branched into isolated worktrees (D7), merged into one attributed diff, with three-way conflict UI and advisory claims — not a one-agent shell with multi-agent plumbing underneath. Phase 5 is the spine, not the tail of Phase 4. | user, "3 agents branching out like i wanted", 21 Oct |
+| D51 | The **next code session** after this one opens with **P4.7 golden fixtures** (fresh Cursor and Cline probes now exist), before any new tool, UI or safety-chain work. | grilling round 3, 21 Oct |
+| D52 | **Teammate awareness.** Every agent's system prompt opens with a roster block — teammate names, harnesses, roles, live status, and current claims (Q26). On top of that, **full transcript broadcast**: each agent's transcript streams into every other agent's context while working (Q27). The pre-turn estimate must show the input-token cost this implies (D29, P4.19). **Amended by D68:** the broadcast clause is replaced — agents get running summaries of teammates and can read a teammate's full transcript on demand. | grilling round 4, 21 Oct |
+| D53 | **Claim gate on Rigel-performed writes.** A write Rigel itself performs (patch pipeline) refuses a path a live teammate has claimed unless the acting agent acknowledges the claim first. Direct harness writes stay observed-only — D5's advisory boundary settled in collision 1. The gate never extends to writes Rigel does not perform. | grilling round 4, 21 Oct |
+| D54 | **Coordination shape: coordinator delegates.** The native agent splits work, spawns harness agents and reads their results; peers coordinate via awareness and claims. Matches the existing subagent model; peer-orchestration is a later setting, not v1. | grilling round 4, 21 Oct |
+| D55 | Spawning agents work in worktrees at `%APPDATA%\Rigel\worktrees\` (P5.5 unchanged); the main session stays in the live tree. | grilling round 4, 21 Oct |
+| D56 | Skills and commands execute in the **project's Windows shell with PATH passthrough**; WSL is **opt-in per agent** for Linux-tooling tasks. No WSL-by-default, no container isolation in v1. | grilling round 4, 21 Oct |
+| D57 | Tool hosts show as **one merged best-guess list** in the UI; underneath, `tool_status` stays per-host (P6.1 unchanged) and detail views reveal host presence — so the footgun of picking an unreachable tool has an escape hatch. | grilling round 4, 21 Oct |
+| D58 | An interactive command gets a **bounded wait, then kill and record**: the command item is marked `killed: waiting for input` and the agent is told to use a non-interactive form. No canned input, no human-attach pane in v1. | grilling round 4, 21 Oct |
+| D59 | Skills are **frozen per session** for the native agent too (D46 extends); reproducible pins, bounded by the 24 h session window (D35). | grilling round 4, 21 Oct |
+| D60 | First run seeds the shelf with a **small curated, hand-reviewed list** indexing on first launch; the empty state still offers indexing your own repos alongside it. | grilling round 4, 21 Oct |
+| D61 | Skill invocations render as **collapsed, expandable tool lines** in the transcript — consistent with the existing transcript pattern. | grilling round 4, 21 Oct |
+| D62 | Private local skills are registered **by reference**, not copied: no blobs, no clustering, and a deleted source file marks the row `broken` on the next reconcile. | grilling round 4, 21 Oct |
+| D63 | Uploads are **session-scoped and re-readable** via a tool until the session ends. Cap: **100 MB, any type** — large or binary uploads are summarized/labeled on ingest, never raw-injected into a prompt. An explicit **adopt-as-project-content** action turns an upload into a normal file from then on (D4 amended by this carve-out, Q40). | grilling round 4, 21 Oct |
+| D64 | **Merge-back: auto-merge gated by cross-agent review.** On turn completion Rigel attempts the merge automatically; before it lands, the teammates that are running read the diff and record findings on the merge item — they pick up one another's mistakes. Non-overlapping hunks land with attribution; a blocking reviewer flag **pauses** the merge for you; otherwise merge proceeds with the review record attached. Recommended held open only when review flags, or a conflict row exists. The user delegated the remaining parameters (reviewer set, blocking-class definition) to the implementer this round; revisable. | grilling round 4, 21 Oct |
+| D65 | **Public visibility is deferred to 1.0** (signed MSI line, D37). Supersedes the "open source, build in public" *timing* from [answer 59](docs/interview-answers.md); the MIT OR Apache-2.0 license is unchanged and files in the repo stay as they are. | grilling round 4, 21 Oct |
+| D66 | Worktree agents **keep running past the 24 h idle auto-end** (D35): the wall clock closes the session log, not the agent. You are notified, and the finished work lands as a pending merge in the next session — never a silent auto-finalize of half-finished work. | grilling round 4, 21 Oct |
+| D67 | Agent names are **auto-generated and editable** (`codex-1`, `claude-2`, renameable in the roster) — stable IDs for ledger attribution, friendly for the awareness block (D52). | grilling round 4, 21 Oct |
+| D68 | **Teammate awareness, final shape.** The full-broadcast clause of D52 is **overturned on re-ask in plain language** (the cost was underweighted): agents receive a live roster block plus **running status summaries** of teammates, and a full teammate transcript is **readable on demand via a tool call** — nothing hidden, but nothing shepherded into every prompt. The claim gate (D53) and coordinator shape (D54) were re-confirmed unchanged. | grilling round 5, 21 Oct |
+| D69 | **Provider coverage on this machine:** the user holds an **OpenAI** key and a **Google (Gemini) API key**, and wants a **small local model running on this PC** joining the agent team as the slow-but-cheap teammate — explicitly accepted as slower. Rigel treats the local model as a normal provider connection (via the router's local endpoint), and the roster labels it `local / slow`. Local-model turns are best suited to cheap roles (review pass, deliberation, summarising). **Setup verified 21 Oct:** Ollama connected through OmniRoute (`ollama-local`), winner of the head-to-head race is `qwen35-4b-q4-original` with `think: false` (without it the model narrates its reasoning into replies); evidence in `docs/qa/local-model.md`. | grilling round 5, 21 Oct |
+| D70 | **Remote access is a future want, not a v1 goal:** the user pictures checking on agent work from a phone or another machine someday. Nothing remote ships in v1; the architecture must not preclude it (local-first state, no assumptions that the UI and core are always on the same machine). | grilling round 5, 21 Oct |
 
 ### 3.2 Stack
 
@@ -246,6 +330,11 @@ because Rust owns it. The sidecar never touches SQLite, claims, patches or budge
 | Rust-only adapters | this doc, first draft | S3/S4: Rust by default, sidecar where an SDK is the only complete surface. |
 | "The native agent has no bash loop" (D19) | §3.1, §7.1, P3.3 | D30: a shell exists, gated per command. P3.3's registry is extended, not rewritten. |
 | "A session never cleanly ends" (D1) | §3.1, §5 | D35: 24 h idle auto-end; resume starts fresh. |
+| "Budget caps are **mandatory**" (D10) | §3.1 | Amended by D42: default-on with an explicit, confirmed no-cap opt-out; unattended mode still requires a cap. |
+| "Memory is **one file per agent**" (D2) | §3.1 | Amended by D43: one central MEMORY.md with per-agent sections; per-agent identity survives as section headers, not files. |
+| "Uploads are context only, never project content" (D4) | §3.1 | Amended by D63 (carve-out): an explicit adopt action turns an upload into a normal file; before adoption nothing changed. |
+| "Full transcript broadcast" (D52, round 4) | §3.1 | Overturned by D68 on plain-language re-ask: live summaries + on-demand reads instead; the token cost of broadcasting everyone into everyone was underweighted when the first answer was given. |
+| "Open source, build in public" (interview answer 59, *timing*) | docs/interview-answers.md | Amended by D65: the license is unchanged, but public visibility waits for the 1.0 line (D37). |
 | Claude Code as the first harness | §15 draft recommendation | D36: Codex first; Claude deferred. |
 
 ---
@@ -1101,7 +1190,7 @@ Approvals are bound to an `approval_id` issued by the harness, not to text in th
 
 ## 11. The plan
 
-**State as of 21 Oct 2026:** Phases 0–3 complete; Phase 4 in progress (5/19).
+**State as of 21 Oct 2026:** Phases 0–3 complete; Phase 4 in progress (5/18; P4.11 dropped per D48).
 Run `node scripts/handoff-status.mjs` for live counts; this table is the summary.
 
 | Phase | Scope | State | Items |
@@ -1110,7 +1199,7 @@ Run `node scripts/handoff-status.mjs` for live counts; this table is the summary
 | 1 | Rust skeleton and storage | **complete** | 10/10 |
 | 2 | The shelf, real | **complete** | 11/11 |
 | 3 | Native agent, chat and the bill | **complete** | 11/11 |
-| 4 | Harness adapters | in progress | 5/19 |
+| 4 | Harness adapters | in progress | 5/18 |
 | 5 | Claims, attribution, merged diff | not started | 0/8 |
 | 6 | Dependencies and trust | not started | 0/8 |
 | 7 | Hardening and open-source release | not started | 0/9 |
@@ -1241,7 +1330,7 @@ P4.7 fixtures and P4.8 normalisation.
 - [ ] **P4.8** Normalisation for all ten item kinds; unmappable events retained as `unmapped`
 - [ ] **P4.9** Roster UI (D40): nested subagents, `observed only` labels, per-agent spend and claims; at most two transcripts side by side, no tabs or grids
 - [ ] **P4.10** End-to-end approvals across all three protocols, with scope buttons (N2)
-- [ ] **P4.11** Sidecar decision recorded: implement it for Cline SDK-only features, or mark `dropped` with the reason
+- [ ] ~~**P4.11** Sidecar decision recorded: implement it for Cline SDK-only features, or mark `dropped` with the reason~~ **dropped:** the Node sidecar is not worth reinventing Cline's SDK quirks when ACP already reaches its approval surface; Cline SDK-only features stay unavailable and the roster labels them as such (D48, 21 Oct).
 - [ ] **P4.12** **Exit test:** Codex, Cursor and Cline each run `rigel doctor --json`; all three show a real command item and exit code; killing one leaves the others running and marks it `Interrupted`
 - [ ] **P4.13** `run_command` tool (D30): exact text and scope shown before execution (N2), cwd jailed to the project, timeout and output cap, exit code recorded as a `command` item
 - [ ] **P4.14** Egress tool (D33): `fetch_url` with approval per origin and once/session/always scopes, size and content-type caps, fetched text labelled untrusted in the transcript
@@ -1774,3 +1863,64 @@ or telemetry today.
 - **C.** MSI plus opt-in crash reports to a hosted endpoint.
 
 *Blocks:* P7, installer work, what a stranger can download this month.
+
+### 15.6 Round 3, 21 Oct 2026 — D42–D51 (second grilling session)
+
+| Q | Answer given | Decision |
+|---|---|---|
+| Session goal | Grill, then refine the plan (no code this session) | drives this section |
+| Missing harnesses | Install Cursor + Cline now | done: Cursor 2026.10.19-6bbf2c4 (`%LOCALAPPDATA%\cursor-agent`), Cline 3.0.73 (npm global); probe reports all four `installed: true`; Cursor is `subscription` auth (refuses to spawn per D21 until a real `CURSOR_API_KEY`), Cline is `auth: none`/no provider |
+| Next build | Nothing lands first after this; next code session = P4.7 golden fixtures first (fresh Cursor/Cline probes in fixtures) | D51 |
+| Codex skill injection | Rigel-owned skills only per session | D46 |
+| Budget | "No cap" instincts → opt-out with a confirm, unattended still requires a cap | D42 |
+| Memory shape | One central file, per-agent sections, keeps building, no size limit | D43, context policy in D44/D45 |
+| Deliberation models | Three cheap models (existing allowlist) argue pro/con | already D32 §15.2 wording; no change |
+| Merge conflicts | Fail-closed to a conflict row; attribution shown; never silently reconciled | already §8.2 intent; no change |
+| Cline sidecar | Dropped | D48 |
+| 1.0 signing | Deferred until real users | D49 |
+| Metric surface | Status bar always | D47 |
+| Centrepiece | "3 agents branching out like i wanted" — multi-agent concurrent work confirmed as the product's spine | D50 |
+
+**Restated, because it was fuzzy mid-session:** the main session always works in the **live tree**; **spawned agents get isolated worktrees** (D7) and merge back through the patch pipeline (P5.5). Two surfaces, one rule.
+
+### 15.7 Round 4, 21 Oct 2026 — D52–D67 (20-question round; audit closed clean)
+
+The audit question round: every line of the round-3 restatement confirmed correct as written — **no corrections**. The user's own addition this round, recorded above: **agents must know they are working alongside other agents** in a multi-agent session — settled as roster block + full transcript broadcast + the Rigel-write claim gate (D52/D53).
+
+| Q | Answer given | Decision |
+|---|---|---|
+| Q26 awareness channel | Roster block in prompt | D52 |
+| Q27 transcript sharing | Full broadcast (knowingly, costs visible in the pre-turn estimate) | D52 |
+| Q28 claim etiquette | Gate on Rigel-performed writes; harness writes observed-only | D53 |
+| Q29 coordination | Coordinator delegates | D54 |
+| Q30 worktree home | `%APPDATA%\Rigel\worktrees` | D55 |
+| Q31 execution env | Windows shell, WSL opt-in per agent | D56 |
+| Q32 tool hosts | Merged best-guess view, per-host detail underneath | D57 |
+| Q33 interactivity | Bounded wait, kill, record, tell the agent | D58 |
+| Q34 mid-session skills | Frozen per session, everywhere | D59 |
+| Q35 first-run shelf | Curated seed | D60 |
+| Q36 skill call UX | Collapsed tool line | D61 |
+| Q37 private skills | Reference, don't copy; deleted sources become `broken` | D62 |
+| Q38 upload scope | Session-scoped, re-readable | D63 |
+| Q39 upload caps | 100 MB, any type, summarized/labeled on ingest | D63 |
+| Q40 uploads & merges | Opt-in adopt-as-content | D63 |
+| Q41 phase order | Sequential as planned (4 → 5) | no change |
+| Q42 public timing | At 1.0 | D65 |
+| Q43 merge trigger | Free text: auto-merge, but deep cross-agent review so teammates pick up one another's mistakes; "i don't know" for the details → delegated | D64 |
+| Q44 agent naming | Auto-generated, editable | D67 |
+| Q45 idle mid-task | Notify, keep running | D66 |
+
+### 15.8 Round 5, 21 Oct 2026 — D68–D70 (plain-language re-ask)
+
+The user asked for the questions in plain language (no coding background). Re-asking the four picks with jargon removed changed one answer and confirmed three:
+
+| Q | Plain-language result | Decision |
+|---|---|---|
+| 1 | "Everyone hears everything" was picked under jargon; on a plain re-explanation of the cost and distraction, the user switched to **summaries + on-demand reads** | D68 |
+| 2 | Claim gate confirmed: app stops its own helpers, watches the external ones | D53 stands |
+| 3 | Cross-agent review confirmed: auto-check, pause only when flagged, permanent review record | D64 stands |
+| 4 | Money guardrail re-confirmed: cap on, turn-off allowed with warning, unattended always capped | D42 stands |
+| 5 | First real task: **work on several things in parallel** — the centrepiece (D50) restated in the user's own words | D50 stands |
+| 6 | Accounts on hand: **OpenAI + Google (Gemini)**; wants a **small local model on this PC** joining the team, slowness explicitly accepted | D69 |
+| 7 | Someday: check on agent work remotely / from a phone | D70 |
+| 8 | One combined helper-program list is fine; details show which "world" a program lives in | D57 stands |

@@ -57,6 +57,23 @@ pub struct ImportReport {
     pub invalid: usize,
 }
 
+/// One `rigel skills sweep` — both marketplace walks, their row counts, and what the
+/// meta-only duplicate pass dropped. Errors are fields, not aborts: a half-swept index
+/// is still an index.
+#[derive(Debug, Clone, Serialize)]
+pub struct SweepReport {
+    pub skillhub_pages: usize,
+    pub skillhub_rows: usize,
+    pub skillhub_error: Option<String>,
+    pub skillsmp_queries: usize,
+    pub skillsmp_pages: usize,
+    pub skillsmp_rows: usize,
+    pub skillsmp_error: Option<String>,
+    pub duplicates_dropped: i64,
+    pub skills_before: i64,
+    pub skills_after: i64,
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct VariantRow {
     pub id: String,
@@ -281,6 +298,49 @@ impl SkillIndex {
         Ok(records.len())
     }
 
+    /// Same upsert, without the per-call recluster. The sweep calls this once per page and
+    /// reclusters once at the end, so a 400-page walk does one clustering pass instead of 400.
+    pub async fn ingest_records_quiet(
+        &self,
+        records: &[SkillRecord],
+    ) -> Result<usize, SkillsError> {
+        for record in records {
+            self.write_skill(record).await?;
+            self.record_claims(record).await?;
+        }
+        Ok(records.len())
+    }
+
+    async fn skill_count(&self) -> Result<i64, SkillsError> {
+        Ok(sqlx::query_scalar("SELECT COUNT(*) FROM skills")
+            .fetch_one(self.store.pool())
+            .await?)
+    }
+
+    /// Drop duplicate metadata rows. Two rows are the same skill only when the trimmed,
+    /// case-insensitive name matches **and** the first 160 characters of the description
+    /// match, with a description specific enough (≥ 40 chars) to mean anything — a row
+    /// with a scanned body is never deleted. Clusters of near-variants that differ in
+    /// wording are left to the simhash mechanism, which needs bodies.
+    pub async fn deduplicate(&self) -> Result<i64, SkillsError> {
+        let result = sqlx::query(
+            "DELETE FROM skills WHERE body_sha IS NULL AND id IN (
+               SELECT id FROM (
+                 SELECT id, ROW_NUMBER() OVER (
+                   PARTITION BY lower(trim(name)), substr(trim(description), 1, 160)
+                   ORDER BY first_seen_at, id
+                 ) AS ranked
+                 FROM skills
+                 WHERE length(trim(description)) >= 40
+                   AND trim(description) <> 'No description in frontmatter.'
+               ) WHERE ranked > 1
+             )",
+        )
+        .execute(self.store.pool())
+        .await?;
+        Ok(result.rows_affected() as i64)
+    }
+
     pub async fn sync_marketplace(
         &self,
         which: &str,
@@ -317,6 +377,111 @@ impl SkillIndex {
                 Err(error)
             }
         }
+    }
+
+    /// Sweep the two marketplaces across many pages and turn the result into metadata rows —
+    /// what a skill costs nothing to know: name, description, stars, where to fetch it.
+    /// No body is downloaded. Both walks are independent: a failure in one leaves the other's
+    /// rows in the index and reports itself in the table.
+    pub async fn sweep(
+        &self,
+        skillhub_pages: u32,
+        skillsmp_queries: &[String],
+        skillsmp_pages: u32,
+    ) -> Result<SweepReport, SkillsError> {
+        let skills_before = self.skill_count().await?;
+
+        let mut skillhub_rows = 0;
+
+        // --- SkillHub: known pages of 100 cards, stop at the first empty page ---
+        let mut skillhub_error: Option<String> = None;
+        if skillhub_pages > 0 {
+            let source = self.skillhub().await?;
+            for page in 1..=skillhub_pages {
+                match source.browse(page, 100).await {
+                    Ok(records) => {
+                        self.ingest_records_quiet(&records).await?;
+                        skillhub_rows += records.len();
+                        if records.is_empty() {
+                            break;
+                        }
+                    }
+                    Err(error) => {
+                        skillhub_error = Some(error.to_string());
+                        break;
+                    }
+                }
+            }
+            self.set_source(
+                "skillhub",
+                "https://skills.browseract.com",
+                match skillhub_error {
+                    Some(_) => SourceState::Broken,
+                    None => SourceState::Ok,
+                },
+                skillhub_error.as_deref(),
+            )
+            .await?;
+        }
+
+        // --- SkillsMP: pages of 50 per broad query, stop at the first empty page ---
+        let mut skillsmp_rows = 0;
+        let mut skillsmp_pages_seen = 0;
+        let mut skillsmp_error: Option<String> = None;
+        let mut queries_seen = 0;
+        if skillsmp_pages > 0 {
+            let source = self.skillsmp().await?;
+            for query in skillsmp_queries {
+                let query = query.trim();
+                if query.is_empty() {
+                    continue;
+                }
+                queries_seen += 1;
+                for page in 1..=skillsmp_pages {
+                    match source.search_records_page(query, 50, page).await {
+                        Ok(records) => {
+                            self.ingest_records_quiet(&records).await?;
+                            skillsmp_rows += records.len();
+                            skillsmp_pages_seen += 1;
+                            if records.is_empty() {
+                                break;
+                            }
+                        }
+                        Err(error) => {
+                            skillsmp_error.get_or_insert_with(|| error.to_string());
+                            break;
+                        }
+                    }
+                }
+            }
+            self.set_source(
+                "skillsmp",
+                "https://skillsmp.com",
+                match skillsmp_error {
+                    Some(_) => SourceState::Broken,
+                    None => SourceState::Ok,
+                },
+                skillsmp_error.as_deref(),
+            )
+            .await?;
+        }
+
+        // One clustering pass and one duplicate pass for the whole walk.
+        self.recluster().await?;
+        let duplicates_dropped = self.deduplicate().await?;
+
+        Ok(SweepReport {
+            skillhub_pages: skillhub_pages as usize,
+            skillhub_rows,
+            skillhub_error,
+            skillsmp_queries: queries_seen,
+            skillsmp_pages: skillsmp_pages_seen,
+            skillsmp_rows,
+            skillsmp_error,
+            duplicates_dropped,
+            skills_before,
+            skills_after: self.skill_count().await?,
+        })
     }
 
     pub async fn set_source(
@@ -364,7 +529,20 @@ impl SkillIndex {
         limit: usize,
         order: SearchOrder,
     ) -> Result<Vec<SearchHit>, SkillsError> {
+        self.search_page(query, limit, 0, order).await
+    }
+
+    /// One page of the same search. The window still caps a page at 500 rows; callers that
+    /// want the whole catalogue page through it with `offset` (the Shelf does).
+    pub async fn search_page(
+        &self,
+        query: &str,
+        limit: usize,
+        offset: usize,
+        order: SearchOrder,
+    ) -> Result<Vec<SearchHit>, SkillsError> {
         let limit = limit.clamp(1, 500) as i64;
+        let offset = offset as i64;
         let order_by = order.order_by();
         let match_expr = fts_query(query);
 
@@ -380,7 +558,7 @@ impl SkillIndex {
                           ON c.cluster_id = s.cluster_id
                   WHERE skills_fts MATCH ?
                   ORDER BY {order_by}
-                  LIMIT ?"
+                  LIMIT ? OFFSET ?"
             ),
             None => format!(
                 "SELECT {COLUMNS}, {EXTRA}
@@ -389,7 +567,7 @@ impl SkillIndex {
                                WHERE cluster_id IS NOT NULL GROUP BY cluster_id) c
                           ON c.cluster_id = s.cluster_id
                   ORDER BY {order_by}
-                  LIMIT ?"
+                  LIMIT ? OFFSET ?"
             ),
         };
 
@@ -397,9 +575,36 @@ impl SkillIndex {
         if let Some(expr) = &match_expr {
             statement = statement.bind(expr);
         }
-        let rows = statement.bind(limit).fetch_all(self.store.pool()).await?;
+        let rows = statement
+            .bind(limit)
+            .bind(offset)
+            .fetch_all(self.store.pool())
+            .await?;
 
         Ok(rows.iter().map(row_to_hit).collect())
+    }
+
+    /// How many rows a search would return. `query` empty counts the whole shelf.
+    pub async fn count(&self, query: &str) -> Result<i64, SkillsError> {
+        let match_expr = fts_query(query);
+        let rows: i64 = match &match_expr {
+            Some(expr) => {
+                sqlx::query_scalar(
+                    "SELECT COUNT(*) FROM skills_fts
+                       JOIN skills s ON s.rowid = skills_fts.rowid
+                      WHERE skills_fts MATCH ?",
+                )
+                .bind(expr)
+                .fetch_one(self.store.pool())
+                .await?
+            }
+            None => {
+                sqlx::query_scalar("SELECT COUNT(*) FROM skills")
+                    .fetch_one(self.store.pool())
+                    .await?
+            }
+        };
+        Ok(rows)
     }
 
     pub async fn get(&self, id: &str) -> Result<Option<SkillDetail>, SkillsError> {

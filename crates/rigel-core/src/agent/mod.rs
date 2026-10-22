@@ -5,6 +5,7 @@
 //! | [`model`] | the `Model` trait, streamed deltas, tool-call assembly, SSE decoding |
 //! | [`openrouter`] | one real provider, retries and `Retry-After` |
 //! | [`omniroute`] | the local router, its health probe and autostart |
+//! | [`agentchat`] | the vendor chat server behind the Chat tab, its health and token |
 //! | [`scripted`] | a deterministic model for tests and the offline QA run |
 //! | [`pricing`] | the local price fallback, marked `estimated` |
 //! | [`tools`] | read/list/edit/write, skills, budget — all path-checked |
@@ -14,6 +15,7 @@
 //! normalised into the same `AgentEvent`s; the coordinator is for the agent Rigel runs
 //! itself (D19).
 
+pub mod agentchat;
 pub mod coordinator;
 pub mod model;
 pub mod omniroute;

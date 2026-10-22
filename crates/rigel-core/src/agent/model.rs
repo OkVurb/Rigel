@@ -107,6 +107,8 @@ pub struct ChatRequest {
     pub tools: Vec<ToolSpec>,
     pub max_tokens: Option<u32>,
     pub temperature: f32,
+    /// Sent as `reasoning_effort`, separate from the model id (D28).
+    pub effort: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, Default)]
