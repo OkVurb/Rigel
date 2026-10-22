@@ -213,6 +213,8 @@ export interface AgentChatStatus {
   origin: string;
   /** The checkout on this machine, when one was found. */
   dir: string | null;
+  /** Install instructions, when no checkout exists. The core owns the copy. */
+  setup: string | null;
 }
 
 /** The vendor store's message shape, narrowed to what the stream renders. */
@@ -693,7 +695,7 @@ export const api = {
   agentChat: {
     async status(project: string | null): Promise<AgentChatStatus> {
       if (!isTauri()) {
-        return { running: true, authed: true, origin: "(browser preview)", dir: null };
+        return { running: true, authed: true, origin: "(browser preview)", dir: null, setup: null };
       }
       return call<AgentChatStatus>("chat_status", { project });
     },

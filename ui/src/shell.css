@@ -1924,6 +1924,26 @@ input {
   min-height: 0;
 }
 
+/* A checkout-less room teaches the install; the copy lives in the core's `setup`. */
+.chat-setup {
+  margin: 0;
+  padding: 10px 12px;
+  border: 1px solid var(--hairline);
+  border-radius: 6px;
+  background: var(--surface);
+  color: var(--muted);
+  font-family: var(--mono, ui-monospace, monospace);
+  font-size: 12px;
+  line-height: 1.55;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.chat-setup-actions {
+  display: flex;
+  gap: 8px;
+}
+
 .chat-empty {
   display: grid;
   gap: 10px;

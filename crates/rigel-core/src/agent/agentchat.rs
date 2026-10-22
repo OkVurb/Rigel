@@ -39,6 +39,9 @@ pub struct ChatStatus {
     pub origin: String,
     /// The checkout the server would be spawned from, when it is on this machine.
     pub dir: Option<String>,
+    /// Present when there is no checkout: exactly what to install and where. The Chat tab shows
+    /// this instead of letting Start fail at spawn — a fresh clone has no `vendor/agentchattr`.
+    pub setup: Option<String>,
 }
 
 /// One harness process Rigel started for the room, and therefore can stop.
@@ -201,12 +204,35 @@ pub async fn status(project_root: Option<&str>) -> ChatStatus {
             Err(_) => false,
         };
 
+    let dir = dir_for(project_root);
     ChatStatus {
         running,
         authed,
         origin,
-        dir: dir_for(project_root).map(|path| path.display().to_string()),
+        setup: dir.is_none().then(|| setup_help(project_root)),
+        dir: dir.map(|path| path.display().to_string()),
     }
+}
+
+/// A fresh clone has no `vendor/agentchattr` (it is gitignored), so the tab teaches the install
+/// instead of failing at spawn. Kept beside `dir_for` so every path named here is one the lookup
+/// actually uses.
+fn setup_help(project_root: Option<&str>) -> String {
+    let checkout = project_root
+        .map(|root| {
+            format!(
+                "{}/vendor/agentchattr",
+                root.trim_end_matches(['/', std::path::MAIN_SEPARATOR])
+            )
+        })
+        .unwrap_or_else(|| "<project>/vendor/agentchattr".to_string());
+    format!(
+        "agentchattr is not in this project yet. Rigel fronts it and keeps its session token,          but the checkout is not tracked here (vendor/ is gitignored).
+         1. git clone https://github.com/bcurts/agentchattr \"{checkout}\"
+         2. install its Python dependencies inside that folder (its README's setup step; Rigel          runs .venv/Scripts/python when it exists)
+         3. press Start the chat server — Rigel spawns run.py with no console window
+         4. to use a checkout elsewhere, set RIGEL_AGENTCHAT_DIR; it wins over the vendor/ lookup"
+    )
 }
 
 /// Health first, launch second — the OmniRoute contract. Spawning is what earns Rigel the
@@ -913,6 +939,16 @@ label = "Phi4 (local)"
     #[test]
     fn missing_env_and_project_mean_no_dir() {
         assert_eq!(dir_for(Some("/nonexistent-skills-shelf")), None);
+    }
+
+    #[test]
+    fn the_setup_note_names_the_clone_path_and_the_env_override() {
+        let note = setup_help(Some("C:/work/demo/"));
+        assert!(note.contains("https://github.com/bcurts/agentchattr"));
+        assert!(note.contains("C:/work/demo/vendor/agentchattr"), "{note}");
+        assert!(note.contains("RIGEL_AGENTCHAT_DIR"));
+        // No project: the copy must not pretend to know where it goes.
+        assert!(setup_help(None).contains("<project>/vendor/agentchattr"));
     }
 
     #[test]

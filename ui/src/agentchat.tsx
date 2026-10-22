@@ -47,6 +47,7 @@ export default function ChatView({
 }) {
   const [status, setStatus] = useState<Status | null>(null);
   const [booting, setBooting] = useState(false);
+  const [rechecking, setRechecking] = useState(false);
   const [agents, setAgents] = useState<Record<string, AgentChatAgent>>({});
   const [processes, setProcesses] = useState<AgentChatProcess[]>([]);
   const [harnesses, setHarnesses] = useState<AgentChatHarness[]>([]);
@@ -140,6 +141,18 @@ export default function ChatView({
     }
   }, [project, onNotice]);
 
+  /** Re-ask the core whether the checkout is there now (the poll also catches it). */
+  const recheck = useCallback(async () => {
+    setRechecking(true);
+    try {
+      setStatus(await api.agentChat.status(project || null));
+    } catch (problem) {
+      onNotice(problem instanceof Error ? problem.message : String(problem));
+    } finally {
+      setRechecking(false);
+    }
+  }, [project, onNotice]);
+
   /** Launch every configured agent on a hidden console: they work, nothing opens on screen. */
   const startAgents = useCallback(async () => {
     setStarting(true);
@@ -217,22 +230,43 @@ export default function ChatView({
         <main className="detail chat-main">
           {notice ? <p className="notice" role="status">{notice}</p> : null}
           <section className="chat-empty">
-            <h3>The room is not running</h3>
-            <p>
-              Rigel starts agentchattr itself — the same way it boots OmniRoute — and holds the
-              session token so this window never sees it. The checkout is found next to the open
-              project (vendor/agentchattr) or via RIGEL_AGENTCHAT_DIR.
-            </p>
-            {isStartable(project) ? (
-              <button className="primary" onClick={() => void start()} disabled={booting}>
-                {booting ? "Booting…" : "Start the chat server"}
-              </button>
-            ) : onChooseProject ? (
-              <button className="primary" onClick={onChooseProject}>
-                Open a folder…
-              </button>
-            ) : null}
-            {status.dir ? <p className="fine">{status.dir}</p> : null}
+            <h3>{status.setup ? "agentchattr is not installed here" : "The room is not running"}</h3>
+            {status.setup ? (
+              <>
+                <p>
+                  One checkout, in this project; Rigel runs it with no console window and keeps
+                  the session token in Rust, so this window never sees it.
+                </p>
+                <pre className="chat-setup">{status.setup}</pre>
+                <div className="chat-setup-actions">
+                  <button className="primary" onClick={() => void recheck()} disabled={rechecking}>
+                    {rechecking ? "Checking…" : "Check again"}
+                  </button>
+                  {onChooseProject ? (
+                    <button className="chip" onClick={onChooseProject}>
+                      Open a folder…
+                    </button>
+                  ) : null}
+                </div>
+              </>
+            ) : (
+              <>
+                <p>
+                  Rigel starts agentchattr itself — the same way it boots OmniRoute — and holds
+                  the session token so this window never sees it.
+                </p>
+                {isStartable(project) ? (
+                  <button className="primary" onClick={() => void start()} disabled={booting}>
+                    {booting ? "Booting…" : "Start the chat server"}
+                  </button>
+                ) : onChooseProject ? (
+                  <button className="primary" onClick={onChooseProject}>
+                    Open a folder…
+                  </button>
+                ) : null}
+                {status.dir ? <p className="fine">{status.dir}</p> : null}
+              </>
+            )}
           </section>
         </main>
       </>
