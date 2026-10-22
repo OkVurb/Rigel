@@ -1,0 +1,2 @@
+{"jsonrpc":"2.0","method":"item/agentMessage/delta","params":{"threadId":"th-1","itemId":"i3","delta":"Trying."}}
+{"jsonrpc":"2.0","method":"turn/failed","params":{"turn":{"id":"tn-10","status":"failed"},"error":{"message":"model overloaded"}}}

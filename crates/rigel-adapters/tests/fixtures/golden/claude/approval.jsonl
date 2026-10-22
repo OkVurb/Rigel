@@ -1,0 +1,4 @@
+{"type":"system","subtype":"init","session_id":"cs-9c3","model":"claude-sonnet-4.5","apiKeySource":"ANTHROPIC_API_KEY"}
+{"type":"stream_event","event":{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"I need to run the tests."}}}
+{"type":"assistant","message":{"content":[{"type":"text","text":"I need to run the tests."},{"type":"tool_use","id":"toolu_02","name":"Bash","input":{"command":"cargo test","description":"Run the test suite"}}]}}
+{"type":"result","subtype":"error_during_execution","is_error":true,"result":"Claude requested permissions to use Bash, but permission mode dontAsk declined it.","session_id":"cs-9c3","usage":{"input_tokens":1800,"output_tokens":12}}

@@ -1,0 +1,5 @@
+{"type":"system","subtype":"init","session_id":"cs-9c1","model":"claude-sonnet-4.5","apiKeySource":"ANTHROPIC_API_KEY","cwd":"/work/project","tools":["Read","Bash"]}
+{"type":"stream_event","event":{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"The file "}}}
+{"type":"stream_event","event":{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"is small."}}}
+{"type":"assistant","message":{"content":[{"type":"text","text":"The file is small."}]}}
+{"type":"result","subtype":"success","is_error":false,"result":"The file is small.","session_id":"cs-9c1","total_cost_usd":0.00616,"usage":{"input_tokens":1207,"cache_read_input_tokens":120,"output_tokens":5}}

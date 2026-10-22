@@ -4,6 +4,11 @@
 //! `app-server` (JSON-RPC over stdio). App-server mode exits 9 when a `FAIL_APP_SERVER`
 //! file exists in the working directory, which is how the fallback test forces the
 //! pre-turn failure path without touching the real Codex installation.
+//!
+//! `FAKE_CODEX_FIXTURE` replays a golden fixture as the agent's side of the conversation: in
+//! `app-server` mode the fixture holds the notifications a turn emits, and the JSON-RPC replies
+//! to `initialize` / `thread/start` / `turn/start` are still answered here. In `exec` mode the
+//! fixture is the whole JSONL stream.
 
 use std::io::{BufRead, Write};
 use std::path::Path;
@@ -29,6 +34,10 @@ fn main() {
 }
 
 fn exec() {
+    if let Some(path) = std::env::var_os("FAKE_CODEX_FIXTURE") {
+        replay(&path);
+        return;
+    }
     println!(
         "{}",
         json!({
@@ -96,6 +105,10 @@ fn app_server() {
             "thread/start" => respond(&id, json!({ "threadId": "th-1", "model": "fake" })),
             "turn/start" => {
                 respond(&id, json!({ "turnId": "tn-1" }));
+                if let Some(path) = std::env::var_os("FAKE_CODEX_FIXTURE") {
+                    replay(&path);
+                    return;
+                }
                 notify(
                     "item/completed",
                     json!({
@@ -126,6 +139,19 @@ fn app_server() {
             _ => {}
         }
     }
+}
+
+/// A recorded stream is the whole script: print it as it was recorded, then return. Exiting
+/// without a `turn/completed` is how an interrupted turn looks from the adapter's side.
+fn replay(path: &std::ffi::OsStr) {
+    let Ok(text) = std::fs::read_to_string(path) else {
+        eprintln!("fake-codex: cannot read fixture {}", path.to_string_lossy());
+        std::process::exit(2);
+    };
+    for line in text.lines().filter(|line| !line.trim().is_empty()) {
+        println!("{line}");
+    }
+    let _ = std::io::stdout().flush();
 }
 
 fn respond(id: &Value, result: Value) {

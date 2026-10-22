@@ -1,0 +1,4 @@
+{"jsonrpc":"2.0","id":900,"method":"item/commandExecution/requestApproval","params":{"threadId":"th-1","turnId":"tn-9","itemId":"c2","command":"git push --force origin main","reason":"The task asked for a force push"}}
+{"jsonrpc":"2.0","method":"item/agentMessage/delta","params":{"threadId":"th-1","itemId":"i2","delta":"Waiting for approval."}}
+{"jsonrpc":"2.0","method":"item/completed","params":{"item":{"type":"agentMessage","text":"Waiting for approval."}}}
+{"jsonrpc":"2.0","method":"turn/completed","params":{"turn":{"id":"tn-9","status":"completed"}}}

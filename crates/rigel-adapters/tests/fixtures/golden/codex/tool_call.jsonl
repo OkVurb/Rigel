@@ -1,0 +1,4 @@
+{"jsonrpc":"2.0","method":"item/started","params":{"item":{"id":"c1","type":"commandExecution","command":"cargo test --quiet","status":"inProgress"}}}
+{"jsonrpc":"2.0","method":"item/completed","params":{"item":{"id":"c1","type":"commandExecution","command":"cargo test --quiet","status":"completed","exitCode":0}}}
+{"jsonrpc":"2.0","method":"item/completed","params":{"item":{"type":"agentMessage","text":"All tests passed."}}}
+{"jsonrpc":"2.0","method":"turn/completed","params":{"turn":{"id":"tn-8","status":"completed"}}}

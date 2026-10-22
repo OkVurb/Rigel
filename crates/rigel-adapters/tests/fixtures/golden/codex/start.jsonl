@@ -1,0 +1,5 @@
+{"jsonrpc":"2.0","method":"item/agentMessage/delta","params":{"threadId":"th-1","itemId":"i1","delta":"The build "}}
+{"jsonrpc":"2.0","method":"item/agentMessage/delta","params":{"threadId":"th-1","itemId":"i1","delta":"is green."}}
+{"jsonrpc":"2.0","method":"item/completed","params":{"item":{"type":"agentMessage","text":"The build is green."}}}
+{"jsonrpc":"2.0","method":"thread/tokenUsage/updated","params":{"threadId":"th-1","tokenUsage":{"last":{"inputTokens":1500,"cachedInputTokens":100,"outputTokens":6,"reasoningOutputTokens":0}}}}
+{"jsonrpc":"2.0","method":"turn/completed","params":{"turn":{"id":"tn-7","status":"completed"},"usage":{"input_tokens":1500,"cached_input_tokens":100,"output_tokens":6}}}

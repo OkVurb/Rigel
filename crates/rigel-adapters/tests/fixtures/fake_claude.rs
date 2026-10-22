@@ -15,6 +15,10 @@
 //!
 //! `FAKE_CLAUDE_ARGS` names a file that receives the argv, so a test can assert what the adapter
 //! passed without guessing.
+//!
+//! `FAKE_CLAUDE_FIXTURE` replays a golden fixture verbatim: the file under
+//! `tests/fixtures/golden/claude/` is the stream, and `FAKE_CLAUDE_FIXTURE_EXIT` sets the exit code
+//! so an interrupted turn can be replayed as well as a finished one.
 
 use std::io::Write;
 
@@ -28,6 +32,14 @@ fn main() {
     }
     if let Some(path) = std::env::var_os("FAKE_CLAUDE_ARGS") {
         let _ = std::fs::write(path, args.join("\n"));
+    }
+    if let Some(path) = std::env::var_os("FAKE_CLAUDE_FIXTURE") {
+        replay(&path);
+        let code = std::env::var("FAKE_CLAUDE_FIXTURE_EXIT")
+            .ok()
+            .and_then(|value| value.trim().parse().ok())
+            .unwrap_or(0);
+        std::process::exit(code);
     }
 
     match std::env::var("FAKE_CLAUDE_MODE")
@@ -46,6 +58,18 @@ fn main() {
         }
         _ => ok(),
     }
+}
+
+/// A recorded stream is the whole script: print it as it was recorded.
+fn replay(path: &std::ffi::OsStr) {
+    let Ok(text) = std::fs::read_to_string(path) else {
+        eprintln!("fake-claude: cannot read fixture {}", path.to_string_lossy());
+        std::process::exit(2);
+    };
+    for line in text.lines().filter(|line| !line.trim().is_empty()) {
+        println!("{line}");
+    }
+    let _ = std::io::stdout().flush();
 }
 
 fn init(api_key_source: &str) {

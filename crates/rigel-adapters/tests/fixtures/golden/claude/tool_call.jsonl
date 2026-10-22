@@ -1,0 +1,5 @@
+{"type":"system","subtype":"init","session_id":"cs-9c2","model":"claude-sonnet-4.5","apiKeySource":"ANTHROPIC_API_KEY"}
+{"type":"stream_event","event":{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Reading src/lib.rs."}}}
+{"type":"assistant","message":{"content":[{"type":"text","text":"Reading src/lib.rs."},{"type":"tool_use","id":"toolu_01","name":"Read","input":{"file_path":"src/lib.rs"}}]}}
+{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"toolu_01","content":"fn main() {}\n"}]}}
+{"type":"result","subtype":"success","is_error":false,"result":"Reading src/lib.rs.","session_id":"cs-9c2","total_cost_usd":0.011,"usage":{"input_tokens":2110,"cache_read_input_tokens":980,"output_tokens":9}}
