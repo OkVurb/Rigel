@@ -198,7 +198,8 @@ hit (`skillhub:mattpocock-skills-setup-ts-deep-modules`) and the memory sha256. 
 and config are proven (raw stdio handshake lists all six tools; `claude -p --mcp-config …`
 returned the correct hit), but the **interactive TUI session** still exposes only
 `rigel_budget` — a Claude-Code-side gating quirk, recorded with evidence in the QA doc. Treat
-per-harness MCP trust as the friction to automate, not a Rigel protocol problem.
+per-harness MCP trust as the friction to automate, not a Rigel protocol problem: `rigel agent trust`
+now writes the two trust files (22 Oct), and the QA doc records what that does and does not prove.
 
 **Operational traps future agents will hit (all fixed here, none obvious):**
 
@@ -210,7 +211,8 @@ per-harness MCP trust as the friction to automate, not a Rigel protocol problem.
 3. **Claude Code gates project MCP servers** behind approval. `.claude/settings.local.json`
    (`enableAllProjectMcpServers`, gitignored) plus the `enabledMcpjsonServers` project entry in
    `~/.claude.json` make them visible to fresh sessions/`claude mcp list`; the running TUI may
-   still lag.
+   still lag. `rigel agent trust --project .` writes both files from `.mcp.json` — do not hand-edit
+   them again.
 4. **One rigel server per agent.** Keeping `rigel-claude`, `rigel-codex` and a user-scope `rigel`
    registered at once produces name collisions where only one tool survives in Claude's list.
    `.mcp.json` now carries exactly `rigel-claude`; Codex has its own entry.
@@ -284,29 +286,38 @@ Verified working in the app: open a project → Chat → **Start the chat server
 press **Swarm** on the Session tab and every online agent gets the task. Session has a live model
 and effort picker; Settings mirrors it.
 
-Known gaps, roughly in the order they should be taken:
+The seven gaps this section carried at midday are closed, each with its commit:
 
-1. **P4.7 golden fixtures** (D51 says first, before new tools or UI). One recorded stream per
-   harness per scenario — start, tool call, approval, error, interrupt — plus replay assertions.
-   Cursor and Cline probes now exist, so those fixtures are no longer speculative.
-2. **Agent lifecycle.** `start_agents` calls `mem::forget` on each child, so Rigel holds no handle:
-   there is no Stop, no per-agent start, and a closed app leaves orphaned wrappers. Track the
-   pids, kill the tree (wrapper → CLI → its node children), and free the registration so the
-   canonical `@name` comes back. The roster currently dedupes by `name` or `name-*` prefix only.
-3. **Finish the effort plumbing.** Add `--effort` to `rigel agent run`, pass it into `Coordinator`
-   and `ModelDeliberator` (both are `None` today), and assert `reasoning_effort` reaches the wire
-   on both paths. Until then the CLI and the advisory round use the provider default.
-4. **Swarm preflight.** Swarm currently broadcasts to every online agent. Show the roster with
-   checkboxes before sending, and keep the refusal messages for an unauthed room or an empty one.
-5. **A checkout-less room.** `vendor/agentchattr` is gitignored, so a fresh clone (including this
-   repo's primary checkout) has no chat checkout. The Chat tab should say exactly what to install
-   and where, and point at `RIGEL_AGENTCHAT_DIR`, instead of failing at spawn time.
-6. **Claude TUI MCP visibility.** `claude -p --mcp-config …` sees all six rigel tools; the
-   interactive session still exposes only `rigel_budget` (evidence in the QA doc). Automate the
-   `.claude/settings.local.json` / `enabledMcpjsonServers` trust step or record why it cannot be.
-7. **Spawn-path tests.** `harness_argv`, config parsing and the readiness rules are unit-tested;
-   the `CreateProcess` call itself is not. A test that spawns a stub wrapper on Windows and
-   asserts "no console window, handshake still works" would pin the whole feature.
+| Gap | What landed | Commit |
+|---|---|---|
+| P4.7 golden fixtures | 15 recorded streams under `crates/rigel-adapters/tests/fixtures/golden/`, replayed by `tests/replay.rs`; P4.7 is ticked in the Phase 4 list and the directory README records provenance and the scenario gaps | `20a1f60` |
+| Agent lifecycle | `start_agents` keeps every child instead of forgetting it: `launched()` lists what Rigel owns, `stop_agent`/`stop_all` kill the wrapper's whole tree (`taskkill /T /F`) and drop the entry when it exits, the roster offers Start/Stop per agent, and closing the window stops what Rigel started | `4a17aea` |
+| Effort plumbing | `--effort low\|medium\|high` on `rigel agent run`, validated against the same allowlist Settings uses, threaded into `Coordinator` and `ModelDeliberator`; `crates/rigel-core/tests/native.rs` asserts `reasoning_effort` reaches the wire on both paths | `ff67a92` |
+| Swarm preflight | Swarm opens the roster with checkboxes and broadcasts only to the ticked online agents; the unauthed-room and empty-room refusals are unchanged | `5607810` |
+| Checkout-less room | the Chat tab names the clone path, the dependency step and `RIGEL_AGENTCHAT_DIR` instead of failing at spawn; `setup_help` is covered by a test | `0fc6a26` |
+| Claude TUI trust | `rigel agent trust` writes `.claude/settings.local.json` and this project's `~/.claude.json` entry from the project's `.mcp.json`, idempotently, with `--dry-run`; evidence in the QA doc | `0bafa04` |
+| Spawn-path test | `launch_hidden` is the testable half of `spawn_harness`; a Windows test spawns a stub `wrapper.py` and asserts `GetConsoleWindow() == 0`, a writable `CONIN$` buffer and the unattended flag on the argv | `3d3022b` |
+
+Only P4.7 of those is a Phase 4 checklist line: the checklist still reads **11/19** (P4.11 dropped per
+D48), and the next three in order are P4.8 (normalisation for the ten item kinds), P4.9 (the roster
+UI, D40) and P4.10 (end-to-end approvals across the three protocols).
+
+What is still open, in the order it should be taken:
+
+1. **P4.8 → P4.10**, as above. Everything else in Phase 4 is the approval and safety lane
+   (P4.12–P4.19), where the fixtures from P4.7 are now available to replay.
+2. **One human look at Claude's TUI.** The trust files are now written by a command, but the six
+   tools inside a *running* interactive session have not been re-observed since; Claude reads trust
+   at startup, so this needs a restart and a person. It is the last open line in the QA doc.
+3. **This checkout has no `vendor/agentchattr`**, so the live room check needs a machine that has the
+   clone (or `RIGEL_AGENTCHAT_DIR`). The Chat tab now explains exactly that rather than failing at
+   spawn time.
+4. **Formatting debt, not from this lane.** `cargo fmt --all -- --check` fails on
+   `crates/rigel-cli/src/main.rs`, `crates/rigel-core/src/agent/mod.rs`,
+   `crates/rigel-core/tests/native.rs`, `crates/rigel-adapters/tests/{replay.rs,fixtures/fake_claude.rs}`
+   and `crates/rigel-app/src/lib.rs` — the files the last two sessions left unformatted. Clippy is
+   green for `rigel-core` and `rigel-cli` after `3d3022b`, which also cleared the eight lints
+   `agentchat.rs` had accumulated.
 
 Environment facts a fresh agent will trip over: the debug app loads `http://localhost:5173`, so
 `npm --prefix ui run dev` must be running before `cargo run -p rigel-app`; `vendor/agentchattr`

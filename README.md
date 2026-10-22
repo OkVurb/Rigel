@@ -65,6 +65,9 @@ cargo run -q -p rigel-cli -- agent run --provider gemini --prompt "say pong"
 # (needs its CLI and its own key: CURSOR_API_KEY or CLINE_API_KEY)
 cargo run -q -p rigel-cli -- agent acp --project . --prompt "say pong"
 cargo run -q -p rigel-cli -- agent acp --harness cline --project . --prompt "say pong"
+# trust this project's .mcp.json servers for Claude Code's interactive session
+# (writes .claude/settings.local.json and the ~/.claude.json project entry; --dry-run shows both)
+cargo run -q -p rigel-cli -- agent trust --project .
 cargo run -q -p rigel-cli -- snapshot list
 cargo run -q -p rigel-cli -- snapshot capture --project .
 cargo run -q -p rigel-cli -- snapshot restore <snapshot-id> --project .

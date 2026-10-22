@@ -188,6 +188,28 @@ automate around, not a Rigel bug. Next attempt if it matters: launch the wrapper
 `--allowedTools mcp__rigel-claude` / `--strict-mcp-config` and see whether the TUI exposes the
 full list, or approve the servers once by hand in that console.
 
+### Trust, automated (22 Oct)
+
+The gating file pair is now written by `rigel agent trust` (`crates/rigel-cli/src/phase3/trust.rs`)
+instead of by hand. It reads the project's `.mcp.json`, unions the server names into
+`enabledMcpjsonServers` in `.claude/settings.local.json` (with `enableAllProjectMcpServers`), and adds
+the same names to this project's `projects["<path>"]` entry in `~/.claude.json`. Other keys and other
+projects' entries are preserved; a malformed `~/.claude.json` is refused rather than rewritten;
+`--dry-run` prints both targets and writes neither.
+
+Verified against the built binary in a throwaway project (`USERPROFILE` pointed at a temp home so the
+real `~/.claude.json` was untouched): first run wrote both files, `global_changed: true`; second run
+reported `unchanged` for both; `--dry-run` against a home without the entry reported
+`global_changed: true` and wrote nothing. `cargo test -p rigel-cli phase3::trust` covers the merge
+rules (union, idempotence, other projects untouched, malformed file refused) and reads a real
+`.mcp.json` from a temp directory.
+
+What is still not automated: Claude reads these files **at startup**, so a session that was already
+running keeps its old tool list — restart it. The interactive confirmation itself has not been
+re-observed since the wrapper launches (that needs a human at the TUI, and this checkout has no
+`vendor/agentchattr`), so the QA claim stays "files are correct and current" rather than "the TUI now
+shows six".
+
 ### Desktop-app path verified
 
 The Chat tab was exercised in the real app (`cargo run -p rigel-app`, dev mode against vite
@@ -201,7 +223,8 @@ because the app is native; note `chat_status` needs an open project (or
 
 ### Remaining
 
-- Claude TUI tool exposure (above) — the only unfinished verification.
+- Claude TUI tool exposure (above): the trust files are automated (22 Oct); confirming the six tools
+  inside a running TUI still needs one human look after a restart.
 - `.mcp.json` now carries one server (`rigel-claude`); if a future workflow wants per-agent
   server names, prefer distinct harness configs over duplicate names.
 - `phi4` is still an API chat peer with no rigel accounting; it cannot call MCP tools.
