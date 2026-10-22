@@ -33,7 +33,7 @@ export interface Settings {
   theme: string;
   default_budget_cents: number;
   unattended_default: boolean;
-  /** `omniroute` (local router) or `openrouter`. */
+  /** `omniroute` (local router), `openrouter`, or `gemini` (Google's API). */
   provider: string;
   model: string;
 }
@@ -200,6 +200,7 @@ export interface KeyStatus {
   openai: boolean;
   anthropic: boolean;
   cursor: boolean;
+  gemini: boolean;
 }
 
 /** One row of `adapters.json` (P4.1). */
@@ -440,8 +441,15 @@ export const api = {
     session: string,
     agent: string,
     prompt: string,
+    model?: string | null,
   ): Promise<TurnReply> {
-    return call<TurnReply>("turn_send", { project, session, agent, prompt, model: null });
+    return call<TurnReply>("turn_send", {
+      project,
+      session,
+      agent,
+      prompt,
+      model: model ?? null,
+    });
   },
 
   async cancelTurn(turn: string): Promise<void> {
@@ -459,9 +467,15 @@ export const api = {
     prompt: string,
     spendMicros: number,
     capMicros: number | null,
+    model?: string | null,
   ): Promise<TurnQuote> {
     if (!isTauri()) return previewQuote(prompt, spendMicros, capMicros);
-    return call<TurnQuote>("turn_estimate", { project, session, prompt, model: null });
+    return call<TurnQuote>("turn_estimate", {
+      project,
+      session,
+      prompt,
+      model: model ?? null,
+    });
   },
 
   async getBudget(project: string, agent: string): Promise<BudgetSnapshot> {
@@ -492,23 +506,50 @@ export const api = {
 
   async keyStatus(): Promise<KeyStatus> {
     if (!isTauri()) {
-      return { openrouter: false, omniroute: false, openai: false, anthropic: false, cursor: false };
+      return {
+        openrouter: false,
+        omniroute: false,
+        openai: false,
+        anthropic: false,
+        cursor: false,
+        gemini: false,
+      };
     }
     return call<KeyStatus>("key_status");
   },
 
   async setKey(provider: string, value: string): Promise<KeyStatus> {
     if (!isTauri()) {
-      return { openrouter: true, omniroute: true, openai: true, anthropic: true, cursor: true };
+      return {
+        openrouter: true,
+        omniroute: true,
+        openai: true,
+        anthropic: true,
+        cursor: true,
+        gemini: true,
+      };
     }
     return call<KeyStatus>("key_set", { provider, value });
   },
 
   async deleteKey(provider: string): Promise<KeyStatus> {
     if (!isTauri()) {
-      return { openrouter: false, omniroute: false, openai: false, anthropic: false, cursor: false };
+      return {
+        openrouter: false,
+        omniroute: false,
+        openai: false,
+        anthropic: false,
+        cursor: false,
+        gemini: false,
+      };
     }
     return call<KeyStatus>("key_delete", { provider });
+  },
+
+  async harnesses(): Promise<HarnessInfo[]> {
+    // A browser preview has no Rust host, so there is nothing to probe.
+    if (!isTauri()) return [];
+    return call<HarnessInfo[]>("harnesses_probe");
   },
 
   async omnirouteStatus(): Promise<OmnirouteStatus> {

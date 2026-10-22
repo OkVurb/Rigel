@@ -39,6 +39,16 @@ fn default_model() -> String {
     rigel_core::agent::omniroute::DEFAULT_MODEL.to_string()
 }
 
+/// The model a turn will actually ask for. Settings keep one model across a provider switch,
+/// so an OmniRoute id left behind by `provider = "gemini"` would be rejected by Google; the
+/// provider's own default is the honest fallback.
+fn configured_model(settings: &Settings, provider: &str) -> String {
+    if provider == "gemini" && !rigel_core::agent::gemini::is_model(&settings.model) {
+        return rigel_core::agent::gemini::DEFAULT_MODEL.to_string();
+    }
+    settings.model.clone()
+}
+
 fn default_provider() -> String {
     "omniroute".to_string()
 }
@@ -48,7 +58,8 @@ pub struct Settings {
     pub theme: String,
     pub default_budget_cents: i64,
     pub unattended_default: bool,
-    /// `omniroute` (local router) or `openrouter`. Old settings files gain the default.
+    /// `omniroute` (local router), `openrouter`, or `gemini`. Old settings files gain the
+    /// default.
     #[serde(default = "default_provider")]
     pub provider: String,
     #[serde(default = "default_model")]
@@ -74,6 +85,7 @@ pub struct KeyStatus {
     pub openai: bool,
     pub anthropic: bool,
     pub cursor: bool,
+    pub gemini: bool,
 }
 
 fn current_key_status() -> KeyStatus {
@@ -83,6 +95,7 @@ fn current_key_status() -> KeyStatus {
         openai: credentials::present(credentials::OPENAI),
         anthropic: credentials::present(credentials::ANTHROPIC),
         cursor: credentials::present(credentials::CURSOR),
+        gemini: credentials::present(credentials::GEMINI),
     }
 }
 
@@ -352,15 +365,21 @@ fn turn_send(
     let root = PathBuf::from(&project);
     let service = tauri::async_runtime::block_on(SessionService::open(&root)).map_err(message)?;
     let settings = load_settings();
-    let model_name = model.unwrap_or(settings.model);
+    let provider = settings.provider.trim().to_lowercase();
+    let model_name = model.unwrap_or_else(|| configured_model(&settings, &provider));
 
     // A local router that is down is a process to launch, not a configuration error: the
     // first turn after a reboot starts OmniRoute before it sends anything.
-    let model: Arc<dyn Model> = match settings.provider.trim().to_lowercase().as_str() {
+    let model: Arc<dyn Model> = match provider.as_str() {
         "openrouter" => {
             let key = credentials::get(credentials::OPENROUTER)
                 .map_err(|error| format!("{error}. Add an OpenRouter key in Settings."))?;
             Arc::new(OpenRouterModel::new(key))
+        }
+        "gemini" => {
+            let key = credentials::get(credentials::GEMINI)
+                .map_err(|error| format!("{error}. Add a Gemini key in Settings."))?;
+            Arc::new(rigel_core::agent::gemini::model(key))
         }
         "omniroute" => {
             let key = credentials::get(credentials::OMNIROUTE)
@@ -371,7 +390,7 @@ fn turn_send(
         }
         other => {
             return Err(format!(
-                "unknown provider `{other}`; use omniroute or openrouter"
+                "unknown provider `{other}`; use omniroute, openrouter or gemini"
             ));
         }
     };
@@ -482,7 +501,9 @@ fn turn_estimate(
         let service = SessionService::open(Path::new(&project))
             .await
             .map_err(message)?;
-        let model_name = model.unwrap_or_else(|| load_settings().model);
+        let settings = load_settings();
+        let provider = settings.provider.trim().to_lowercase();
+        let model_name = model.unwrap_or_else(|| configured_model(&settings, &provider));
         let context_chars = fixed_context_chars(&model_name);
         BudgetService::with_null_interrupt(service.pool().clone())
             .quote_session(&session, &model_name, context_chars, &prompt)
@@ -667,9 +688,12 @@ fn settings_get() -> Result<Settings, String> {
 /// Write settings, creating the app data directory if this is a first run.
 #[tauri::command]
 fn settings_set(settings: Settings) -> Result<Settings, String> {
-    if settings.provider != "omniroute" && settings.provider != "openrouter" {
+    if !matches!(
+        settings.provider.as_str(),
+        "omniroute" | "openrouter" | "gemini"
+    ) {
         return Err(format!(
-            "unknown provider `{}`; use omniroute or openrouter",
+            "unknown provider `{}`; use omniroute, openrouter or gemini",
             settings.provider
         ));
     }

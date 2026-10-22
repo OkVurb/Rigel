@@ -56,11 +56,24 @@ cargo run -q -p rigel-cli -- skills status
 printf '%s' "$OMNIROUTE_KEY" | cargo run -q -p rigel-cli -- keys set omniroute
 cargo run -q -p rigel-cli -- session start --project . --budget-cents 25
 cargo run -q -p rigel-cli -- agent run --project . --prompt "read README and fix the typo"
+# a shell command is printed for consent first; `--approval allow` pre-consents, `--json` denies
+cargo run -q -p rigel-cli -- agent run --project . --prompt "run the tests" --approval ask
+# Google's models through the Gemini API (a key from AI Studio; default gemini-4-argon)
+printf '%s' "$GEMINI_API_KEY" | cargo run -q -p rigel-cli -- keys set gemini
+cargo run -q -p rigel-cli -- agent run --provider gemini --prompt "say pong"
+# one ACP turn against Cursor or Cline; approvals prompt on stdin
+# (needs its CLI and its own key: CURSOR_API_KEY or CLINE_API_KEY)
+cargo run -q -p rigel-cli -- agent acp --project . --prompt "say pong"
+cargo run -q -p rigel-cli -- agent acp --harness cline --project . --prompt "say pong"
+cargo run -q -p rigel-cli -- snapshot list
+cargo run -q -p rigel-cli -- snapshot capture --project .
+cargo run -q -p rigel-cli -- snapshot restore <snapshot-id> --project .
 cargo run -q -p rigel-cli -- patch list --project .
 cargo run -q -p rigel-cli -- session resume --project . --id <session-id>
 
 cd ui && npm install && npm run dev   # renderer in a browser, sample rows
-cargo run -p rigel-app                 # desktop shell; builds ui/dist first
+bash scripts/dev.sh                    # desktop shell, secrets from Infisical (INFISICAL.md)
+cargo run -p rigel-app                 # the same, without Infisical: keychain or shell env
 ```
 
 The index lives at `%APPDATA%\Rigel` (`~/.local/share/rigel` elsewhere): `index.db`, plus `blobs/`
@@ -96,15 +109,21 @@ The prototype's Discover view talks to two marketplaces that send no CORS header
 | Duplicates | **real**: SimHash ≤ 3 bits, clusters computed after every ingest, variants listed under the row |
 | Evidence | **real**: advertised percentages from the description, `unmeasured` until a measurement exists |
 | CLI | `rigel skills search|get|index|status|sync|stats|import|gc`, all with `--json`, §7.2 exit codes |
-| Native agent | **real**: OmniRoute (local router, autostarted; default `gpt-5.6-sol-medium`) and OpenRouter streaming with retries, a deterministic scripted model, eight tools with path-checked reads and writes, skills pinned per session |
-| Subagents | **real**: `spawn_agents` runs up to 4 read-only children concurrently per turn on an eight-model cheap allowlist (GPT-5/5.4 nano, Gemini Flash-Lite/3 Flash, DeepSeek V4.1 Flash, Qwen3 Coder, Haiku 5.5, GPT-5.4 mini); each child is its own agent row and bill, nested under the parent turn |
+| Native agent | **real**: OmniRoute (local router, autostarted; default `gpt-5.6-sol-medium`), OpenRouter and Gemini (`gemini-4-argon` by default) streaming with retries, a deterministic scripted model, ten tools with path-checked reads and writes, skills pinned per session |
+| Commands | **real**: `run_command` shows the exact text, cwd and timeout before anything runs; cwd is jailed to the project, output is capped at 64 KB per stream, the process is killed at its timeout, and the exit code is recorded as a `command` item. `--approval ask\|allow\|deny`; `--json` defaults to deny |
+| Destructive commands | **real**: a deterministic classifier maps a command to policy rows — `delete-outside-project`, `recursive-remove`, `force-push`, `git-reset`, `registry-write` — before approval; the prompt names the rows and the matched token, and the `command` item records them |
+| Snapshots | **real**: before an approved destructive command, `git stash create` object (kept alive by `refs/rigel/snapshots/<id>`) plus raw copies of changed and untracked files; a non-git tree or a repository with no commit is copied whole; 2 000 files / 200 MB cap, refusing above it. `rigel snapshot capture\|list\|restore` |
+| Deliberation | **real**: a destructive command first gets one round of three read-only advisors (advocate, opponent, referee) on the parent's model, billed to its own turn and shown before the approval prompt; the answers are advisory and cannot allow, deny or alter the gate. Scripted runs record that advice was not gathered instead of consuming their fixed steps |
+| Egress | **real**: `fetch_url` asks per origin with `once` / `session` / `always` scopes (`always` persists in `<index dir>/approved-origins.json`), re-approves a redirect that crosses origins, reads only text-like content types, caps the body at 256 KB, and records the page as a `web_search` item with `untrusted: true` |
+| Subagents | **real**: `spawn_agents` runs up to 4 read-only children concurrently per turn on an eight-model cheap allowlist (GPT-5/5.4 nano, Gemini Flash-Lite/3 Flash, DeepSeek V4.1 Flash, Qwen3 Coder, Haiku 5.5, GPT-5.4 mini); each child is its own agent row and bill, nested under the parent turn. The allowlist is OpenRouter-shaped, so the tool is hidden on the Gemini provider rather than handing it ids Google rejects |
 | The bill | **real**: micro-dollar accounting from provider usage, local price fallback, 80% warning, cap enforced within one turn, `reconcile` |
-| Session surface | **real**: roster, role-gutter transcript, streaming text, collapsed tool lines, patch diffs, raw/debug toggle, inline 80% prompt |
+| Session surface | **real**: roster, role-gutter transcript, streaming text, collapsed tool lines, patch diffs, raw/debug toggle, inline 80% prompt, and a per-turn model picker in the composer (provider stays in Settings) |
 | Patches | **real**: CAS check, write-ahead journal, fsync + rename, idempotent apply, revert once applied |
 | Resume | **real**: tree hash vs checkpoint, running turns closed as `cancelled`, journal reconciled without applying, forced continue is an intervention |
 | Memory | **real**: committed `MEMORY.md` + topics per agent, absolute-path/secret validator, index rebuild |
 | MCP | **real**: stdio server scoped to `--session` and `--agent`, sharing the same tools |
 | Codex harness | **real**: `rigel codex probe` and one turn through `codex app-server`, with `codex exec --json` as the tested fallback; Rigel writes the router `-c` overrides itself (verified against Codex 0.162.1) |
+| Cursor/Cline harness | **real protocol**: `rigel agent acp --harness cursor|cline` drives one ACP turn, records session updates and both sides of every permission request, and refuses a subscription-only identity; each harness takes its own key (`CURSOR_API_KEY`, `CLINE_API_KEY`) and is probed separately. The approval surface is the CLI prompt until P4.10. Verified against a scripted ACP agent — neither CLI is installed on this machine |
 | Prototype migration | `rigel skills import --from` + [the export snippet](docs/migrating-prototype-index.md) |
 | Discover / Targets / Dependencies (prototype) | still the Phase 0 browser app; Phase 6 ports them |
 
@@ -128,6 +147,7 @@ The prototype's Discover view talks to two marketplaces that send no CORS header
 - `node scripts/verify-ecc.mjs` — verify ECC across every harness; non-zero on failure
 - `node scripts/fix-cursor-hooks.mjs` — repair Cursor's project-relative hook paths
 - `node scripts/handoff-status.mjs` — checklist progress per phase; fails if the §11 summary table is stale
+- `bash scripts/dev.sh` — local dev: the desktop shell under `infisical run --env=dev`, with the setup steps in [INFISICAL.md](INFISICAL.md)
 - `bash scripts/p3-exit-test.sh` — the Phase 3 exit test; needs a built `rigel` and `python`
 - `scripts/fixtures/p4-subagents.json` — a scripted parent that delegates to two cheap readers; `rigel agent run --script` prints their bills
 

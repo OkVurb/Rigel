@@ -26,6 +26,11 @@ pub struct OpenRouterModel {
     api_key: String,
     base_url: String,
     max_attempts: u32,
+    /// What `id()` reports. Not sent: the wire contract is the same for every caller.
+    provider: String,
+    /// OpenRouter reads `usage: { "include": true }` to return cost. Gemini's compatibility
+    /// layer does not document it, so its profile leaves the field out.
+    request_usage: bool,
 }
 
 impl OpenRouterModel {
@@ -40,7 +45,21 @@ impl OpenRouterModel {
             api_key: api_key.into(),
             base_url: DEFAULT_BASE_URL.to_string(),
             max_attempts: 3,
+            provider: "openrouter".to_string(),
+            request_usage: true,
         }
+    }
+
+    /// The provider name this instance reports. The wire contract is unchanged.
+    pub fn with_provider(mut self, provider: impl Into<String>) -> Self {
+        self.provider = provider.into();
+        self
+    }
+
+    /// Drop OpenRouter's cost-request field for a provider that does not define it.
+    pub fn without_usage_request(mut self) -> Self {
+        self.request_usage = false;
+        self
     }
 
     /// For tests and self-hosted gateways: same wire contract, different origin.
@@ -61,9 +80,11 @@ impl OpenRouterModel {
             "messages": request.messages,
             "stream": true,
             "temperature": request.temperature,
-            "usage": { "include": true },
             "stream_options": { "include_usage": true },
         });
+        if self.request_usage {
+            body["usage"] = json!({ "include": true });
+        }
         if !request.tools.is_empty() {
             body["tools"] = Value::Array(request.tools.iter().map(|spec| spec.openai()).collect());
             body["tool_choice"] = json!("auto");
@@ -187,7 +208,7 @@ impl OpenRouterModel {
 #[async_trait]
 impl Model for OpenRouterModel {
     fn id(&self) -> String {
-        "openrouter".to_string()
+        self.provider.clone()
     }
 
     async fn chat(

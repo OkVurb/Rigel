@@ -1101,7 +1101,7 @@ Approvals are bound to an `approval_id` issued by the harness, not to text in th
 
 ## 11. The plan
 
-**State as of 21 Oct 2026:** Phases 0–3 complete; Phase 4 in progress (5/19).
+**State as of 21 Oct 2026:** Phases 0–3 complete; Phase 4 in progress (11/19).
 Run `node scripts/handoff-status.mjs` for live counts; this table is the summary.
 
 | Phase | Scope | State | Items |
@@ -1110,7 +1110,7 @@ Run `node scripts/handoff-status.mjs` for live counts; this table is the summary
 | 1 | Rust skeleton and storage | **complete** | 10/10 |
 | 2 | The shelf, real | **complete** | 11/11 |
 | 3 | Native agent, chat and the bill | **complete** | 11/11 |
-| 4 | Harness adapters | in progress | 5/19 |
+| 4 | Harness adapters | in progress | 11/19 |
 | 5 | Claims, attribution, merged diff | not started | 0/8 |
 | 6 | Dependencies and trust | not started | 0/8 |
 | 7 | Hardening and open-source release | not started | 0/9 |
@@ -1224,17 +1224,16 @@ a streaming redactor and is recorded rather than assumed. Neither adapter has a 
 
 Two deliberate deviations, both recorded in their checklist lines: Claude does not yet receive
 `--permission-prompt-tool mcp__rigel__approve` (the server it names arrives with P4.10, and a
-dangling tool name would turn every permission request into an error), and P4.4 is untouched
-because Cline's per-agent provider file has no verified format yet; spawning `cline --acp` without
-one would authenticate as the vendor login or not at all, so `AcpClient::spawn` refuses it before
-starting a process. Next: P4.4 once Cline's config shape is checked against an installed CLI, then
-P4.7 fixtures and P4.8 normalisation.
+dangling tool name would turn every permission request into an error), and P4.4's spawn path is in
+place but has never run against an installed Cline: its per-agent provider file has no verified
+format yet, so `AcpClient::spawn` refuses `cline --acp` before starting a process rather than fall
+back to the vendor login. Next: P4.7 fixtures and P4.8 normalisation.
 
 
 - [x] **P4.1** `probe()` for all four, writing `adapters.json`; UI lists missing harnesses with an install hint — `27377b3`
 - [x] **P4.2** Per-agent keychain injection; probe reports `auth_mode` and refuses `subscription` (D21) — `45ac7e7`
 - [x] **P4.3** ACP client: `agent acp`, session updates, `session/request_permission` → approval UI — `AcpClient` speaks protocol v1, refuses a different major version and a relative cwd, routes every permission request through the `Approver` trait (deny-by-default), sends `session/cancel` on timeout, answers pending approvals with `cancelled` and waits for the agent's acknowledgement; unknown updates are kept as `unmapped` — `crates/rigel-adapters/src/acp.rs`, `tests/acp.rs` — `f2c8dbf`
-- [ ] **P4.4** ACP client: `cline --acp`, same client, separate probe
+- [x] **P4.4** ACP client: `cline --acp`, same client, separate probe — `AcpConfig::cline` spawns `cline --acp`, `credential_spec` maps Cline to `CLINE_API_KEY`, and the probe reports `cline --version`, the path and `auth_mode` without entering ACP mode (no file is read as a subscription login); `rigel agent acp --harness cline` runs a turn through the same client
 - [x] **P4.5** Codex adapter: app-server JSON-RPC primary (probe passed 21 Oct), `codex exec --json` fallback behind the trait. Write the `-c` overrides explicitly; do not shell out to `omniroute run`/`launch-codex` — `7b3c2fb`
 - [x] **P4.6** Claude adapter: `claude -p --bare --output-format stream-json --verbose --include-partial-messages --permission-mode <mode>` — **deviation:** `--permission-prompt-tool` is not passed yet, because the MCP approval server it names does not exist until P4.10 and naming a missing tool would fail every permission request; the default policy is the CLI's own, which fails closed. `--bare` makes D21 enforceable: only `ANTHROPIC_API_KEY` authenticates, and a child that reports another `apiKeySource` is killed at its first event — `crates/rigel-adapters/src/claude.rs`, `tests/claude.rs` — `f2c8dbf`
 - [ ] **P4.7** Golden fixtures per harness per scenario (start, tool call, approval, error, interrupt) + replay tests
@@ -1243,11 +1242,11 @@ P4.7 fixtures and P4.8 normalisation.
 - [ ] **P4.10** End-to-end approvals across all three protocols, with scope buttons (N2)
 - [ ] **P4.11** Sidecar decision recorded: implement it for Cline SDK-only features, or mark `dropped` with the reason
 - [ ] **P4.12** **Exit test:** Codex, Cursor and Cline each run `rigel doctor --json`; all three show a real command item and exit code; killing one leaves the others running and marks it `Interrupted`
-- [ ] **P4.13** `run_command` tool (D30): exact text and scope shown before execution (N2), cwd jailed to the project, timeout and output cap, exit code recorded as a `command` item
-- [ ] **P4.14** Egress tool (D33): `fetch_url` with approval per origin and once/session/always scopes, size and content-type caps, fetched text labelled untrusted in the transcript
-- [ ] **P4.15** Destructive classifier (D32): deletes outside the project, force-push/reset, recursive remove, registry writes — each maps to a policy row with its own test
-- [ ] **P4.16** Deliberation panel (D32): three read-only agents argue pro and con in one round with no tool access beyond read; the record attaches to the approval item, and the gate stays deterministic — it cannot be voted away
-- [ ] **P4.17** Pre-destructive snapshot (D32, D38): `git stash create` for tracked changes, untracked non-ignored files copied to `%APPDATA%\Rigel\snapshots\<turn>\` with a manifest, `rigel snapshot restore <id>`; non-git directories copy the whole tree under a 2 000-file / 200 MB cap and refuse above it. No disk image, no restore point
+- [x] **P4.13** `run_command` tool (D30): exact text and scope shown before execution (N2), cwd jailed to the project, timeout and output cap, exit code recorded as a `command` item — `crates/rigel-core/src/agent/tools.rs` (approval before spawn, `CommandRequest` carries the exact text, cwd and timeout; 4 000-char command cap, 64 KB per stream read to EOF, 1–600 s timeout with kill, scrubbed provider keys) and `approval.rs` (`CommandApprover`, fail-closed `DenyCommands`). The CLI asks on stdin (`--approval ask`, default), pre-consents with `--approval allow`, and denies under `--json`; a refusal is still a `command` item with `approved: false` and `DENIED`. `tests/command.rs` (5) and `phase3::agent` prompt/parse tests
+- [x] **P4.14** Egress tool (D33): `fetch_url` with approval per origin and once/session/always scopes, size and content-type caps, fetched text labelled untrusted in the transcript — `crates/rigel-core/src/agent/egress.rs`: manual redirects so a new origin is approved again, http(s) only, 256 KiB body cap, text-like content types, 30 s bound; `always` is persisted in `<index dir>/approved-origins.json` and `session` lives in the process. The CLI prompt offers `o`/`s`/`a`, `--approval allow` is once and `deny` (the `--json` default) sends nothing; refusals are `web_search` items with `approved: false`. `tests/egress.rs` (7) covers consent, scopes, redirects, type and size caps
+- [x] **P4.15** Destructive classifier (D32): deletes outside the project, force-push/reset, recursive remove, registry writes — each maps to a policy row with its own test — `crates/rigel-core/src/agent/destructive.rs`: five stable rows (`delete-outside-project`, `recursive-remove`, `force-push`, `git-reset`, `registry-write`), segment/quote-aware tokenising, lexical path resolution that treats an unknown path as outside, and Windows `\\?\` roots compared as plain text. Findings travel on `CommandRequest`, are printed by the CLI prompt, and are recorded on the command item; `agent::destructive` has a test per row plus clean-command and token-detail cases
+- [x] **P4.16** Deliberation panel (D32): three read-only agents argue pro and con in one round with no tool access beyond read; the record attaches to the approval item, and the gate stays deterministic — it cannot be voted away — `crates/rigel-core/src/agent/deliberation.rs`: `ModelDeliberator` runs advocate/opponent/referee concurrently with no tools, records them as messages in a separate turn of the same agent, bills the round through `BudgetService`, and returns `{turn_id, positions, note}` on `CommandRequest` and the command item. The CLI prompt shows all three before the question and declares them advisory; a denial still stops the command. `NoDeliberation` is the headless/scripted default with a note. Tests: two in `deliberation` for the billed turn and a failed advisor, plus a `command.rs` case that advice runs only on destructive commands and never replaces approval
+- [x] **P4.17** Pre-destructive snapshot (D32, D38): `git stash create` for tracked changes, untracked non-ignored files copied to `%APPDATA%\Rigel\snapshots\<turn>\` with a manifest, `rigel snapshot restore <id>`; non-git directories copy the whole tree under a 2 000-file / 200 MB cap and refuse above it. No disk image, no restore point — `crates/rigel-core/src/snapshot.rs`: git snapshots keep the stash commit alive under `refs/rigel/snapshots/<id>`, copy changed tracked files raw as well as untracked files (checkout alone is subject to autocrlf), record tracked deletions, and restore is `git checkout <sha> -- .` plus the copies and deletions. Tree snapshots exclude `.git/` and `.rigel/`. The cap is checked before anything is written; `TooLarge` names the counts. `run_command` captures after approval and before spawning; a failed snapshot refuses the command. `rigel snapshot capture|list|restore`, `tests/snapshot.rs` (8), and a destructive-command end-to-end restore
 - [ ] **P4.18** **Exit test:** a destructive command triggers deliberation, snapshot and approval; deny leaves the tree byte-identical; approve records the snapshot id and the command text, and restoring the snapshot reproduces the pre-turn tree
 - [ ] **P4.19** Codex context budget (D29, N3): record input tokens per turn, trim or disable the skills-catalogue injection, and surface the per-turn estimate before sending. The 21 Oct probe spent 155,895 input tokens on a one-word answer
 

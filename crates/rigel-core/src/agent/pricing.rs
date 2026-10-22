@@ -156,6 +156,16 @@ const TABLE: &[(&str, Price)] = &[
         },
     ),
     (
+        // Gemini's direct API id, not the OpenRouter namespace. Introductory rate; cached
+        // input is the published 95% discount. Raise this row if the promo price ends.
+        "gemini-4-argon",
+        Price {
+            input: 2.00,
+            cached_input: 0.10,
+            output: 10.00,
+        },
+    ),
+    (
         "deepseek/deepseek-chat",
         Price {
             input: 0.27,

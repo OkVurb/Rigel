@@ -33,6 +33,19 @@ pub enum Harness {
     Cline,
 }
 
+impl Harness {
+    /// The stable lowercase key used by the CLI, `adapters.json` and the agent harness column.
+    pub fn key(self) -> &'static str {
+        match self {
+            Self::Native => "native",
+            Self::Codex => "codex",
+            Self::Claude => "claude",
+            Self::Cursor => "cursor",
+            Self::Cline => "cline",
+        }
+    }
+}
+
 /// How a harness proves who it is. Rigel only ever spawns `ApiKey` (D21).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]

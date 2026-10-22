@@ -85,6 +85,7 @@ export default function App() {
         openai: false,
         anthropic: false,
         cursor: false,
+        gemini: false,
       });
       return;
     }
@@ -101,6 +102,7 @@ export default function App() {
             openai: false,
             anthropic: false,
             cursor: false,
+            gemini: false,
           }),
       );
     return () => {
@@ -277,7 +279,12 @@ export default function App() {
         </div>
       </nav>
 
-      {isTauri() && keys && !keys.openrouter && !keys.omniroute && !keyPromptDismissed ? (
+      {isTauri() &&
+      keys &&
+      !keys.openrouter &&
+      !keys.omniroute &&
+      !keys.gemini &&
+      !keyPromptDismissed ? (
         <div className="key-banner" role="status">
           <span>
             No provider key yet. The agent can price a turn, but it cannot send one.
@@ -638,7 +645,9 @@ export default function App() {
                 ? "omniroute key"
                 : keys.openrouter
                   ? "openrouter key"
-                  : "no provider key"
+                  : keys.gemini
+                    ? "gemini key"
+                    : "no provider key"
               : "checking key"
             : "preview key"}
         </span>

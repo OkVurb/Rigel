@@ -3,12 +3,15 @@ use std::process::ExitCode;
 use std::sync::Arc;
 
 use rigel_core::{
-    AgentEvent, BudgetService, Cancels, Coordinator, EventSink, Model, OpenRouterModel,
-    ScriptedModel, SessionService, StopAt, StopReason, SubagentPolicy, Tools, credentials,
+    AgentEvent, BudgetService, Cancels, CommandApprover, CommandDecision, CommandRequest,
+    Coordinator, Deliberator, EventSink, Model, ModelDeliberator, NoDeliberation, OpenRouterModel,
+    OriginApprover, OriginDecision, OriginRequest, ScriptedModel, SessionService, StopAt,
+    StopReason, SubagentPolicy, Tools, credentials,
 };
 use serde_json::json;
 
 use super::AgentCommand;
+use super::acp;
 
 /// Human output streams; `--json` prints one event per line, which is what a test parses.
 struct PrintSink {
@@ -45,17 +48,63 @@ impl EventSink for PrintSink {
                     println!("\n  [{tool}] {}", if ok { "ok" } else { "error" });
                 }
                 "file_change" => {
-                    let path = item
-                        .body
+                    let result = tool_result(&item.body);
+                    let path = result
                         .get("path")
                         .and_then(|value| value.as_str())
                         .unwrap_or("?");
-                    let patch = item
-                        .body
+                    let patch = result
                         .get("patch_id")
                         .and_then(|value| value.as_str())
                         .unwrap_or("");
                     println!("\n  patched {path} ({})", &patch[..8.min(patch.len())]);
+                }
+                "command" => {
+                    // A native tool item wraps the tool's own body under `result`.
+                    let result = tool_result(&item.body);
+                    let command = result
+                        .get("command")
+                        .and_then(|value| value.as_str())
+                        .unwrap_or("?");
+                    let code = result
+                        .get("exit_code")
+                        .and_then(|value| value.as_i64())
+                        .map(|code| code.to_string())
+                        .unwrap_or_else(|| {
+                            if result
+                                .get("timed_out")
+                                .and_then(|value| value.as_bool())
+                                .unwrap_or(false)
+                            {
+                                "timed out".to_string()
+                            } else if result.get("approved") == Some(&json!(false)) {
+                                "denied".to_string()
+                            } else {
+                                "no exit code".to_string()
+                            }
+                        });
+                    let destructive = result
+                        .get("destructive")
+                        .and_then(|value| value.as_array())
+                        .map(|rows| !rows.is_empty())
+                        .unwrap_or(false);
+                    println!(
+                        "\n  $ {command}  → {code}{}",
+                        if destructive { "  · destructive" } else { "" }
+                    );
+                }
+                "web_search" => {
+                    let result = tool_result(&item.body);
+                    let url = result
+                        .get("url")
+                        .and_then(|value| value.as_str())
+                        .unwrap_or("?");
+                    let status = result
+                        .get("status")
+                        .and_then(|value| value.as_u64())
+                        .map(|status| status.to_string())
+                        .unwrap_or_else(|| "denied".to_string());
+                    println!("\n  fetched {url} ({status}, untrusted)");
                 }
                 "error" => {
                     let message = item
@@ -112,6 +161,147 @@ impl EventSink for PrintSink {
     }
 }
 
+/// The body of a native tool item, which the coordinator stores under `result`.
+fn tool_result(body: &serde_json::Value) -> &serde_json::Value {
+    body.get("result").unwrap_or(body)
+}
+
+/// Answers the two tools that leave the patch journal: `run_command` and `fetch_url`.
+///
+/// A command's exact text, directory and timeout are printed first, and only an explicit `a`,
+/// `y` or `yes` lets it run. A fetch prints the URL and its origin, and asks for a scope: once,
+/// this session, or always (persisted under the index dir). End of input, an unreadable line or
+/// anything else denies — the same rule the ACP prompt follows.
+struct CliApprover {
+    mode: acp::ApprovalChoice,
+}
+
+#[async_trait::async_trait]
+impl CommandApprover for CliApprover {
+    async fn approve(&self, request: &CommandRequest) -> CommandDecision {
+        match self.mode {
+            acp::ApprovalChoice::Allow => CommandDecision::AllowOnce,
+            acp::ApprovalChoice::Deny => CommandDecision::Deny,
+            acp::ApprovalChoice::Ask => ask_command(request).await,
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl OriginApprover for CliApprover {
+    async fn approve(&self, request: &OriginRequest) -> OriginDecision {
+        match self.mode {
+            acp::ApprovalChoice::Allow => OriginDecision::AllowOnce,
+            acp::ApprovalChoice::Deny => OriginDecision::Deny,
+            acp::ApprovalChoice::Ask => ask_origin(request).await,
+        }
+    }
+}
+
+async fn ask_command(request: &CommandRequest) -> CommandDecision {
+    let prompt = format_command(request);
+    eprintln!("{prompt}");
+    tokio::task::spawn_blocking(|| {
+        let mut line = String::new();
+        match std::io::BufRead::read_line(&mut std::io::stdin().lock(), &mut line) {
+            Ok(0) | Err(_) => CommandDecision::Deny,
+            Ok(_) => parse_command_answer(&line),
+        }
+    })
+    .await
+    .unwrap_or(CommandDecision::Deny)
+}
+
+/// The question, exactly as printed. Pure, so a test can assert that the exact text, the cwd
+/// inside the project and the timeout are shown before consent (N2).
+fn format_command(request: &CommandRequest) -> String {
+    let destructive = if request.destructive.is_empty() {
+        String::new()
+    } else {
+        let rows: String = request
+            .destructive
+            .iter()
+            .map(|finding| {
+                format!(
+                    "\n  DESTRUCTIVE {}: {} ({})",
+                    finding.id, finding.summary, finding.detail
+                )
+            })
+            .collect();
+        format!("\n  this command is classified destructive{rows}")
+    };
+    let deliberation = match &request.deliberation {
+        Some(round) if round.available() => {
+            let positions: String = round
+                .positions
+                .iter()
+                .map(|position| {
+                    let text: String = position.text.chars().take(400).collect();
+                    format!("\n  [{}] {text}", position.stance)
+                })
+                .collect();
+            format!(
+                "\n  deliberation ({}):{positions}\n  {}",
+                round.turn_id.as_deref().unwrap_or("no turn"),
+                round.note
+            )
+        }
+        Some(round) => format!("\n  deliberation: {}", round.note),
+        None => String::new(),
+    };
+    format!(
+        "\nThe agent wants to run a command:\n  {}\n  cwd: {} (inside {})\n  timeout: {}s{}{}\n  [a]llow once  [r]eject  (anything else rejects):",
+        request.command,
+        acp::plain_path(request.cwd.clone()).display(),
+        acp::plain_path(request.project_root.clone()).display(),
+        request.timeout_secs,
+        destructive,
+        deliberation
+    )
+}
+
+/// One line to one decision. Only an explicit yes allows.
+fn parse_command_answer(line: &str) -> CommandDecision {
+    match line.trim() {
+        "a" | "y" | "yes" => CommandDecision::AllowOnce,
+        _ => CommandDecision::Deny,
+    }
+}
+
+async fn ask_origin(request: &OriginRequest) -> OriginDecision {
+    let prompt = format_origin(request);
+    eprintln!("{prompt}");
+    tokio::task::spawn_blocking(|| {
+        let mut line = String::new();
+        match std::io::BufRead::read_line(&mut std::io::stdin().lock(), &mut line) {
+            Ok(0) | Err(_) => OriginDecision::Deny,
+            Ok(_) => parse_origin_answer(&line),
+        }
+    })
+    .await
+    .unwrap_or(OriginDecision::Deny)
+}
+
+/// The question, exactly as printed. Pure, so a test can assert the URL and its origin are shown
+/// before any request is sent.
+fn format_origin(request: &OriginRequest) -> String {
+    format!(
+        "\nThe agent wants to fetch a URL:\n  {}\n  origin: {}\n  [o]nce  [s]ession  [a]lways  [r]eject  (anything else rejects):",
+        request.url, request.origin
+    )
+}
+
+/// One line to one scope. Only an explicit answer allows, and `a` here means **always** — the
+/// network prompt has a scope the command prompt deliberately does not.
+fn parse_origin_answer(line: &str) -> OriginDecision {
+    match line.trim() {
+        "o" | "once" => OriginDecision::AllowOnce,
+        "s" | "session" => OriginDecision::AllowSession,
+        "a" | "always" => OriginDecision::AllowAlways,
+        _ => OriginDecision::Deny,
+    }
+}
+
 /// `omniroute` unless the caller or `RIGEL_PROVIDER` says otherwise. OmniRoute is Rigel's
 /// default because it is the local router: one key, any model behind it.
 fn provider_name(requested: Option<String>) -> String {
@@ -125,6 +315,7 @@ fn provider_name(requested: Option<String>) -> String {
 fn default_model(provider: &str) -> String {
     match provider {
         "openrouter" => rigel_core::agent::openrouter::DEFAULT_MODEL.to_string(),
+        "gemini" => rigel_core::agent::gemini::DEFAULT_MODEL.to_string(),
         _ => rigel_core::agent::omniroute::DEFAULT_MODEL.to_string(),
     }
 }
@@ -139,6 +330,14 @@ async fn provider_model(provider: &str) -> Result<Arc<dyn Model>, String> {
             })?;
             Ok(Arc::new(OpenRouterModel::new(key)))
         }
+        "gemini" => {
+            let key = credentials::get(credentials::GEMINI).map_err(|error| {
+                format!(
+                    "{error}\n  set one with: rigel keys set gemini (reads stdin), or GEMINI_API_KEY in the environment\n  the key comes from Google AI Studio: https://aistudio.google.com/apikey"
+                )
+            })?;
+            Ok(Arc::new(rigel_core::agent::gemini::model(key)))
+        }
         "omniroute" => {
             let key = credentials::get(credentials::OMNIROUTE).map_err(|error| {
                 format!(
@@ -149,7 +348,7 @@ async fn provider_model(provider: &str) -> Result<Arc<dyn Model>, String> {
             Ok(Arc::new(rigel_core::agent::omniroute::model(key)))
         }
         other => Err(format!(
-            "unknown provider `{other}`; use `omniroute` or `openrouter`"
+            "unknown provider `{other}`; use `omniroute`, `openrouter` or `gemini`"
         )),
     }
 }
@@ -339,6 +538,31 @@ pub async fn run_agent(dir: &Path, command: AgentCommand) -> ExitCode {
             }
         }
 
+        AgentCommand::Acp {
+            project,
+            session,
+            agent,
+            harness,
+            prompt,
+            approval,
+            timeout_secs,
+            exe,
+            json: as_json,
+        } => {
+            acp::run(acp::AcpArgs {
+                project,
+                session,
+                agent,
+                harness,
+                prompt,
+                json: as_json,
+                timeout_secs,
+                approval,
+                exe,
+            })
+            .await
+        }
+
         AgentCommand::Run {
             project,
             session,
@@ -348,11 +572,19 @@ pub async fn run_agent(dir: &Path, command: AgentCommand) -> ExitCode {
             script,
             provider,
             model,
+            approval,
             crash_after_journal,
             max_steps,
             json: as_json,
         } => {
             let provider = provider_name(provider);
+            // A machine-readable run has nobody to ask, so the default is no. An explicit
+            // `--approval allow` is the only way a command runs unattended.
+            let approval = approval.unwrap_or(if as_json {
+                acp::ApprovalChoice::Deny
+            } else {
+                acp::ApprovalChoice::Ask
+            });
             let service = match SessionService::open(&project).await {
                 Ok(service) => service,
                 Err(error) => return crate::fail(error),
@@ -376,6 +608,10 @@ pub async fn run_agent(dir: &Path, command: AgentCommand) -> ExitCode {
                     return ExitCode::from(1);
                 }
             };
+            // A scripted model has a fixed number of steps; spending three on advice would
+            // change the turn it was written to test. Scripted runs record that advice was not
+            // gathered, and the approval gate is unchanged.
+            let scripted = script.is_some();
 
             let model_name = model.clone().unwrap_or_else(|| {
                 if script.is_some() {
@@ -431,13 +667,26 @@ pub async fn run_agent(dir: &Path, command: AgentCommand) -> ExitCode {
             } else {
                 StopAt::Never
             };
+            let deliberator: Arc<dyn Deliberator> = if scripted {
+                Arc::new(NoDeliberation)
+            } else {
+                Arc::new(ModelDeliberator::new(
+                    model.clone(),
+                    label.clone(),
+                    service.clone(),
+                    budget.clone(),
+                ))
+            };
             let tools = Tools::new(
                 project.clone(),
                 service.clone(),
                 budget.clone(),
                 dir.to_path_buf(),
                 stop_at,
-            );
+            )
+            .with_command_approval(Arc::new(CliApprover { mode: approval }))
+            .with_origin_approval(Arc::new(CliApprover { mode: approval }))
+            .with_deliberation(deliberator);
             let coordinator = Coordinator {
                 session: service.clone(),
                 budget,
@@ -492,6 +741,88 @@ pub async fn run_agent(dir: &Path, command: AgentCommand) -> ExitCode {
                     ExitCode::from(error.exit_code())
                 }
             }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        CommandDecision, format_command, format_origin, parse_command_answer, parse_origin_answer,
+    };
+    use rigel_core::{CommandRequest, OriginDecision, OriginRequest};
+    use std::path::PathBuf;
+
+    fn request() -> CommandRequest {
+        CommandRequest {
+            command: "cargo test --workspace".to_string(),
+            project_root: PathBuf::from("/work/demo"),
+            cwd: PathBuf::from("/work/demo/crates/core"),
+            timeout_secs: 120,
+            destructive: Vec::new(),
+            deliberation: None,
+        }
+    }
+
+    #[test]
+    fn the_prompt_shows_the_exact_text_and_scope_before_consent() {
+        let prompt = format_command(&request());
+        assert!(prompt.contains("cargo test --workspace"));
+        assert!(prompt.contains("/work/demo/crates/core"));
+        assert!(prompt.contains("/work/demo"));
+        assert!(prompt.contains("120s"));
+        assert!(prompt.contains("anything else rejects"));
+    }
+
+    #[test]
+    fn a_destructive_finding_is_shown_before_the_question() {
+        let mut request = request();
+        request.command = "rm -rf /etc/secrets".to_string();
+        request.destructive =
+            rigel_core::classify(&request.command, &request.cwd, &request.project_root);
+        let prompt = format_command(&request);
+        assert!(prompt.contains("DESTRUCTIVE delete-outside-project"));
+        assert!(prompt.contains("DESTRUCTIVE recursive-remove"));
+        assert!(prompt.contains("rm -rf /etc/secrets"));
+    }
+
+    #[test]
+    fn only_an_explicit_yes_allows_once() {
+        for yes in ["a", "y", "yes", "  a  \n"] {
+            assert_eq!(parse_command_answer(yes), CommandDecision::AllowOnce);
+        }
+        // `A` is the ACP prompt's "always allow"; this prompt has no such scope, so it is a
+        // rejection rather than a silent upgrade.
+        for no in ["", "n", "no", "A\n", "allow\n", "always", "r", "\n"] {
+            assert_eq!(parse_command_answer(no), CommandDecision::Deny);
+        }
+    }
+
+    #[test]
+    fn the_network_prompt_names_the_url_and_the_origin_it_approves() {
+        let prompt = format_origin(&OriginRequest {
+            url: "https://example.com/docs/page".to_string(),
+            origin: "https://example.com".to_string(),
+        });
+        assert!(prompt.contains("https://example.com/docs/page"));
+        assert!(prompt.contains("origin: https://example.com"));
+        assert!(prompt.contains("[a]lways"));
+        assert!(prompt.contains("anything else rejects"));
+    }
+
+    #[test]
+    fn the_network_answer_maps_to_the_three_scopes_or_denies() {
+        assert_eq!(parse_origin_answer("o\n"), OriginDecision::AllowOnce);
+        assert_eq!(parse_origin_answer("once"), OriginDecision::AllowOnce);
+        assert_eq!(parse_origin_answer("s"), OriginDecision::AllowSession);
+        assert_eq!(
+            parse_origin_answer("session\n"),
+            OriginDecision::AllowSession
+        );
+        assert_eq!(parse_origin_answer("a"), OriginDecision::AllowAlways);
+        assert_eq!(parse_origin_answer("always\n"), OriginDecision::AllowAlways);
+        for no in ["", "r", "reject", "y", "yes", "A", "once more"] {
+            assert_eq!(parse_origin_answer(no), OriginDecision::Deny);
         }
     }
 }

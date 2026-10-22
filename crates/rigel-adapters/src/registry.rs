@@ -274,7 +274,7 @@ pub(crate) fn resolve_codex_exe(exe: &Path) -> PathBuf {
 
 /// The same lookup for any harness. An explicit path is used as given, so a test can point an
 /// adapter at a fixture without touching `PATH`.
-pub(crate) fn resolve_exe(harness: Harness, exe: &Path) -> PathBuf {
+pub fn resolve_exe(harness: Harness, exe: &Path) -> PathBuf {
     if exe.components().count() > 1 {
         return exe.to_path_buf();
     }
@@ -609,9 +609,7 @@ mod tests {
         let store = rigel_core::credentials::MemoryCredentialStore::default();
         assert!(!cache.refresh_auth(&store));
 
-        store
-            .set("test-provider", &rigel_core::credentials::Secret::new("k"))
-            .unwrap();
+        store.insert("test-provider", "k");
         assert!(cache.refresh_auth(&store));
         assert_eq!(cache.harnesses[0].info.auth_mode, AuthMode::ApiKey);
         assert!(!cache.refresh_auth(&store));

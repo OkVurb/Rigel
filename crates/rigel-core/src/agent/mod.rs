@@ -4,6 +4,7 @@
 //! |---|---|
 //! | [`model`] | the `Model` trait, streamed deltas, tool-call assembly, SSE decoding |
 //! | [`openrouter`] | one real provider, retries and `Retry-After` |
+//! | [`gemini`] | Google's OpenAI-compatible endpoint and its request profile |
 //! | [`omniroute`] | the local router, its health probe and autostart |
 //! | [`scripted`] | a deterministic model for tests and the offline QA run |
 //! | [`pricing`] | the local price fallback, marked `estimated` |
@@ -14,7 +15,12 @@
 //! normalised into the same `AgentEvent`s; the coordinator is for the agent Rigel runs
 //! itself (D19).
 
+pub mod approval;
 pub mod coordinator;
+pub mod deliberation;
+pub mod destructive;
+pub mod egress;
+pub mod gemini;
 pub mod model;
 pub mod omniroute;
 pub mod openrouter;
@@ -22,9 +28,15 @@ pub mod pricing;
 pub mod scripted;
 pub mod tools;
 
+pub use approval::{CommandApprover, CommandDecision, CommandRequest, DenyCommands};
 pub use coordinator::{
     AgentError, Cancels, Coordinator, DEFAULT_MAX_STEPS, DEFAULT_SUBAGENT_MODEL, SUBAGENT_MODELS,
     StopReason, SubagentPolicy, TurnRun, fixed_context_chars,
+};
+pub use deliberation::{Deliberation, Deliberator, ModelDeliberator, NoDeliberation, Position};
+pub use destructive::{Finding, POLICIES, Policy, classify};
+pub use egress::{
+    DenyOrigins, Egress, EgressError, Fetched, OriginApprover, OriginDecision, OriginRequest,
 };
 pub use model::{
     ChatMessage, ChatRequest, Delta, DeltaSink, Model, ModelError, RawUsage, SseDecoder, ToolCall,

@@ -10,10 +10,12 @@ import {
   type Item,
   type Patch,
   type Session,
+  type Settings,
   type Turn,
   type TurnQuote,
   type TurnTranscript,
 } from "./api";
+import { modelChoices } from "./models";
 import { previewAgents, previewBudget, previewPatches, previewSession, previewTranscript } from "./sessionMock";
 
 interface Props {
@@ -74,12 +76,29 @@ export default function SessionView({
   const [capInput, setCapInput] = useState("");
   const [keyPresent, setKeyPresent] = useState<boolean | null>(tauri ? null : true);
   const [warning, setWarning] = useState(false);
+  const [settings, setSettings] = useState<Settings | null>(null);
+  // A per-turn override; null means "whatever Settings says". Changing provider in Settings
+  // remounts this view, so the override cannot leak across a provider switch.
+  const [model, setModel] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [starting, setStarting] = useState(false);
 
   const spendMicros = budget?.session_micros ?? (session ? session.spend_cents * 10_000 : 0);
   const capMicros = budget?.cap_micros ?? (session?.budget_cents ? session.budget_cents * 10_000 : null);
+  const provider = settings?.provider ?? "omniroute";
+  const currentModel = model ?? settings?.model ?? "";
+
+  useEffect(() => {
+    let live = true;
+    api
+      .getSettings()
+      .then((next) => live && setSettings(next))
+      .catch(() => live && setSettings(null));
+    return () => {
+      live = false;
+    };
+  }, []);
 
   const sessionRef = useRef<Session | null>(session);
   const projectRef = useRef(project);
@@ -140,7 +159,7 @@ export default function SessionView({
           setBudget(await api.getBudget(project, loadedAgents[0].id));
         }
         const keys = await api.keyStatus();
-        setKeyPresent(keys.omniroute || keys.openrouter);
+        setKeyPresent(keys.omniroute || keys.openrouter || keys.gemini);
       } catch (problem) {
         setError(problem instanceof Error ? problem.message : String(problem));
       }
@@ -159,7 +178,7 @@ export default function SessionView({
       try {
         const [listed, keys] = await Promise.all([api.listSessions(project), api.keyStatus()]);
         if (!live) return;
-        setKeyPresent(keys.omniroute || keys.openrouter);
+        setKeyPresent(keys.omniroute || keys.openrouter || keys.gemini);
         const pick =
           listed.find((candidate) => candidate.status !== "ended") ?? listed[0] ?? null;
         if (pick) {
@@ -330,7 +349,7 @@ export default function SessionView({
     let cancelled = false;
     const timer = setTimeout(() => {
       api
-        .quoteTurn(projectRef.current, session.id, prompt, spendMicros, capMicros)
+        .quoteTurn(projectRef.current, session.id, prompt, spendMicros, capMicros, currentModel)
         .then((next) => {
           if (!cancelled) setQuote(next);
         })
@@ -342,7 +361,7 @@ export default function SessionView({
       cancelled = true;
       clearTimeout(timer);
     };
-  }, [session, text, spendMicros, capMicros]);
+  }, [session, text, spendMicros, capMicros, currentModel]);
 
   /* ------------------------------- actions ------------------------------- */
 
@@ -439,7 +458,7 @@ export default function SessionView({
         worker = await api.spawnAgent(project, session.id, "worker");
         setAgents([worker]);
       }
-      const reply = await api.sendTurn(project, session.id, worker.id, prompt);
+      const reply = await api.sendTurn(project, session.id, worker.id, prompt, currentModel);
       setLiveTurn(reply.turn);
       setTurns((previous) => [
         ...previous,
@@ -454,7 +473,7 @@ export default function SessionView({
     } finally {
       setBusy(false);
     }
-  }, [text, session, busy, tauri, agents, project]);
+  }, [text, session, busy, tauri, agents, project, currentModel]);
 
   const cancel = useCallback(async () => {
     if (!liveTurn) return;
@@ -768,6 +787,29 @@ export default function SessionView({
                 {live ? "Running…" : "Send"}
               </button>
             </div>
+            <div className="model-bar">
+              <label htmlFor="turn-model">model</label>
+              <select
+                id="turn-model"
+                value={currentModel}
+                onChange={(event) => {
+                  setModel(event.target.value);
+                  setQuote(null);
+                }}
+                disabled={live || !settings}
+                title="This turn only; the provider comes from Settings"
+              >
+                {modelChoices(provider, currentModel).map((choice) => (
+                  <option key={choice.id} value={choice.id}>
+                    {choice.label}
+                    {choice.hint ? ` · ${choice.hint}` : ""}
+                  </option>
+                ))}
+              </select>
+              <span className="fine">
+                {provider} · this turn only; the provider is set in Settings
+              </span>
+            </div>
             {text.trim() && quote ? (
               <p
                 className={`composer-quote${quoteWarning ? " over" : ""}`}
@@ -927,6 +969,74 @@ function ItemRow({ item, raw }: { item: Item; raw: boolean }) {
             <span className="tool-args">{path}</span>
           </summary>
           {diff ? <pre className="diff-block">{diff}</pre> : null}
+        </details>
+        {rawBlock}
+      </>
+    );
+  }
+
+  if (item.kind === "command") {
+    const result = bodyRecord(item, "result");
+    const command = result && typeof result.command === "string" ? result.command : "?";
+    const stdout = result && typeof result.stdout === "string" ? result.stdout : "";
+    const stderr = result && typeof result.stderr === "string" ? result.stderr : "";
+    const code =
+      result && typeof result.exit_code === "number"
+        ? String(result.exit_code)
+        : result && result.approved === false
+          ? "denied"
+          : result && result.timed_out === true
+            ? "timed out"
+            : "no exit code";
+    const destructive = result !== null && Array.isArray(result.destructive) && result.destructive.length > 0;
+    const round = result !== null && typeof result.deliberation === "object" && result.deliberation !== null
+      ? (result.deliberation as { positions?: { stance?: string; text?: string }[] })
+      : null;
+    const advice = Array.isArray(round?.positions)
+      ? round.positions.map((position) => `[${position.stance ?? "advisor"}] ${position.text ?? ""}`).join("\n\n")
+      : "";
+    return (
+      <>
+        <details className={`tool-line${item.status === "ok" ? "" : " bad"}`}>
+          <summary>
+            <span className="tool-name">$</span>
+            <span className="tool-args">{command}</span>
+            <span className="tool-status">
+              {destructive ? `destructive · ${code}` : code}
+            </span>
+          </summary>
+          <pre>
+            {[advice, `${stdout}${stderr}`.trim()].filter(Boolean).join("\n\n") ||
+              JSON.stringify(item.body, null, 2)}
+          </pre>
+        </details>
+        {rawBlock}
+      </>
+    );
+  }
+
+  if (item.kind === "web_search") {
+    const result = bodyRecord(item, "result");
+    const url = result && typeof result.url === "string" ? result.url : bodyText(item, "url");
+    const origin = result && typeof result.origin === "string" ? result.origin : "";
+    const status =
+      result && typeof result.status === "number"
+        ? String(result.status)
+        : result && result.approved === false
+          ? "denied"
+          : "error";
+    const text = result && typeof result.text === "string" ? result.text : "";
+    return (
+      <>
+        <details className={`tool-line${item.status === "ok" ? "" : " bad"}`}>
+          <summary>
+            <span className="tool-name">fetch</span>
+            <span className="tool-args">{origin || url}</span>
+            <span className="tool-status">
+              {status} · untrusted
+            </span>
+          </summary>
+          {text ? <pre>{text}</pre> : <pre>{JSON.stringify(item.body, null, 2)}</pre>}
         </details>
         {rawBlock}
       </>

@@ -2956,6 +2956,7 @@ dependencies = [
 name = "rigel-cli"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
  "clap",
  "rigel-adapters",
  "rigel-core",

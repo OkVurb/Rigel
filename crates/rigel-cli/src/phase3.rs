@@ -7,11 +7,14 @@ use std::path::PathBuf;
 
 use clap::Subcommand;
 
+mod acp;
 mod agent;
 mod ops;
+mod snapshot;
 
 pub use agent::run_agent;
 pub use ops::{run_keys, run_mcp, run_memory, run_patch};
+pub use snapshot::{SnapshotCommand, run_snapshot};
 
 #[derive(Subcommand)]
 pub enum AgentCommand {
@@ -33,17 +36,47 @@ pub enum AgentCommand {
         /// Deterministic model script instead of a provider (see docs/qa/p3.md).
         #[arg(long, value_name = "FILE")]
         script: Option<PathBuf>,
-        /// `omniroute` (local router, started if needed) or `openrouter`.
+        /// `omniroute` (local router, started if needed), `openrouter`, or `gemini`.
         /// Defaults to `$RIGEL_PROVIDER`, then `omniroute`.
         #[arg(long, value_name = "NAME")]
         provider: Option<String>,
         #[arg(long)]
         model: Option<String>,
+        /// How a `run_command` or `fetch_url` request is answered. Defaults to `ask`, or `deny` under --json.
+        #[arg(long, value_enum)]
+        approval: Option<acp::ApprovalChoice>,
         /// Stop after the patch journal is written, before the rename (crash test).
         #[arg(long)]
         crash_after_journal: bool,
         #[arg(long, default_value_t = rigel_core::DEFAULT_MAX_STEPS)]
         max_steps: usize,
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// One Cursor (or Cline) turn through the Agent Client Protocol.
+    Acp {
+        #[arg(long, value_name = "PATH", default_value = ".")]
+        project: PathBuf,
+        /// Session id. Defaults to the newest active session, starting one if there is none.
+        #[arg(long)]
+        session: Option<String>,
+        /// Role for the harness agent. One is created on first use.
+        #[arg(long, default_value = "acp")]
+        agent: String,
+        /// Which ACP harness to drive; each reads its own API-key variable.
+        #[arg(long, value_enum, default_value = "cursor")]
+        harness: acp::HarnessChoice,
+        #[arg(long)]
+        prompt: String,
+        /// How `session/request_permission` is answered. Defaults to `ask`, or `deny` under --json.
+        #[arg(long, value_enum)]
+        approval: Option<acp::ApprovalChoice>,
+        #[arg(long, default_value_t = 300)]
+        timeout_secs: u64,
+        /// The harness binary, when it is not the one on PATH.
+        #[arg(long, value_name = "PATH")]
+        exe: Option<PathBuf>,
         #[arg(long)]
         json: bool,
     },

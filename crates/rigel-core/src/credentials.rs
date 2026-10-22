@@ -4,19 +4,28 @@
 //! file, never logged, and never returned to the renderer: the UI can ask *whether* a key
 //! exists, not what it is.
 //!
-//! Provider environment variables are honoured before the backing store for headless use.
-//! That is a deliberate exception for the CLI and CI, not a storage location: a key in the
-//! environment is the user's choice, and Rigel still never writes it anywhere.
+//! `OPENROUTER_API_KEY` (and the other provider variables below) are honoured as a fallback
+//! for headless use. That is a deliberate exception for the CLI and CI, not a storage
+//! location: a key in the environment is the user's choice, and Rigel still never writes it
+//! anywhere.
 
 use std::collections::BTreeMap;
 use std::sync::Mutex;
 
 pub const OPENROUTER: &str = "openrouter";
-/// The key OmniRoute itself checks on `/v1`; not a model-provider key.
+/// The key OmniRoute itself checks on `/v1`; not a provider key.
 pub const OMNIROUTE: &str = "omniroute";
 pub const OPENAI: &str = "openai";
 pub const ANTHROPIC: &str = "anthropic";
 pub const CURSOR: &str = "cursor";
+pub const CLINE: &str = "cline";
+pub const GEMINI: &str = "gemini";
+
+/// Every provider Rigel can resolve. One list so a new adapter cannot be added to the keychain
+/// without also appearing in `rigel keys status` and in the environment scrub for commands.
+pub const PROVIDERS: &[&str] = &[
+    OMNIROUTE, OPENROUTER, OPENAI, ANTHROPIC, CURSOR, CLINE, GEMINI,
+];
 
 const SERVICE: &str = "rigel";
 
@@ -29,158 +38,149 @@ pub enum KeyError {
     Keychain(String),
 }
 
-/// A credential backend. Implementations never add environment fallback themselves; callers use
-/// [`get_from`] and [`present_in`] so the same env-first rule applies to every backend.
-pub trait CredentialStore: Send + Sync {
-    fn get(&self, provider: &str) -> Result<Secret, KeyError>;
-    fn present(&self, provider: &str) -> bool;
-    fn set(&self, provider: &str, value: &Secret) -> Result<(), KeyError>;
-    fn delete(&self, provider: &str) -> Result<(), KeyError>;
-}
-
-/// The production store backed by the operating system credential manager.
-#[derive(Debug, Default, Clone, Copy)]
-pub struct KeychainCredentialStore;
-
-impl KeychainCredentialStore {
-    fn entry(provider: &str) -> Result<keyring::Entry, KeyError> {
-        keyring::Entry::new(SERVICE, provider)
-            .map_err(|error| KeyError::Keychain(error.to_string()))
-    }
-}
-
-impl CredentialStore for KeychainCredentialStore {
-    fn get(&self, provider: &str) -> Result<Secret, KeyError> {
-        match Self::entry(provider)?.get_password() {
-            Ok(value) if !value.trim().is_empty() => Ok(Secret::new(value)),
-            Ok(_) | Err(keyring::Error::NoEntry) => Err(KeyError::Missing(provider.to_string())),
-            Err(error) => Err(KeyError::Keychain(error.to_string())),
-        }
-    }
-
-    fn present(&self, provider: &str) -> bool {
-        self.get(provider).is_ok()
-    }
-
-    fn set(&self, provider: &str, value: &Secret) -> Result<(), KeyError> {
-        Self::entry(provider)?
-            .set_password(value.expose())
-            .map_err(|error| KeyError::Keychain(error.to_string()))
-    }
-
-    fn delete(&self, provider: &str) -> Result<(), KeyError> {
-        match Self::entry(provider)?.delete_credential() {
-            Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
-            Err(error) => Err(KeyError::Keychain(error.to_string())),
-        }
-    }
-}
-
-/// A deterministic credential backend for tests and embedded callers that must not touch the OS
-/// keychain. Its `Debug` output deliberately reports only the entry names.
-#[derive(Default)]
-pub struct MemoryCredentialStore {
-    values: Mutex<BTreeMap<String, Secret>>,
-}
-
-impl std::fmt::Debug for MemoryCredentialStore {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let keys = self
-            .values
-            .lock()
-            .map(|values| values.keys().cloned().collect::<Vec<_>>())
-            .unwrap_or_default();
-        formatter
-            .debug_struct("MemoryCredentialStore")
-            .field("providers", &keys)
-            .finish()
-    }
-}
-
-impl CredentialStore for MemoryCredentialStore {
-    fn get(&self, provider: &str) -> Result<Secret, KeyError> {
-        self.values
-            .lock()
-            .map_err(|error| KeyError::Keychain(error.to_string()))?
-            .get(provider)
-            .cloned()
-            .filter(|value| !value.expose().trim().is_empty())
-            .ok_or_else(|| KeyError::Missing(provider.to_string()))
-    }
-
-    fn present(&self, provider: &str) -> bool {
-        self.get(provider).is_ok()
-    }
-
-    fn set(&self, provider: &str, value: &Secret) -> Result<(), KeyError> {
-        self.values
-            .lock()
-            .map_err(|error| KeyError::Keychain(error.to_string()))?
-            .insert(provider.to_string(), value.clone());
-        Ok(())
-    }
-
-    fn delete(&self, provider: &str) -> Result<(), KeyError> {
-        self.values
-            .lock()
-            .map_err(|error| KeyError::Keychain(error.to_string()))?
-            .remove(provider);
-        Ok(())
-    }
-}
-
-/// Cline stores one credential per selected model provider. P4.4 will write its per-agent config;
-/// defining the keychain name here keeps that later code on the same naming contract.
-pub fn cline_provider(provider: &str) -> String {
-    format!("cline.{}", provider.trim().to_ascii_lowercase())
-}
-
-/// Read a credential with the documented environment-first precedence.
-pub fn get_from(store: &dyn CredentialStore, provider: &str) -> Result<Secret, KeyError> {
-    env_key(provider).map_or_else(|| store.get(provider), |value| Ok(Secret::new(value)))
-}
-
-/// Check credential presence with the same environment-first precedence as [`get_from`].
-pub fn present_in(store: &dyn CredentialStore, provider: &str) -> bool {
-    env_key(provider).is_some() || store.present(provider)
-}
-
 /// Store or replace a key. Called by `rigel keys set` with the value read from stdin.
 pub fn set(provider: &str, value: &str) -> Result<(), KeyError> {
-    KeychainCredentialStore.set(provider, &Secret::new(value))
+    let entry = keyring::Entry::new(SERVICE, provider)
+        .map_err(|error| KeyError::Keychain(error.to_string()))?;
+    entry
+        .set_password(value)
+        .map_err(|error| KeyError::Keychain(error.to_string()))
 }
 
 pub fn delete(provider: &str) -> Result<(), KeyError> {
-    KeychainCredentialStore.delete(provider)
+    let entry = keyring::Entry::new(SERVICE, provider)
+        .map_err(|error| KeyError::Keychain(error.to_string()))?;
+    match entry.delete_credential() {
+        Ok(()) => Ok(()),
+        Err(keyring::Error::NoEntry) => Ok(()),
+        Err(error) => Err(KeyError::Keychain(error.to_string())),
+    }
 }
 
 /// Whether a usable key exists, for the settings screen. Never returns the key.
 pub fn present(provider: &str) -> bool {
-    present_in(&KeychainCredentialStore, provider)
+    get_from(&KeychainCredentialStore, provider).is_ok()
 }
 
 /// The key itself. Environment first so a test or CI run can override the keychain.
 pub fn get(provider: &str) -> Result<String, KeyError> {
-    get_from(&KeychainCredentialStore, provider).map(Secret::into_inner)
+    get_from(&KeychainCredentialStore, provider).map(|secret| secret.expose().to_string())
+}
+
+/// Where a per-agent credential is read from. The adapters take one of these instead of calling
+/// `get()` directly, so a test can inject a key without touching the OS keychain or the process
+/// environment.
+pub trait CredentialStore: Send + Sync {
+    /// `None` means this store has nothing for the provider; the caller decides whether that is
+    /// fatal.
+    fn lookup(&self, provider: &str) -> Option<Secret>;
+}
+
+/// The real store: the environment first (CI, a shell export, `infisical run`), then the OS
+/// keychain. A key in the environment wins so a developer can override a stale keychain entry for
+/// one run without deleting it.
+pub struct KeychainCredentialStore;
+
+impl CredentialStore for KeychainCredentialStore {
+    fn lookup(&self, provider: &str) -> Option<Secret> {
+        if let Some(value) = env_key(provider) {
+            return Some(Secret::new(value));
+        }
+        keyring::Entry::new(SERVICE, provider)
+            .ok()?
+            .get_password()
+            .ok()
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty())
+            .map(Secret::new)
+    }
+}
+
+/// A store held in memory. Tests use it so no test ever reads a real keychain entry.
+#[derive(Default)]
+pub struct MemoryCredentialStore {
+    keys: Mutex<BTreeMap<String, String>>,
+}
+
+impl MemoryCredentialStore {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn with(provider: &str, value: impl Into<String>) -> Self {
+        let store = Self::new();
+        store.insert(provider, value);
+        store
+    }
+
+    pub fn insert(&self, provider: &str, value: impl Into<String>) {
+        self.keys
+            .lock()
+            .expect("credential store lock")
+            .insert(provider.to_string(), value.into());
+    }
+
+    pub fn remove(&self, provider: &str) {
+        self.keys
+            .lock()
+            .expect("credential store lock")
+            .remove(provider);
+    }
+}
+
+impl CredentialStore for MemoryCredentialStore {
+    fn lookup(&self, provider: &str) -> Option<Secret> {
+        self.keys
+            .lock()
+            .expect("credential store lock")
+            .get(provider)
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty())
+            .map(Secret::new)
+    }
+}
+
+/// Whether a key exists, with the environment checked first. Adapters use this instead of
+/// reading the value just to decide whether a harness can start.
+pub fn present_in(store: &dyn CredentialStore, provider: &str) -> bool {
+    env_key(provider).is_some() || store.lookup(provider).is_some()
+}
+
+/// Resolve one provider through a store. An empty provider name is a miss, not a keychain read.
+pub fn get_from(store: &dyn CredentialStore, provider: &str) -> Result<Secret, KeyError> {
+    if provider.trim().is_empty() {
+        return Err(KeyError::Missing(provider.to_string()));
+    }
+    store
+        .lookup(provider)
+        .ok_or_else(|| KeyError::Missing(provider.to_string()))
+}
+
+/// The environment name a provider falls back to. Public so an adapter can say which variable it
+/// expects without hard-coding the mapping a second time.
+pub fn provider_environment_variable(provider: &str) -> Option<&'static str> {
+    match provider {
+        OPENROUTER => Some("OPENROUTER_API_KEY"),
+        OMNIROUTE => Some("OMNIROUTE_API_KEY"),
+        OPENAI => Some("OPENAI_API_KEY"),
+        ANTHROPIC => Some("ANTHROPIC_API_KEY"),
+        CURSOR => Some("CURSOR_API_KEY"),
+        CLINE => Some("CLINE_API_KEY"),
+        GEMINI => Some("GEMINI_API_KEY"),
+        _ => None,
+    }
 }
 
 fn env_key(provider: &str) -> Option<String> {
-    let name = match provider {
-        OPENROUTER => "OPENROUTER_API_KEY",
-        OMNIROUTE => "OMNIROUTE_API_KEY",
-        OPENAI => "OPENAI_API_KEY",
-        ANTHROPIC => "ANTHROPIC_API_KEY",
-        CURSOR => "CURSOR_API_KEY",
-        _ => return None,
-    };
+    let name = provider_environment_variable(provider)?;
     std::env::var(name)
         .ok()
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty())
 }
 
-/// A credential value whose debug representation is always redacted.
-#[derive(Clone, PartialEq, Eq)]
+/// The provider's credential never appears in a `Debug` dump.
+#[derive(Clone)]
 pub struct Secret(String);
 
 impl Secret {
@@ -190,10 +190,6 @@ impl Secret {
 
     pub fn expose(&self) -> &str {
         &self.0
-    }
-
-    pub fn into_inner(self) -> String {
-        self.0
     }
 }
 
@@ -205,66 +201,44 @@ impl std::fmt::Debug for Secret {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Mutex;
-
     use super::*;
 
-    static ENV_LOCK: Mutex<()> = Mutex::new(());
-
     #[test]
-    fn memory_store_supports_the_full_lifecycle() {
-        let store = MemoryCredentialStore::default();
-        assert!(!store.present(OPENAI));
-        assert!(matches!(store.get(OPENAI), Err(KeyError::Missing(_))));
-
-        store.set(OPENAI, &Secret::new("memory-key")).unwrap();
-        assert!(store.present(OPENAI));
-        assert_eq!(store.get(OPENAI).unwrap().expose(), "memory-key");
-
-        store.delete(OPENAI).unwrap();
-        assert!(!store.present(OPENAI));
-        store.delete(OPENAI).unwrap();
-    }
-
-    #[test]
-    fn environment_overrides_the_backing_store() {
-        let _guard = ENV_LOCK.lock().unwrap();
-        let original = std::env::var_os("CURSOR_API_KEY");
-        let store = MemoryCredentialStore::default();
-        store.set(CURSOR, &Secret::new("stored-key")).unwrap();
-
-        // SAFETY: this test serialises its own access to CURSOR_API_KEY and restores the prior
-        // value before returning. No other credential test mutates this variable.
-        unsafe { std::env::set_var("CURSOR_API_KEY", "environment-key") };
-        assert_eq!(
-            get_from(&store, CURSOR).unwrap().expose(),
-            "environment-key"
-        );
-
-        // SAFETY: see the matching set above.
-        unsafe {
-            if let Some(value) = original {
-                std::env::set_var("CURSOR_API_KEY", value);
-            } else {
-                std::env::remove_var("CURSOR_API_KEY");
-            }
-        }
-    }
-
-    #[test]
-    fn cline_names_are_provider_scoped() {
-        assert_eq!(cline_provider(" OpenRouter "), "cline.openrouter");
-    }
-
-    #[test]
-    fn secrets_and_memory_store_debug_are_redacted() {
+    fn a_secret_does_not_print_itself() {
         let secret = Secret::new("sk-live-abc");
         assert_eq!(format!("{secret:?}"), "Secret(<redacted>)");
+    }
 
-        let store = MemoryCredentialStore::default();
-        store.set(OPENAI, &secret).unwrap();
-        let debug = format!("{store:?}");
-        assert!(debug.contains(OPENAI));
-        assert!(!debug.contains("sk-live-abc"));
+    #[test]
+    fn a_memory_store_answers_only_for_what_it_holds() {
+        let store = MemoryCredentialStore::with("openai", "sk-test");
+        assert_eq!(get_from(&store, "openai").unwrap().expose(), "sk-test");
+        assert!(matches!(
+            get_from(&store, "anthropic"),
+            Err(KeyError::Missing(provider)) if provider == "anthropic"
+        ));
+        store.remove("openai");
+        assert!(get_from(&store, "openai").is_err());
+    }
+
+    #[test]
+    fn a_blank_key_is_not_a_key() {
+        let store = MemoryCredentialStore::with("openai", "   ");
+        assert!(get_from(&store, "openai").is_err());
+        assert!(get_from(&MemoryCredentialStore::new(), "").is_err());
+    }
+
+    #[test]
+    fn every_provider_rigel_knows_has_an_environment_fallback() {
+        // The mapping is what makes `infisical run` work without any code change; a provider
+        // added without one would silently fall back to the keychain only.
+        for provider in [
+            OPENAI, ANTHROPIC, OPENROUTER, OMNIROUTE, CURSOR, CLINE, GEMINI,
+        ] {
+            let name = provider_environment_variable(provider)
+                .unwrap_or_else(|| panic!("no environment name for {provider}"));
+            assert!(name.ends_with("_API_KEY"), "{provider} -> {name}");
+        }
+        assert!(provider_environment_variable("not-a-provider").is_none());
     }
 }
