@@ -31,6 +31,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
+use rigel_core::ItemKind;
 use rigel_core::credentials::{CredentialStore, Secret, get_from};
 use serde_json::{Value, json};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -196,7 +197,12 @@ pub enum AcpEvent {
     ToolCall {
         tool_call_id: String,
         title: String,
+        /// The ACP `kind` string, kept verbatim for the debug pane.
         kind: Option<String>,
+        /// Which of the ten item kinds this call is (§5.2, P4.8).
+        item_kind: ItemKind,
+        /// The operation word the item body carries (`read`, `write`, `execute`, …).
+        operation: &'static str,
         status: Option<String>,
         raw_input: Option<Value>,
     },
@@ -645,29 +651,35 @@ impl AcpClient {
             "agent_thought_chunk" => Some(AcpEvent::ThoughtDelta {
                 text: text_of(&update["content"]["text"]).unwrap_or_default(),
             }),
-            "tool_call" => Some(AcpEvent::ToolCall {
-                tool_call_id: update
-                    .get("toolCallId")
-                    .and_then(Value::as_str)
-                    .unwrap_or_default()
-                    .to_string(),
-                title: update
-                    .get("title")
-                    .and_then(Value::as_str)
-                    .map(|title| self.redact(title))
-                    .unwrap_or_default(),
-                kind: update
+            "tool_call" => {
+                let kind = update
                     .get("kind")
                     .and_then(Value::as_str)
-                    .map(str::to_string),
-                status: update
-                    .get("status")
-                    .and_then(Value::as_str)
-                    .map(str::to_string),
-                raw_input: update
-                    .get("rawInput")
-                    .map(|raw| redact_json(raw, &self.secrets)),
-            }),
+                    .map(str::to_string);
+                let (item_kind, operation) = crate::normalise::acp_tool(kind.as_deref());
+                Some(AcpEvent::ToolCall {
+                    tool_call_id: update
+                        .get("toolCallId")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default()
+                        .to_string(),
+                    title: update
+                        .get("title")
+                        .and_then(Value::as_str)
+                        .map(|title| self.redact(title))
+                        .unwrap_or_default(),
+                    kind,
+                    item_kind,
+                    operation,
+                    status: update
+                        .get("status")
+                        .and_then(Value::as_str)
+                        .map(str::to_string),
+                    raw_input: update
+                        .get("rawInput")
+                        .map(|raw| redact_json(raw, &self.secrets)),
+                })
+            }
             "tool_call_update" => Some(AcpEvent::ToolCallUpdate {
                 tool_call_id: update
                     .get("toolCallId")

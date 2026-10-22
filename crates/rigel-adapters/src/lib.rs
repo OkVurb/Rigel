@@ -7,10 +7,12 @@ use std::path::PathBuf;
 
 use rigel_core::credentials::Secret;
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 
 pub mod acp;
 pub mod claude;
 pub mod codex;
+pub mod normalise;
 pub mod registry;
 
 pub use acp::{
@@ -21,6 +23,7 @@ pub use claude::{
     ClaudeAdapter, ClaudeConfig, ClaudeEvent, ClaudeTurn, ClaudeUsage, PermissionMode,
 };
 pub use codex::{CodexAdapter, CodexConfig, CodexEvent, CodexUsage, Transport, TurnResult};
+pub use normalise::NormalItem;
 pub use registry::{AdapterCache, probe_all, probe_cached};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -67,6 +70,26 @@ pub fn redact(value: &str, secrets: &[Secret]) -> String {
             redacted.replace(exposed, "<redacted>")
         }
     })
+}
+
+/// [`redact`] over every string inside a JSON value. Item bodies carry raw tool input from the
+/// harness, so the same rule that protects event text has to apply before one is emitted.
+pub fn redact_json(value: &Value, secrets: &[Secret]) -> Value {
+    match value {
+        Value::String(text) => Value::String(redact(text, secrets)),
+        Value::Array(items) => Value::Array(
+            items
+                .iter()
+                .map(|item| redact_json(item, secrets))
+                .collect(),
+        ),
+        Value::Object(map) => Value::Object(
+            map.iter()
+                .map(|(key, value)| (key.clone(), redact_json(value, secrets)))
+                .collect(),
+        ),
+        other => other.clone(),
+    }
 }
 
 /// The keychain entry and environment variable a harness receives at its process boundary.

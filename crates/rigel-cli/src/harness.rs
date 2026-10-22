@@ -250,6 +250,7 @@ async fn run(options: RunOptions) -> ExitCode {
 
     let adapter = CodexAdapter::new(config);
     let mut notices = Vec::new();
+    let mut items = Vec::new();
     let mut streamed = false;
 
     let outcome = adapter
@@ -266,6 +267,9 @@ async fn run(options: RunOptions) -> ExitCode {
                     notices.push(message);
                 }
             }
+            // P4.8: every normalised item is reported, so `rigel codex run --json` shows the
+            // commands and file changes a turn actually made.
+            CodexEvent::Item(item) => items.push(item),
             CodexEvent::Started { .. } | CodexEvent::Message { .. } => {}
         })
         .await;
@@ -288,6 +292,10 @@ async fn run(options: RunOptions) -> ExitCode {
                         "usage": result.usage,
                         "duration_ms": result.duration.as_millis() as u64,
                         "notices": notices,
+                        "items": items.iter().map(|item| json!({
+                            "kind": item.kind.as_str(),
+                            "body": item.body,
+                        })).collect::<Vec<_>>(),
                     })
                 );
             } else {
@@ -310,6 +318,9 @@ async fn run(options: RunOptions) -> ExitCode {
                         "  usage     {} in ({} cached) · {} out",
                         usage.input_tokens, usage.cached_input_tokens, usage.output_tokens
                     );
+                }
+                for item in &items {
+                    println!("  item      {} {}", item.kind.as_str(), item.body);
                 }
                 for notice in &notices {
                     println!("  notice    {notice}");

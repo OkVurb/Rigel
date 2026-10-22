@@ -113,22 +113,31 @@ async fn probe_reports_the_installed_version() {
 async fn injected_environment_reaches_the_child_without_exposing_the_value() {
     let dir = tempfile::tempdir().unwrap();
     let adapter = CodexAdapter::new(config(dir.path(), Transport::AppServer));
-    let mut notices = Vec::new();
+    // The fake reports the variable's state through an `error` item, which P4.8 decodes as an
+    // `error` item rather than a notice.
+    let mut reported = Vec::new();
 
     adapter
         .run_turn("say pong", |event| {
-            if let CodexEvent::Notice { message } = event {
-                notices.push(message);
+            if let CodexEvent::Item(item) = event {
+                if let Some(message) = item.body["message"].as_str() {
+                    reported.push(message.to_string());
+                }
             }
         })
         .await
         .expect("turn should complete");
 
-    assert!(notices.iter().any(|notice| notice == "OPENAI_API_KEY=set"));
     assert!(
-        notices
+        reported
             .iter()
-            .all(|notice| !notice.contains("test-secret-that-must-not-print"))
+            .any(|message| message == "OPENAI_API_KEY=set"),
+        "expected the child's report, got {reported:?}"
+    );
+    assert!(
+        reported
+            .iter()
+            .all(|message| !message.contains("test-secret-that-must-not-print"))
     );
 }
 

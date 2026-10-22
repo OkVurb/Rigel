@@ -27,9 +27,10 @@ use std::time::Duration;
 use async_trait::async_trait;
 use rigel_adapters::acp::{AcpConfig, AcpEvent, ApprovalDecision, ApprovalRequest, Approver};
 use rigel_adapters::{
-    AcpClient, ClaudeAdapter, ClaudeConfig, ClaudeEvent, CodexAdapter, CodexConfig,
-    CodexEvent, PermissionMode, Transport,
+    AcpClient, ClaudeAdapter, ClaudeConfig, ClaudeEvent, CodexAdapter, CodexConfig, CodexEvent,
+    PermissionMode, Transport,
 };
+use rigel_core::ItemKind;
 use rigel_core::credentials::Secret;
 
 const SCENARIOS: [&str; 5] = ["start", "tool_call", "approval", "error", "interrupt"];
@@ -133,13 +134,13 @@ async fn claude_fixtures_replay_through_the_adapter() {
                 );
             }
             "tool_call" => {
-                // The `tool_use` block is not normalised yet (P4.8). What matters today is that
-                // the line is decoded without inventing text and without dropping the message.
+                // P4.8: the `tool_use` block is a `file_change` item, and the `tool_result` that
+                // comes back on the `user` line inherits that kind from the call that produced it.
                 let turn = outcome.expect("a finished turn");
                 assert_eq!(turn.text, "Reading src/lib.rs.", "{scenario}");
                 assert_eq!(
-                    events,
-                    vec![
+                    events[..3],
+                    [
                         ClaudeEvent::Started {
                             session_id: "cs-9c2".into(),
                             model: Some("claude-sonnet-4.5".into()),
@@ -151,8 +152,25 @@ async fn claude_fixtures_replay_through_the_adapter() {
                             text: "Reading src/lib.rs.".into()
                         },
                     ],
-                    "{scenario}: the tool_use block has no item yet (P4.8)"
+                    "{scenario}"
                 );
+                let ClaudeEvent::Item(call) = &events[3] else {
+                    panic!("{scenario}: expected a tool-call item, got {events:?}");
+                };
+                assert_eq!(call.kind, ItemKind::FileChange, "{scenario}");
+                assert_eq!(call.body["path"], "src/lib.rs", "{scenario}");
+                assert_eq!(call.body["operation"], "read", "{scenario}");
+                assert_eq!(call.body["tool"], "Read", "{scenario}");
+                assert_eq!(call.body["tool_use_id"], "toolu_01", "{scenario}");
+
+                let ClaudeEvent::Item(result) = &events[4] else {
+                    panic!("{scenario}: expected a tool-result item, got {events:?}");
+                };
+                assert_eq!(result.kind, ItemKind::FileChange, "{scenario}");
+                assert_eq!(result.body["tool_use_id"], "toolu_01", "{scenario}");
+                assert_eq!(result.body["ok"], true, "{scenario}");
+                assert_eq!(result.body["result"], "fn main() {}\n", "{scenario}");
+                assert_eq!(events.len(), 5, "{scenario}: nothing else was invented");
             }
             "approval" => {
                 // Without `--permission-prompt-tool` (P4.6's recorded deviation) the CLI's own
@@ -251,22 +269,33 @@ async fn codex_fixtures_replay_through_the_adapter() {
                 );
             }
             "tool_call" => {
-                // `commandExecution` items are not normalised yet (P4.8).
+                // P4.8: `item/completed` for a `commandExecution` is a `command` item. The
+                // `item/started` line before it is not decoded, so one command makes one row.
                 let turn = outcome.expect("a finished turn");
                 assert_eq!(turn.text, "All tests passed.", "{scenario}");
                 assert_eq!(
-                    events,
-                    vec![
-                        CodexEvent::Started {
-                            thread_id: "th-1".into(),
-                            transport: Transport::AppServer,
-                        },
-                        CodexEvent::Message {
-                            text: "All tests passed.".into()
-                        },
-                    ],
-                    "{scenario}: the command item has no event yet (P4.8)"
+                    events[..1],
+                    [CodexEvent::Started {
+                        thread_id: "th-1".into(),
+                        transport: Transport::AppServer,
+                    }],
+                    "{scenario}"
                 );
+                let CodexEvent::Item(command) = &events[1] else {
+                    panic!("{scenario}: expected a command item, got {events:?}");
+                };
+                assert_eq!(command.kind, ItemKind::Command, "{scenario}");
+                assert_eq!(command.body["command"], "cargo test --quiet", "{scenario}");
+                assert_eq!(command.body["exit_code"], 0, "{scenario}");
+                assert_eq!(command.body["status"], "completed", "{scenario}");
+                assert_eq!(
+                    events[2],
+                    CodexEvent::Message {
+                        text: "All tests passed.".into()
+                    },
+                    "{scenario}"
+                );
+                assert_eq!(events.len(), 3, "{scenario}: nothing else was invented");
             }
             "approval" => {
                 // The app-server approval request is a server-initiated JSON-RPC call. Until
@@ -348,8 +377,7 @@ async fn acp_fixtures_replay_through_the_client() {
 
         let mut events = Vec::new();
         let outcome = client.prompt("replay", |event| events.push(event)).await;
-        let recorded =
-            std::fs::read_to_string(dir.path().join("record.txt")).unwrap_or_default();
+        let recorded = std::fs::read_to_string(dir.path().join("record.txt")).unwrap_or_default();
 
         match scenario {
             "start" => {
@@ -388,6 +416,8 @@ async fn acp_fixtures_replay_through_the_client() {
                             tool_call_id: "call-3".into(),
                             title: "Run the test suite".into(),
                             kind: Some("execute".into()),
+                            item_kind: ItemKind::Command,
+                            operation: "execute",
                             status: Some("pending".into()),
                             raw_input: Some(serde_json::json!({ "command": "cargo test" })),
                         },
@@ -405,7 +435,10 @@ async fn acp_fixtures_replay_through_the_client() {
             }
             "approval" => {
                 let turn = outcome.expect("a finished turn");
-                assert_eq!(turn.text, "I need to delete the build directory.", "{scenario}");
+                assert_eq!(
+                    turn.text, "I need to delete the build directory.",
+                    "{scenario}"
+                );
 
                 let seen = approver.seen.lock().unwrap().clone();
                 assert_eq!(seen.len(), 1, "{scenario}: one permission request");

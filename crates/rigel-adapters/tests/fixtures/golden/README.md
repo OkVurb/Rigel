@@ -35,10 +35,15 @@ A gap is pinned rather than papered over, so closing it changes a test on purpos
 | Scenario | Claude | Codex | ACP |
 |---|---|---|---|
 | `start` | `Started` + `Delta` + `Message` + usage | `Started` + `Delta` + `Message` + usage | `MessageDelta` + `Usage` |
-| `tool_call` | text kept, `tool_use` block **not normalised** (P4.8) | `agentMessage` kept, `commandExecution` item **not normalised** (P4.8) | `ToolCall` + `ToolCallUpdate` |
+| `tool_call` | text, then `Item(file_change, read)` from the `tool_use` block and `Item(file_change)` for its `tool_result` | `Item(command)` with `exit_code`, then `agentMessage` → `Message` | `ToolCall` (+ `item_kind`, `operation`) + `ToolCallUpdate` |
 | `approval` | CLI declines under `dontAsk`; the refusal surfaces as a failed result (P4.6 deviation) | `item/commandExecution/requestApproval` is **ignored**, no reply is sent (P4.10) | request routed to the `Approver`, answer returned on the wire |
 | `error` | failed `result` → error with its text | `turn/failed` → error | JSON-RPC error response → error |
 | `interrupt` | stream ends without `result` → "ended without a result line" | stdout closes before `turn/completed` → "closed its stdout" | prompt answers `stopReason: cancelled` |
+
+Since P4.8 every decodable event lands in one of the ten kinds (§5.2), and anything unmappable is
+kept as an `error` item with `unmapped: true` and the wire event under `raw`. The mapping table is
+`crates/rigel-adapters/src/normalise.rs`; the scenarios above are what proves it against real
+stream shapes.
 
 Known defect recorded here rather than fixed in P4.7: Codex `turn/completed` with status
 `interrupted` is classified as a completed turn. The interrupt fixture therefore uses the

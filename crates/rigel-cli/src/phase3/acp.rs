@@ -18,6 +18,7 @@
 //! `tokens_in`/`tokens_out` stay zero and the reported cost is what is charged. Inventing a split
 //! would make the bill look more precise than it is.
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::sync::Arc;
@@ -27,7 +28,7 @@ use async_trait::async_trait;
 use clap::ValueEnum;
 use rigel_adapters::acp::{AcpConfig, AcpEvent, ApprovalDecision, ApprovalRequest, Approver};
 use rigel_adapters::{AcpClient, AdapterError, Harness};
-use rigel_core::{BudgetService, CostSource, SessionService, Usage, credentials};
+use rigel_core::{BudgetService, CostSource, ItemKind, SessionService, Usage, credentials};
 use serde_json::{Value, json};
 use tokio::sync::mpsc;
 
@@ -371,6 +372,9 @@ struct State {
     text: String,
     reasoning: String,
     usage: Option<rigel_adapters::AcpUsage>,
+    /// The item kind of each open tool call, so its completion updates the same kind instead of
+    /// defaulting every update back to `command` (P4.8).
+    kinds: HashMap<String, ItemKind>,
 }
 
 impl State {
@@ -393,21 +397,27 @@ impl State {
                 tool_call_id,
                 title,
                 kind,
+                item_kind,
+                operation,
                 status,
                 raw_input,
             } => {
                 if !json {
                     println!("\n  [{}] {title}", kind.as_deref().unwrap_or("tool"));
                 }
+                // P4.8: the ACP `kind` picks the item kind, so an edit is a file change and a
+                // search is a web search instead of everything being a command.
+                self.kinds.insert(tool_call_id.clone(), item_kind);
                 record(
                     service,
                     turn_id,
-                    "command",
+                    item_kind.as_str(),
                     status.as_deref().unwrap_or("running"),
                     json!({
                         "tool_call_id": tool_call_id,
                         "title": title,
                         "kind": kind,
+                        "operation": operation,
                         "raw_input": raw_input,
                     }),
                 )
@@ -425,10 +435,15 @@ impl State {
                         text.as_deref().unwrap_or_default()
                     );
                 }
+                let kind = self
+                    .kinds
+                    .get(&tool_call_id)
+                    .copied()
+                    .unwrap_or(ItemKind::Command);
                 record(
                     service,
                     turn_id,
-                    "command",
+                    kind.as_str(),
                     status.as_deref().unwrap_or("completed"),
                     json!({ "tool_call_id": tool_call_id, "text": text }),
                 )

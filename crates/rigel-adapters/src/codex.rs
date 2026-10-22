@@ -27,8 +27,10 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, Lines};
 use tokio::process::{ChildStdin, ChildStdout, Command};
 use tokio::time::{Instant, timeout_at};
 
+use rigel_core::ItemKind;
 use rigel_core::credentials::{CredentialStore, Secret, get_from};
 
+use crate::normalise::{self, NormalItem};
 use crate::{
     Adapter, AdapterError, ApprovalPolicy, AuthMode, Harness, HarnessInfo, SandboxMode,
     credential_spec,
@@ -154,6 +156,9 @@ pub enum CodexEvent {
     Notice {
         message: String,
     },
+    /// A tool call, file change, plan or other item already sorted into one of the ten kinds
+    /// (§5.2, P4.8).
+    Item(NormalItem),
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -423,7 +428,7 @@ impl CodexAdapter {
                     text = message.clone();
                     on_event(CodexEvent::Message { text: message });
                 }
-                ServerStep::Notice(note) => on_event(CodexEvent::Notice { message: note }),
+                ServerStep::Item(item) => on_event(CodexEvent::Item(item)),
                 ServerStep::Usage(parsed) => usage = Some(parsed),
                 ServerStep::Done(reported) => {
                     usage = reported.or(usage);
@@ -491,7 +496,7 @@ impl CodexAdapter {
                     text = message.clone();
                     on_event(CodexEvent::Message { text: message });
                 }
-                ExecStep::Notice(note) => on_event(CodexEvent::Notice { message: note }),
+                ExecStep::Item(item) => on_event(CodexEvent::Item(item)),
                 ExecStep::Usage(parsed) => {
                     usage = Some(parsed);
                     finished = true;
@@ -631,6 +636,10 @@ fn redact_event(event: CodexEvent, secrets: &[Secret]) -> CodexEvent {
         CodexEvent::Notice { message } => CodexEvent::Notice {
             message: redact_text(&message, secrets),
         },
+        CodexEvent::Item(item) => CodexEvent::Item(NormalItem::new(
+            item.kind,
+            crate::redact_json(&item.body, secrets),
+        )),
     }
 }
 
@@ -706,11 +715,140 @@ fn thread_id_of(result: &Value) -> Option<String> {
         })
 }
 
+/// One app-server or `exec` item as one of the ten kinds (§5.2). Both transports are decoded by
+/// the same function: `exec` spells its types and some keys in `snake_case`, and the fallback must
+/// not lose a command because of it. `None` means there is nothing to show — the caller emits an
+/// `agentMessage` through its own path, and `started` items carry no result yet.
+fn codex_item_of(item: &Value) -> Option<NormalItem> {
+    let item_type = item.get("type").and_then(Value::as_str).unwrap_or_default();
+    // `TodoList`/`todo_list` is the exec transport's plan.
+    let kind = normalise::codex_item(item_type).or_else(|| normalise::codex_exec_item(item_type));
+    let Some(kind) = kind else {
+        return Some(NormalItem::unmapped(
+            "codex",
+            item.clone(),
+            "no item kind for this item type",
+        ));
+    };
+    let field = |camel: &str, snake: &str| item.get(camel).or_else(|| item.get(snake));
+    let decoded = match kind {
+        ItemKind::Message => item
+            .get("text")
+            .and_then(Value::as_str)
+            .filter(|text| !text.is_empty())
+            .map(NormalItem::message),
+        ItemKind::Reasoning => {
+            let text = reasoning_text(item);
+            (!text.is_empty()).then(|| NormalItem::reasoning(text))
+        }
+        ItemKind::Command => Some(
+            NormalItem::command(
+                item.get("command")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default(),
+            )
+            .with(json!({
+                "cwd": item.get("cwd"),
+                "status": item.get("status"),
+                "exit_code": field("exitCode", "exit_code"),
+                "output": field("aggregatedOutput", "aggregated_output"),
+            })),
+        ),
+        ItemKind::FileChange => {
+            let changes = item.get("changes");
+            let first = changes
+                .and_then(Value::as_array)
+                .and_then(|entries| entries.first());
+            let operation = first
+                .and_then(|change| change.get("kind"))
+                .and_then(Value::as_str)
+                .unwrap_or("write");
+            let path = first
+                .and_then(|change| change.get("path"))
+                .and_then(Value::as_str);
+            Some(NormalItem::file_change(operation, path).with(json!({
+                "changes": changes,
+                "status": item.get("status"),
+            })))
+        }
+        ItemKind::McpCall => Some(
+            NormalItem::mcp_call(
+                item.get("server").and_then(Value::as_str).unwrap_or("mcp"),
+                item.get("tool").and_then(Value::as_str).unwrap_or("tool"),
+                item.get("arguments").cloned().unwrap_or_else(|| json!({})),
+            )
+            .with(json!({
+                "status": item.get("status"),
+                "result": item.get("result"),
+                "error": item.get("error"),
+            })),
+        ),
+        ItemKind::WebSearch => Some(
+            NormalItem::web_search(
+                item.get("query")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default(),
+            )
+            .with(json!({ "status": item.get("status") })),
+        ),
+        ItemKind::Plan => Some(NormalItem::plan(plan_texts(item))),
+        ItemKind::Error => item
+            .get("message")
+            .and_then(Value::as_str)
+            .map(|message| NormalItem::error("HARNESS", message)),
+        // Not carried by an app-server item, or handled by the caller.
+        ItemKind::Approval | ItemKind::Usage => None,
+    }?;
+    Some(decoded)
+}
+
+/// A reasoning item reports either a single `text` or a list of `summary` parts.
+fn reasoning_text(item: &Value) -> String {
+    if let Some(text) = item.get("text").and_then(Value::as_str) {
+        return text.to_string();
+    }
+    item.get("summary")
+        .and_then(Value::as_array)
+        .map(|parts| {
+            parts
+                .iter()
+                .filter_map(|part| part.get("text").and_then(Value::as_str))
+                .collect::<Vec<_>>()
+                .join("\n")
+        })
+        .unwrap_or_default()
+}
+
+/// A plan arrives as bare strings, `{step}` objects or `{text}` todos depending on transport.
+fn plan_texts(item: &Value) -> Vec<String> {
+    let entries = item
+        .get("plan")
+        .or_else(|| item.get("items"))
+        .or_else(|| item.get("steps"))
+        .and_then(Value::as_array);
+    entries
+        .map(|entries| {
+            entries
+                .iter()
+                .filter_map(|entry| {
+                    entry.as_str().map(str::to_string).or_else(|| {
+                        entry
+                            .get("step")
+                            .or_else(|| entry.get("text"))
+                            .and_then(Value::as_str)
+                            .map(str::to_string)
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 #[derive(Debug, PartialEq, Eq)]
 enum ServerStep {
     Delta(String),
     Message(String),
-    Notice(String),
+    Item(NormalItem),
     /// Codex reports usage mid-stream via `thread/tokenUsage/updated`.
     Usage(CodexUsage),
     Done(Option<CodexUsage>),
@@ -725,16 +863,19 @@ fn classify_notification(method: &str, params: &Value) -> ServerStep {
             .and_then(Value::as_str)
             .map(|text| ServerStep::Delta(text.to_string()))
             .unwrap_or(ServerStep::Ignore),
+        // Only `completed` is decoded: `started` for a tool carries no result yet, and the
+        // transcript would then hold two rows for one call. The agentMessage text has already
+        // streamed through `item/agentMessage/delta`.
         "item/completed" => match params["item"]["type"].as_str() {
             Some("agentMessage") => params["item"]["text"]
                 .as_str()
+                .filter(|text| !text.is_empty())
                 .map(|text| ServerStep::Message(text.to_string()))
                 .unwrap_or(ServerStep::Ignore),
-            Some("error") => params["item"]["message"]
-                .as_str()
-                .map(|text| ServerStep::Notice(text.to_string()))
+            Some(_) => codex_item_of(&params["item"])
+                .map(ServerStep::Item)
                 .unwrap_or(ServerStep::Ignore),
-            _ => ServerStep::Ignore,
+            None => ServerStep::Ignore,
         },
         // `last` is this turn; `total` is the whole thread, which would double-count.
         "thread/tokenUsage/updated" => usage_camel(&params["tokenUsage"]["last"])
@@ -761,7 +902,7 @@ fn classify_notification(method: &str, params: &Value) -> ServerStep {
 enum ExecStep {
     Started { thread: String },
     Message(String),
-    Notice(String),
+    Item(NormalItem),
     Usage(CodexUsage),
     Failed(String),
     Ignore,
@@ -779,13 +920,13 @@ fn classify_exec(value: &Value) -> ExecStep {
         Some("item.completed") => match value["item"]["type"].as_str() {
             Some("agent_message") => value["item"]["text"]
                 .as_str()
+                .filter(|text| !text.is_empty())
                 .map(|text| ExecStep::Message(text.to_string()))
                 .unwrap_or(ExecStep::Ignore),
-            Some("error") => value["item"]["message"]
-                .as_str()
-                .map(|text| ExecStep::Notice(text.to_string()))
+            Some(_) => codex_item_of(&value["item"])
+                .map(ExecStep::Item)
                 .unwrap_or(ExecStep::Ignore),
-            _ => ExecStep::Ignore,
+            None => ExecStep::Ignore,
         },
         Some("turn.completed") => value
             .get("usage")
@@ -876,15 +1017,92 @@ mod tests {
     }
 
     #[test]
-    fn an_exec_error_item_is_a_notice_not_a_failure() {
+    fn an_exec_error_item_is_an_error_item_not_a_failed_turn() {
         let warning = json!({
             "type": "item.completed",
             "item": { "type": "error", "message": "ignoring one unrecognized setting" }
         });
-        assert_eq!(
-            classify_exec(&warning),
-            ExecStep::Notice("ignoring one unrecognized setting".to_string())
-        );
+        let ExecStep::Item(item) = classify_exec(&warning) else {
+            panic!("expected an item");
+        };
+        assert_eq!(item.kind, ItemKind::Error);
+        assert_eq!(item.body["message"], "ignoring one unrecognized setting");
+        assert!(!item.is_unmapped());
+    }
+
+    #[test]
+    fn an_exec_command_is_a_command_item_with_its_exit_code() {
+        let completed = json!({
+            "type": "item.completed",
+            "item": {
+                "type": "command_execution",
+                "command": "cargo test --quiet",
+                "status": "completed",
+                "exit_code": 0,
+                "aggregated_output": "ok. 102 passed"
+            }
+        });
+        let ExecStep::Item(item) = classify_exec(&completed) else {
+            panic!("expected an item");
+        };
+        assert_eq!(item.kind, ItemKind::Command);
+        assert_eq!(item.body["command"], "cargo test --quiet");
+        assert_eq!(item.body["exit_code"], 0);
+        assert_eq!(item.body["output"], "ok. 102 passed");
+    }
+
+    #[test]
+    fn every_app_server_item_type_maps_to_its_kind_or_stays_unmapped() {
+        let cases = [
+            (
+                json!({ "type": "reasoning", "text": "weighing options" }),
+                ItemKind::Reasoning,
+            ),
+            (
+                json!({ "type": "commandExecution", "command": "cargo test", "exitCode": 0 }),
+                ItemKind::Command,
+            ),
+            (
+                json!({
+                    "type": "fileChange",
+                    "status": "completed",
+                    "changes": [{ "path": "src/lib.rs", "kind": "update" }]
+                }),
+                ItemKind::FileChange,
+            ),
+            (
+                json!({
+                    "type": "mcpToolCall",
+                    "server": "files",
+                    "tool": "read",
+                    "arguments": { "path": "README.md" }
+                }),
+                ItemKind::McpCall,
+            ),
+            (
+                json!({ "type": "webSearch", "query": "rustfmt options" }),
+                ItemKind::WebSearch,
+            ),
+            (
+                json!({ "type": "todoList", "items": [{ "text": "read" }, { "text": "fix" }] }),
+                ItemKind::Plan,
+            ),
+            (
+                json!({ "type": "error", "message": "drift" }),
+                ItemKind::Error,
+            ),
+        ];
+        for (item, expected) in cases {
+            let Some(decoded) = codex_item_of(&item) else {
+                panic!("no item for {item}");
+            };
+            assert_eq!(decoded.kind, expected, "{item}");
+            assert!(!decoded.is_unmapped(), "{item}");
+        }
+
+        let unknown = codex_item_of(&json!({ "type": "hologram", "value": 1 })).unwrap();
+        assert!(unknown.is_unmapped());
+        assert_eq!(unknown.body["raw"]["value"], 1);
     }
 
     #[test]

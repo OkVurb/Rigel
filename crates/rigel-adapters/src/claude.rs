@@ -20,19 +20,21 @@
 //! (`content_block_delta` with `text_delta`), a final `assistant` message, and `result` with
 //! `usage` and `total_cost_usd`.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fmt;
 use std::path::PathBuf;
 use std::process::{ExitStatus, Stdio};
 use std::time::Duration;
 
+use rigel_core::ItemKind;
 use rigel_core::credentials::{CredentialStore, Secret, get_from};
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
+use serde_json::{Value, json};
 use tokio::io::{AsyncBufReadExt, BufReader, Lines};
 use tokio::process::{ChildStdout, Command};
 use tokio::time::{Instant, timeout_at};
 
+use crate::normalise::{self, NormalItem};
 use crate::{Adapter, AdapterError, AuthMode, Harness, HarnessInfo, credential_spec};
 
 /// The API-key header is the only accepted source; `--bare` guarantees the others are absent.
@@ -144,6 +146,9 @@ pub enum ClaudeEvent {
     Notice {
         message: String,
     },
+    /// A non-text block — a reasoning trace, a tool call, a tool result — already sorted into one
+    /// of the ten item kinds (§5.2, P4.8).
+    Item(NormalItem),
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -225,6 +230,9 @@ impl ClaudeAdapter {
         let mut usage = None;
         let mut emitted = false;
         let mut finished = false;
+        // Tool calls whose results arrive later, so a result inherits the kind of the call that
+        // produced it instead of being guessed from its own shape.
+        let mut tool_calls: HashMap<String, ItemKind> = HashMap::new();
 
         loop {
             let line = next_line(&mut lines, deadline, emitted).await?;
@@ -235,84 +243,115 @@ impl ClaudeAdapter {
                 continue;
             };
 
-            match classify(&value) {
-                Step::Init {
-                    session_id: id,
-                    model,
-                    api_key_source,
-                } => {
-                    // Only the documented source is acceptable. Absent counts as unacceptable:
-                    // with `--bare` the CLI always reports one, and a silent absence would be
-                    // indistinguishable from a subscription turn (D21).
-                    if api_key_source.as_deref() != Some(ACCEPTED_KEY_SOURCE) {
-                        let _ = child.kill().await;
-                        let _ = wait_bounded(&mut child).await;
-                        return Err(AdapterError::RequiresApiKey {
-                            harness: Harness::Claude,
+            for step in classify(&value) {
+                match step {
+                    Step::Init {
+                        session_id: id,
+                        model,
+                        api_key_source,
+                    } => {
+                        // Only the documented source is acceptable. Absent counts as unacceptable:
+                        // with `--bare` the CLI always reports one, and a silent absence would be
+                        // indistinguishable from a subscription turn (D21).
+                        if api_key_source.as_deref() != Some(ACCEPTED_KEY_SOURCE) {
+                            let _ = child.kill().await;
+                            let _ = wait_bounded(&mut child).await;
+                            return Err(AdapterError::RequiresApiKey {
+                                harness: Harness::Claude,
+                            });
+                        }
+                        if !id.is_empty() {
+                            session_id = Some(crate::redact(&id, &secrets));
+                            on_event(ClaudeEvent::Started {
+                                session_id: crate::redact(&id, &secrets),
+                                model,
+                            });
+                        } else {
+                            on_event(ClaudeEvent::Started {
+                                session_id: String::new(),
+                                model,
+                            });
+                        }
+                    }
+                    Step::Delta(delta) => {
+                        emitted = true;
+                        text.push_str(&delta);
+                        on_event(ClaudeEvent::Delta {
+                            text: crate::redact(&delta, &secrets),
                         });
                     }
-                    if !id.is_empty() {
-                        session_id = Some(crate::redact(&id, &secrets));
-                        on_event(ClaudeEvent::Started {
-                            session_id: crate::redact(&id, &secrets),
-                            model,
-                        });
-                    } else {
-                        on_event(ClaudeEvent::Started {
-                            session_id: String::new(),
-                            model,
-                        });
-                    }
-                }
-                Step::Delta(delta) => {
-                    emitted = true;
-                    text.push_str(&delta);
-                    on_event(ClaudeEvent::Delta {
-                        text: crate::redact(&delta, &secrets),
-                    });
-                }
-                Step::Message(message) => {
-                    emitted = true;
-                    text = message.clone();
-                    on_event(ClaudeEvent::Message {
-                        text: crate::redact(&message, &secrets),
-                    });
-                }
-                Step::Notice(note) => on_event(ClaudeEvent::Notice {
-                    message: crate::redact(&note, &secrets),
-                }),
-                Step::Result {
-                    text: result,
-                    is_error,
-                    subtype,
-                    usage: reported,
-                    session_id: id,
-                } => {
-                    finished = true;
-                    usage = reported;
-                    if id.is_some() {
-                        session_id = id.map(|id| crate::redact(&id, &secrets));
-                    }
-                    if is_error || subtype != "success" {
-                        let _ = wait_bounded(&mut child).await;
-                        let reason = result
-                            .or_else(|| (!subtype.is_empty()).then(|| subtype.clone()))
-                            .unwrap_or_else(|| "claude reported an error".to_string());
-                        return Err(AdapterError::Other(format!(
-                            "claude: {}",
-                            crate::redact(&reason, &secrets)
-                        )));
-                    }
-                    if let Some(result) = result
-                        && text.is_empty()
-                    {
-                        text = result;
+                    Step::Message(message) => {
+                        emitted = true;
+                        text = message.clone();
                         on_event(ClaudeEvent::Message {
-                            text: crate::redact(&text, &secrets),
+                            text: crate::redact(&message, &secrets),
                         });
                     }
+                    Step::Notice(note) => on_event(ClaudeEvent::Notice {
+                        message: crate::redact(&note, &secrets),
+                    }),
+                    Step::ToolCall { id, item } => {
+                        if let Some(id) = id.as_ref().filter(|_| !item.is_unmapped()) {
+                            tool_calls.insert(id.clone(), item.kind);
+                        }
+                        on_event(ClaudeEvent::Item(redacted(item, &secrets)));
+                    }
+                    Step::Item(item) => on_event(ClaudeEvent::Item(redacted(item, &secrets))),
+                    Step::ToolResult {
+                        tool_use_id,
+                        text: result,
+                        is_error,
+                        raw,
+                    } => {
+                        let item = match tool_calls.get(&tool_use_id) {
+                            Some(kind) => NormalItem::new(
+                                *kind,
+                                json!({
+                                    "tool_use_id": tool_use_id,
+                                    "ok": !is_error,
+                                    "result": result,
+                                }),
+                            ),
+                            None => NormalItem::unmapped(
+                                "claude",
+                                raw,
+                                "a tool result whose call produced no item kind",
+                            ),
+                        };
+                        on_event(ClaudeEvent::Item(redacted(item, &secrets)));
+                    }
+                    Step::Result {
+                        text: result,
+                        is_error,
+                        subtype,
+                        usage: reported,
+                        session_id: id,
+                    } => {
+                        finished = true;
+                        usage = reported;
+                        if id.is_some() {
+                            session_id = id.map(|id| crate::redact(&id, &secrets));
+                        }
+                        if is_error || subtype != "success" {
+                            let _ = wait_bounded(&mut child).await;
+                            let reason = result
+                                .or_else(|| (!subtype.is_empty()).then(|| subtype.clone()))
+                                .unwrap_or_else(|| "claude reported an error".to_string());
+                            return Err(AdapterError::Other(format!(
+                                "claude: {}",
+                                crate::redact(&reason, &secrets)
+                            )));
+                        }
+                        if let Some(result) = result
+                            && text.is_empty()
+                        {
+                            text = result;
+                            on_event(ClaudeEvent::Message {
+                                text: crate::redact(&text, &secrets),
+                            });
+                        }
+                    }
                 }
-                Step::Ignore => {}
             }
         }
 
@@ -458,6 +497,19 @@ enum Step {
     Delta(String),
     Message(String),
     Notice(String),
+    /// A tool call, carrying its id so the matching `tool_result` can inherit its kind.
+    ToolCall {
+        id: Option<String>,
+        item: NormalItem,
+    },
+    /// A block that is already one item and needs no pairing (a reasoning trace).
+    Item(NormalItem),
+    ToolResult {
+        tool_use_id: String,
+        text: String,
+        is_error: bool,
+        raw: Value,
+    },
     Result {
         text: Option<String>,
         is_error: bool,
@@ -465,15 +517,14 @@ enum Step {
         usage: Option<ClaudeUsage>,
         session_id: Option<String>,
     },
-    Ignore,
 }
 
-fn classify(value: &Value) -> Step {
+fn classify(value: &Value) -> Vec<Step> {
     match value.get("type").and_then(Value::as_str) {
         Some("system") => match value.get("subtype").and_then(Value::as_str) {
             // Even a malformed init still carries the auth source, so it is classified rather
             // than dropped: a missing field must not become a licence to use the vendor login.
-            Some("init") => Step::Init {
+            Some("init") => vec![Step::Init {
                 session_id: value
                     .get("session_id")
                     .and_then(Value::as_str)
@@ -487,7 +538,7 @@ fn classify(value: &Value) -> Step {
                     .get("apiKeySource")
                     .and_then(Value::as_str)
                     .map(str::to_string),
-            },
+            }],
             Some("status") => {
                 let message = value
                     .get("message")
@@ -502,43 +553,37 @@ fn classify(value: &Value) -> Step {
                                 .unwrap_or("unknown")
                         )
                     });
-                Step::Notice(message)
+                vec![Step::Notice(message)]
             }
-            _ => Step::Ignore,
+            _ => Vec::new(),
         },
         Some("stream_event") => {
             let event = &value["event"];
-            let kind = event.get("type").and_then(Value::as_str);
-            if kind == Some("content_block_delta") {
-                let delta = &event["delta"];
-                if delta.get("type").and_then(Value::as_str) == Some("text_delta") {
-                    return delta
-                        .get("text")
-                        .and_then(Value::as_str)
-                        .map(|text| Step::Delta(text.to_string()))
-                        .unwrap_or(Step::Ignore);
-                }
+            if event.get("type").and_then(Value::as_str) != Some("content_block_delta") {
+                return Vec::new();
             }
-            Step::Ignore
-        }
-        Some("assistant") => {
-            let blocks = value["message"]["content"]
-                .as_array()
-                .cloned()
-                .unwrap_or_default();
-            let text = blocks
-                .iter()
-                .filter(|block| block.get("type").and_then(Value::as_str) == Some("text"))
-                .filter_map(|block| block.get("text").and_then(Value::as_str))
-                .collect::<Vec<_>>()
-                .join("\n");
-            if text.is_empty() {
-                Step::Ignore
-            } else {
-                Step::Message(text)
+            let delta = &event["delta"];
+            match delta.get("type").and_then(Value::as_str) {
+                Some("text_delta") => delta
+                    .get("text")
+                    .and_then(Value::as_str)
+                    .map(|text| vec![Step::Delta(text.to_string())])
+                    .unwrap_or_default(),
+                // A reasoning trace streams the same way the answer does; it is a `reasoning`
+                // item once it settles, so the delta is not folded into the answer text.
+                Some("thinking_delta") => delta
+                    .get("thinking")
+                    .and_then(Value::as_str)
+                    .filter(|text| !text.is_empty())
+                    .map(|text| vec![Step::Item(NormalItem::reasoning(text))])
+                    .unwrap_or_default(),
+                _ => Vec::new(),
             }
         }
-        Some("result") => Step::Result {
+        Some("assistant") => assistant_steps(&value["message"]["content"]),
+        // A `user` line in a stream-json transcript is a tool result travelling back to the model.
+        Some("user") => tool_result_steps(&value["message"]["content"]),
+        Some("result") => vec![Step::Result {
             text: value
                 .get("result")
                 .and_then(Value::as_str)
@@ -557,9 +602,144 @@ fn classify(value: &Value) -> Step {
                 .get("session_id")
                 .and_then(Value::as_str)
                 .map(str::to_string),
-        },
-        _ => Step::Ignore,
+        }],
+        _ => Vec::new(),
     }
+}
+
+/// One `assistant` message can carry text, thinking and any number of tool calls at once, so it
+/// decodes to a list of steps rather than a single one.
+fn assistant_steps(content: &Value) -> Vec<Step> {
+    let blocks = content.as_array().cloned().unwrap_or_default();
+    let mut steps = Vec::new();
+    let text = blocks
+        .iter()
+        .filter(|block| block.get("type").and_then(Value::as_str) == Some("text"))
+        .filter_map(|block| block.get("text").and_then(Value::as_str))
+        .collect::<Vec<_>>()
+        .join("\n");
+    if !text.is_empty() {
+        steps.push(Step::Message(text));
+    }
+    for block in &blocks {
+        match block.get("type").and_then(Value::as_str) {
+            Some("thinking") => {
+                if let Some(thinking) = block
+                    .get("thinking")
+                    .and_then(Value::as_str)
+                    .filter(|text| !text.is_empty())
+                {
+                    steps.push(Step::Item(NormalItem::reasoning(thinking)));
+                }
+            }
+            Some("tool_use") => {
+                let name = block.get("name").and_then(Value::as_str).unwrap_or("tool");
+                steps.push(Step::ToolCall {
+                    id: block.get("id").and_then(Value::as_str).map(str::to_string),
+                    item: tool_item(
+                        name,
+                        block.get("id").and_then(Value::as_str),
+                        &block["input"],
+                    ),
+                });
+            }
+            _ => {}
+        }
+    }
+    steps
+}
+
+fn tool_result_steps(content: &Value) -> Vec<Step> {
+    let mut steps = Vec::new();
+    for block in content.as_array().cloned().unwrap_or_default() {
+        if block.get("type").and_then(Value::as_str) != Some("tool_result") {
+            continue;
+        }
+        steps.push(Step::ToolResult {
+            tool_use_id: block
+                .get("tool_use_id")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string(),
+            text: match block.get("content") {
+                Some(Value::String(text)) => text.clone(),
+                Some(other) => other.to_string(),
+                None => String::new(),
+            },
+            is_error: block
+                .get("is_error")
+                .and_then(Value::as_bool)
+                .unwrap_or(false),
+            raw: block.clone(),
+        });
+    }
+    steps
+}
+
+/// One `tool_use` block as one of the ten kinds. An unknown builtin is kept as an unmapped error
+/// with its input intact rather than forced into a neighbouring kind (P4.8).
+fn tool_item(name: &str, id: Option<&str>, input: &Value) -> NormalItem {
+    let string = |key: &str| input.get(key).and_then(Value::as_str);
+    let Some((kind, operation)) = normalise::claude_tool(name) else {
+        return NormalItem::unmapped(
+            "claude",
+            json!({ "tool": name, "input": input }),
+            "no item kind for this tool",
+        );
+    };
+    let mut item = match kind {
+        ItemKind::Command => NormalItem::command(string("command").unwrap_or(name)),
+        ItemKind::FileChange => NormalItem::file_change(
+            operation,
+            string("file_path")
+                .or_else(|| string("notebook_path"))
+                .or_else(|| string("path")),
+        ),
+        ItemKind::WebSearch => NormalItem::web_search(
+            string("query")
+                .or_else(|| string("url"))
+                .unwrap_or_default(),
+        ),
+        ItemKind::McpCall => {
+            let (server, tool) = normalise::mcp_parts(name);
+            NormalItem::mcp_call(server, tool, input.clone())
+        }
+        ItemKind::Plan => NormalItem::plan(plan_entries(input)),
+        _ => NormalItem::new(kind, input.clone()),
+    };
+    if let Some(id) = id {
+        item = item.with(json!({ "tool_use_id": id }));
+    }
+    item.with(json!({ "tool": name, "operation": operation, "input": input }))
+}
+
+/// `TodoWrite` carries structured todos; `Task` carries a description. Both are the agent saying
+/// what it intends to do, which is what a `plan` item is for.
+fn plan_entries(input: &Value) -> Vec<String> {
+    let todos = input
+        .get("todos")
+        .and_then(Value::as_array)
+        .map(|todos| {
+            todos
+                .iter()
+                .filter_map(|todo| todo.get("content").and_then(Value::as_str))
+                .map(str::to_string)
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    if !todos.is_empty() {
+        return todos;
+    }
+    ["description", "prompt"]
+        .iter()
+        .find_map(|key| input.get(*key).and_then(Value::as_str))
+        .map(|text| vec![text.to_string()])
+        .unwrap_or_default()
+}
+
+/// Item bodies carry raw tool input, so the credential rule applies before one leaves the adapter.
+fn redacted(item: NormalItem, secrets: &[Secret]) -> NormalItem {
+    NormalItem::new(item.kind, crate::redact_json(&item.body, secrets))
 }
 
 fn usage_of(value: &Value) -> Option<ClaudeUsage> {
@@ -593,11 +773,11 @@ mod tests {
         });
         assert_eq!(
             classify(&init),
-            Step::Init {
+            vec![Step::Init {
                 session_id: "s-1".to_string(),
                 model: Some("free-stack".to_string()),
                 api_key_source: Some("ANTHROPIC_API_KEY".to_string()),
-            }
+            }]
         );
 
         let delta = json!({
@@ -608,13 +788,16 @@ mod tests {
                 "delta": { "type": "text_delta", "text": "pong" }
             }
         });
-        assert_eq!(classify(&delta), Step::Delta("pong".to_string()));
+        assert_eq!(classify(&delta), vec![Step::Delta("pong".to_string())]);
 
         let assistant = json!({
             "type": "assistant",
             "message": { "content": [{ "type": "text", "text": "pong" }] }
         });
-        assert_eq!(classify(&assistant), Step::Message("pong".to_string()));
+        assert_eq!(
+            classify(&assistant),
+            vec![Step::Message("pong".to_string())]
+        );
 
         let result = json!({
             "type": "result",
@@ -631,7 +814,7 @@ mod tests {
         });
         assert_eq!(
             classify(&result),
-            Step::Result {
+            vec![Step::Result {
                 text: Some("pong".to_string()),
                 is_error: false,
                 subtype: "success".to_string(),
@@ -642,7 +825,7 @@ mod tests {
                     cost_micros: Some(6160),
                 }),
                 session_id: Some("s-1".to_string()),
-            }
+            }]
         );
     }
 
@@ -654,14 +837,103 @@ mod tests {
             "is_error": true,
             "result": "tool permission denied"
         });
-        let Step::Result {
-            is_error, subtype, ..
-        } = classify(&result)
+        let steps = classify(&result);
+        let [
+            Step::Result {
+                is_error, subtype, ..
+            },
+        ] = &steps[..]
         else {
             panic!("expected a result step");
         };
-        assert!(is_error);
+        assert!(*is_error);
         assert_eq!(subtype, "error_during_execution");
+    }
+
+    #[test]
+    fn an_assistant_message_decodes_its_text_thinking_and_tool_calls() {
+        let assistant = json!({
+            "type": "assistant",
+            "message": { "content": [
+                { "type": "text", "text": "Reading src/lib.rs." },
+                { "type": "thinking", "thinking": "the file is small" },
+                { "type": "tool_use", "id": "toolu_01", "name": "Read", "input": { "file_path": "src/lib.rs" } },
+                { "type": "tool_use", "id": "toolu_02", "name": "Bash", "input": { "command": "cargo test" } },
+                { "type": "tool_use", "id": "toolu_03", "name": "mcp__files__read", "input": { "path": "README.md" } }
+            ]}
+        });
+        let steps = classify(&assistant);
+        assert_eq!(steps[0], Step::Message("Reading src/lib.rs.".into()));
+        let [
+            Step::Item(reasoning),
+            Step::ToolCall { item: read, .. },
+            Step::ToolCall { item: bash, .. },
+            Step::ToolCall { item: mcp, .. },
+        ] = &steps[1..]
+        else {
+            panic!("expected reasoning and three tool calls, got {steps:?}");
+        };
+        assert_eq!(reasoning.kind, ItemKind::Reasoning);
+        assert_eq!(reasoning.body["text"], "the file is small");
+        assert_eq!(read.kind, ItemKind::FileChange);
+        assert_eq!(read.body["operation"], "read");
+        assert_eq!(read.body["path"], "src/lib.rs");
+        assert_eq!(read.body["tool_use_id"], "toolu_01");
+        assert_eq!(bash.kind, ItemKind::Command);
+        assert_eq!(bash.body["command"], "cargo test");
+        assert_eq!(mcp.kind, ItemKind::McpCall);
+        assert_eq!(mcp.body["server"], "files");
+        assert_eq!(mcp.body["tool"], "read");
+    }
+
+    #[test]
+    fn an_unknown_tool_is_unmapped_rather_than_guessed() {
+        let assistant = json!({
+            "type": "assistant",
+            "message": { "content": [
+                { "type": "tool_use", "id": "toolu_09", "name": "TimeTravel", "input": { "year": 1999 } }
+            ]}
+        });
+        let [Step::ToolCall { item, .. }] = &classify(&assistant)[..] else {
+            panic!("expected one tool call");
+        };
+        assert!(item.is_unmapped());
+        assert_eq!(item.kind, ItemKind::Error);
+        assert_eq!(item.body["raw"]["input"]["year"], 1999);
+    }
+
+    #[test]
+    fn a_tool_result_carries_the_id_its_call_will_be_matched_by() {
+        let user = json!({
+            "type": "user",
+            "message": { "content": [
+                { "type": "tool_result", "tool_use_id": "toolu_01", "content": "fn main() {}" },
+                { "type": "tool_result", "tool_use_id": "toolu_02", "content": "boom", "is_error": true }
+            ]}
+        });
+        let steps = classify(&user);
+        assert_eq!(steps.len(), 2);
+        let [
+            Step::ToolResult {
+                tool_use_id,
+                text,
+                is_error,
+                ..
+            },
+            Step::ToolResult {
+                tool_use_id: failed,
+                is_error: failed_flag,
+                ..
+            },
+        ] = &steps[..]
+        else {
+            panic!("expected two tool results");
+        };
+        assert_eq!(tool_use_id, "toolu_01");
+        assert_eq!(text, "fn main() {}");
+        assert!(!is_error);
+        assert_eq!(failed, "toolu_02");
+        assert!(failed_flag);
     }
 
     #[test]
