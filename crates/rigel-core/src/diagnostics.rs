@@ -213,6 +213,107 @@ fn now_ms() -> u128 {
         .unwrap_or(0)
 }
 
+/// D95: one Markdown bundle and the JSON beside it for a whole session. Shares the redaction
+/// and write path with the diagnostics bundle; the caller supplies the rows it already loaded.
+pub fn session_bundle(
+    session: &crate::session::Session,
+    agents: &[crate::session::Agent],
+    turns: &[TurnTranscript],
+    patches: &[crate::patches::Patch],
+    secrets: &[Secret],
+) -> (String, String) {
+    let value = serde_json::json!({
+        "session": session,
+        "agents": agents,
+        "turns": turns,
+        "patches": patches,
+        "exported_at": now_ms(),
+    });
+    let json = serde_json::to_string_pretty(&redact_value(&value, secrets)).unwrap_or_default();
+
+    let mut out = String::new();
+    out.push_str(&format!(
+        "# Session · {}\n\n",
+        redact_text(session.title.as_deref().unwrap_or("untitled"), secrets)
+    ));
+    out.push_str(&format!(
+        "- id: `{}`\n- status: {:?}\n- started: {}\n- spend: {} micros\n- budget: {}\n\n",
+        session.id,
+        session.status,
+        session.created_at,
+        session.spend_micros,
+        session
+            .budget_cents
+            .map(|cents| format!("{cents} cents"))
+            .unwrap_or_else(|| "no cap".to_string()),
+    ));
+
+    out.push_str("## Agents\n\n");
+    out.push_str("| agent | harness | role | model | spend (micros) |\n|---|---|---|---|---|\n");
+    for agent in agents {
+        out.push_str(&format!(
+            "| `{}` | {} | {} | {} | {} |\n",
+            agent.id,
+            agent.harness,
+            redact_text(agent.role.as_deref().unwrap_or("—"), secrets),
+            redact_text(agent.model.as_deref().unwrap_or("—"), secrets),
+            agent.spend_micros,
+        ));
+    }
+
+    out.push_str("\n## Turns\n\n");
+    for transcript in turns {
+        let turn = &transcript.turn;
+        out.push_str(&format!(
+            "### {} · `{}` · {}\n\nPrompt: {}\n\n",
+            turn.seq,
+            turn.agent_id,
+            turn.status,
+            redact_text(turn.prompt.as_deref().unwrap_or("(none)"), secrets),
+        ));
+        for item in &transcript.items {
+            out.push_str(&format!(
+                "- `{}` {} ({})\n  ```json\n  {}\n  ```\n",
+                item.kind,
+                item.status,
+                item.seq,
+                serde_json::to_string(&redact_value(&item.body, secrets)).unwrap_or_default(),
+            ));
+        }
+        out.push('\n');
+    }
+
+    out.push_str("## Patches\n\n");
+    for patch in patches {
+        out.push_str(&format!(
+            "### {} · {} · {}\n\n```diff\n{}\n```\n\n",
+            patch.path,
+            patch.status,
+            patch.agent_id,
+            redact_text(&patch.diff, secrets),
+        ));
+    }
+
+    (out, json)
+}
+
+/// Write both halves of a session export under `<data>/exports/`, returning their paths.
+pub fn write_session_bundle(
+    data_dir: &Path,
+    session_id: &str,
+    markdown: &str,
+    json: &str,
+) -> io::Result<(PathBuf, PathBuf)> {
+    let dir = data_dir.join("exports");
+    fs::create_dir_all(&dir)?;
+    let stamp = now_ms();
+    let md_path = dir.join(format!("session-{session_id}-{stamp}.md"));
+    let json_path = dir.join(format!("session-{session_id}-{stamp}.json"));
+    fs::write(&md_path, markdown)?;
+    fs::write(&json_path, json)?;
+    Ok((md_path, json_path))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -238,6 +339,32 @@ mod tests {
             redact_text("x sk-abcdef y", &[short, long]),
             "x <redacted> y"
         );
+    }
+
+    #[test]
+    fn a_session_export_has_markdown_and_json_with_the_secret_removed() {
+        let session = crate::session::Session {
+            id: "s-1".to_string(),
+            project_root: "C:/work/demo".to_string(),
+            title: Some("fix sk-session-key".to_string()),
+            status: crate::session::SessionStatus::Active,
+            budget_cents: Some(500),
+            spend_cents: 1,
+            spend_micros: 1000,
+            interventions: 0,
+            tasks_done: 1,
+            created_at: 1,
+            ended_at: None,
+        };
+        let (markdown, json) =
+            session_bundle(&session, &[], &[], &[], &[Secret::new("sk-session-key")]);
+        assert!(markdown.contains("# Session"));
+        assert!(markdown.contains("## Agents"));
+        assert!(markdown.contains("## Turns"));
+        assert!(markdown.contains("## Patches"));
+        assert!(!markdown.contains("sk-session-key"));
+        assert!(!json.contains("sk-session-key"));
+        assert!(json.contains("\"session\""));
     }
 
     #[test]

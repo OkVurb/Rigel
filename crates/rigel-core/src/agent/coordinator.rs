@@ -24,6 +24,7 @@ use crate::budget::{BudgetError, BudgetOutcome, BudgetService, InterruptSink};
 use crate::domain::{AgentEvent, EventSink, ItemKind, NullSink, Usage};
 use crate::patches::PatchPipeline;
 use crate::session::{Item, SessionError, SessionService, Turn};
+use crate::snapshot::SnapshotService;
 use crate::tree::tree_hash;
 
 /// Enough for read → edit → verify → answer with room to recover from one bad tool call.
@@ -1325,13 +1326,23 @@ impl Coordinator {
                 })
             })
             .collect();
+        // D89: a per-turn snapshot, not only the tree hash. Capture is best effort and bounded
+        // by snapshot.rs's own caps; a failure degrades the checkpoint, not the turn.
+        let snapshot = SnapshotService::new(&self.project_root, self.project_root.join(".rigel"))
+            .capture("turn")
+            .ok()
+            .map(|snapshot| snapshot.id);
         let _ = self
             .session
             .checkpoint(
                 &agent.session_id,
                 Some(&turn.id),
                 &hash,
-                &serde_json::json!({ "turn_id": turn.id, "patches": applied }),
+                &serde_json::json!({
+                    "turn_id": turn.id,
+                    "patches": applied,
+                    "snapshot_id": snapshot,
+                }),
             )
             .await;
     }

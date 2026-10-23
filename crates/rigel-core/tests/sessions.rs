@@ -151,6 +151,16 @@ async fn checkpoints_record_the_tree_hash_for_resume() {
     assert_eq!(checkpoint.tree_hash, "9c1f0d");
     assert_eq!(checkpoint.turn_id.as_deref(), Some(turn.id.as_str()));
 
+    let listed = service.checkpoints(&session.id).await.unwrap();
+    assert_eq!(listed.len(), 1);
+    assert_eq!(listed[0].id, checkpoint.id);
+    let journal = service
+        .checkpoint_journal(&checkpoint.id)
+        .await
+        .unwrap()
+        .expect("journal round-trips");
+    assert_eq!(journal["patches"], serde_json::json!([]));
+
     assert!(matches!(
         service
             .checkpoint("missing", None, "x", &serde_json::json!({}))

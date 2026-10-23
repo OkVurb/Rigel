@@ -24,9 +24,10 @@ use rigel_core::{
     Agent, AgentEvent, ApprovalScope, AttributedHunk, BudgetService, ClaimConflict, ClaimService,
     CommandApprover, CommandDecision, CommandRequest, ConflictWatcher, EventSink, InterruptSink,
     MemoryFile, MemoryService, Model, OpenRouterModel, POLL_INTERVAL, Patch, PatchPipeline,
-    ResumeOutcome, Scopes, Session, SessionService, SkillDetail, SkillIndex, SkillsError, StopAt,
-    Store, SubagentPolicy, SyncPolicy, TeamAgent, Tools, Turn, TurnQuote, TurnTranscript,
-    UnverifiedChange, Usage, WriteMode, credentials, diagnostics, skills::search::SearchHit,
+    ResumeOutcome, Scopes, Session, SessionService, SkillDetail, SkillIndex, SkillsError,
+    SnapshotService, StopAt, Store, SubagentPolicy, SyncPolicy, TeamAgent, Tools, Turn, TurnQuote,
+    TurnTranscript, UnverifiedChange, Usage, WriteMode, credentials, diagnostics,
+    skills::search::SearchHit,
 };
 use serde::{Deserialize, Serialize};
 use tauri::{Emitter, State};
@@ -64,6 +65,11 @@ fn default_effort() -> String {
     "medium".to_string()
 }
 
+/// D90 defaults: notifications are on, but a platform that refuses permission stays quiet.
+fn default_true() -> bool {
+    true
+}
+
 fn valid_effort(effort: &str) -> bool {
     matches!(effort, "low" | "medium" | "high")
 }
@@ -82,6 +88,12 @@ pub struct Settings {
     /// Sent as `reasoning_effort` on every native turn; never folded into the model id.
     #[serde(default = "default_effort")]
     pub effort: String,
+    #[serde(default = "default_true")]
+    pub notify_approval: bool,
+    #[serde(default = "default_true")]
+    pub notify_turn_done: bool,
+    #[serde(default = "default_true")]
+    pub notify_turn_failed: bool,
 }
 
 impl Default for Settings {
@@ -93,6 +105,9 @@ impl Default for Settings {
             provider: default_provider(),
             model: default_model(),
             effort: default_effort(),
+            notify_approval: true,
+            notify_turn_done: true,
+            notify_turn_failed: true,
         }
     }
 }
@@ -449,6 +464,89 @@ fn diagnostics_export(
         Ok(DiagnosticsBundle {
             path: path.display().to_string(),
             body,
+        })
+    })
+}
+
+#[tauri::command]
+fn checkpoint_list(
+    project: String,
+    session: String,
+) -> Result<Vec<rigel_core::Checkpoint>, String> {
+    tauri::async_runtime::block_on(async move {
+        let root = std::fs::canonicalize(&project).map_err(message)?;
+        SessionService::open(&root)
+            .await
+            .map_err(message)?
+            .checkpoints(&session)
+            .await
+            .map_err(message)
+    })
+}
+
+/// D89: put the tree back to the snapshot a turn recorded. Explicit only; the preview and the
+/// journal stay available, so this is a reviewed restore rather than a rollback of history.
+#[tauri::command]
+fn checkpoint_restore(
+    project: String,
+    id: String,
+) -> Result<rigel_core::snapshot::RestoreReport, String> {
+    tauri::async_runtime::block_on(async move {
+        let root = std::fs::canonicalize(&project).map_err(message)?;
+        let service = SessionService::open(&root).await.map_err(message)?;
+        let journal = service
+            .checkpoint_journal(&id)
+            .await
+            .map_err(message)?
+            .ok_or_else(|| "checkpoint not found".to_string())?;
+        let snapshot = journal
+            .get("snapshot_id")
+            .and_then(|value| value.as_str())
+            .ok_or_else(|| {
+                "this checkpoint predates per-turn snapshots; resume it instead".to_string()
+            })?;
+        SnapshotService::new(&root, root.join(".rigel"))
+            .restore(snapshot, &root)
+            .map_err(message)
+    })
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct SessionExport {
+    pub markdown_path: String,
+    pub json_path: String,
+    pub markdown: String,
+}
+
+/// D95: one Markdown bundle per session, with the JSON beside it. The same redaction path as
+/// diagnostics; writes under the app data folder so a session's machine paths never land in a
+/// project that might be committed.
+#[tauri::command]
+fn session_export(project: String, id: String) -> Result<SessionExport, String> {
+    tauri::async_runtime::block_on(async move {
+        let root = std::fs::canonicalize(&project).map_err(message)?;
+        let service = SessionService::open(&root).await.map_err(message)?;
+        let session = service.get(&id).await.map_err(message)?;
+        let agents = service.agents(&id).await.map_err(message)?;
+        let turns = service.transcript(&id).await.map_err(message)?;
+        let patches = PatchPipeline::new(&root, service.pool().clone())
+            .list(&id)
+            .await
+            .unwrap_or_default();
+        let (markdown, json) = diagnostics::session_bundle(
+            &session,
+            &agents,
+            &turns,
+            &patches,
+            &diagnostics::secrets(),
+        );
+        let (md_path, json_path) =
+            diagnostics::write_session_bundle(&index_dir(), &id, &markdown, &json)
+                .map_err(message)?;
+        Ok(SessionExport {
+            markdown_path: md_path.display().to_string(),
+            json_path: json_path.display().to_string(),
+            markdown,
         })
     })
 }
@@ -1420,6 +1518,9 @@ pub fn run() {
             session_transcript,
             session_resume,
             diagnostics_export,
+            session_export,
+            checkpoint_list,
+            checkpoint_restore,
             agent_list,
             agent_team,
             agent_spawn,

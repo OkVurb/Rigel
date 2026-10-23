@@ -753,6 +753,41 @@ impl SessionService {
         Ok(out)
     }
 
+    /// Every checkpoint this session recorded, newest last. D89 lists one per turn.
+    pub async fn checkpoints(&self, session_id: &str) -> Result<Vec<Checkpoint>, SessionError> {
+        self.get(session_id).await?;
+        let rows: Vec<(String, String, Option<String>, String, i64)> = sqlx::query_as(
+            "SELECT id, session_id, turn_id, tree_hash, created_at
+             FROM checkpoints WHERE session_id = ? ORDER BY created_at, id",
+        )
+        .bind(session_id)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows
+            .into_iter()
+            .map(|row| Checkpoint {
+                id: row.0,
+                session_id: row.1,
+                turn_id: row.2,
+                tree_hash: row.3,
+                created_at: row.4,
+            })
+            .collect())
+    }
+
+    /// The journal a checkpoint wrote, which names the snapshot to restore (D89).
+    pub async fn checkpoint_journal(
+        &self,
+        id: &str,
+    ) -> Result<Option<serde_json::Value>, SessionError> {
+        let row: Option<(String,)> =
+            sqlx::query_as("SELECT journal_json FROM checkpoints WHERE id = ?")
+                .bind(id)
+                .fetch_optional(&self.pool)
+                .await?;
+        Ok(row.and_then(|row| serde_json::from_str(&row.0).ok()))
+    }
+
     pub async fn latest_checkpoint(
         &self,
         session_id: &str,

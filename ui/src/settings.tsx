@@ -8,6 +8,7 @@ import {
   type Settings,
 } from "./api";
 import { ModelControls } from "./modelpicker";
+import { ensurePermission } from "./notify";
 
 interface Props {
   keys: KeyStatus | null;
@@ -335,6 +336,22 @@ export default function SettingsView({ keys, project, session, onKeys, onNotice 
     }
   };
 
+  const saveNotification = async (field: "notify_approval" | "notify_turn_done" | "notify_turn_failed", enabled: boolean) => {
+    if (!settings) return;
+    if (enabled && !(await ensurePermission())) {
+      onNotice("The OS refused notification permission; the switches stay off in this window.");
+      return;
+    }
+    const next = { ...settings, [field]: enabled };
+    setSettings(next);
+    try {
+      setSettings(await api.saveSettings(next));
+      onNotice(enabled ? "Notification enabled." : "Notification disabled.");
+    } catch (problem) {
+      setError(problem instanceof Error ? problem.message : String(problem));
+    }
+  };
+
   const refreshServer = async () => {
     try {
       setServer(await api.omnirouteStatus());
@@ -654,6 +671,34 @@ export default function SettingsView({ keys, project, session, onKeys, onNotice 
             <code> reasoning_effort</code>; it is not baked into the model id. Subagents stay on
             the cheap allowlist and cannot be pointed at an expensive model.
           </p>
+        </section>
+
+        <section className="settings-section">
+          <div className="settings-head">
+            <h3>Desktop notifications</h3>
+            <span className="pill cancelled">no sound</span>
+          </div>
+          <p className="fine">
+            A turn you are already watching stays silent. These switches only affect events that
+            happen while the window is in the background.
+          </p>
+          {(
+            [
+              ["notify_approval", "Approval waiting"],
+              ["notify_turn_done", "Turn finished"],
+              ["notify_turn_failed", "Turn failed"],
+            ] as const
+          ).map(([field, label]) => (
+            <label className="toggle" key={field}>
+              <input
+                type="checkbox"
+                checked={settings?.[field] ?? true}
+                disabled={!settings}
+                onChange={(event) => void saveNotification(field, event.target.checked)}
+              />
+              {label}
+            </label>
+          ))}
         </section>
       </main>
 

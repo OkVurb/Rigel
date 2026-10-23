@@ -518,6 +518,15 @@ versions, the newest turn, key-presence only, and a redacted log tail, written u
 `<app data>/crash.log`. Settings gains the action, and nothing is sent anywhere. The two remaining
 open items are unchanged: P7.5 needs a trusted certificate and P7.9 needs a clean boot.
 
+**Round-7 features, first three (23 Oct 2026):** D95 exports one Markdown bundle and its JSON
+under `<app data>/exports/`, built from the same redaction path as diagnostics and linked from the
+Session header. D89 now records a snapshot after every completed turn (best effort, under
+`<repo>/.rigel/snapshots/` and gitignored), lists checkpoints per turn and restores one only on an
+explicit click. D90 adds three per-event notification switches to Settings; notifications are
+silent, never fire for a focused window, and use the WebView Notification API after a user-granted
+permission. Session export, checkpoints and notifications each have their own tests or build
+coverage; no external service is involved.
+
 **Environment facts a fresh agent will trip over:** the debug app loads `http://localhost:5173`, so
 `npm --prefix ui run dev` must be running before `cargo run -p rigel-app`; `vendor/agentchattr`
 and `.mcp.json` are local-only; never launch agents with `vendor/agentchattr/windows/*.bat`

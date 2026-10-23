@@ -3,12 +3,14 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   api,
   compact,
+  when,
   isTauri,
   type Agent,
   type AgentEvent,
   type BudgetSnapshot,
   type Item,
   type ApprovalAnswer,
+  type Checkpoint,
   type Patch,
   type PendingApproval,
   type Session,
@@ -20,6 +22,7 @@ import {
   type TurnTranscript,
 } from "./api";
 import { ModelControls } from "./modelpicker";
+import { notify } from "./notify";
 import {
   previewAgents,
   previewApprovals,
@@ -87,6 +90,7 @@ export default function SessionView({
   const [turns, setTurns] = useState<TurnTranscript[]>(() => (tauri ? [] : previewTranscript));
   const [budget, setBudget] = useState<BudgetSnapshot | null>(() => (tauri ? null : previewBudget));
   const [patches, setPatches] = useState<Patch[]>(() => (tauri ? [] : previewPatches));
+  const [checkpoints, setCheckpoints] = useState<Checkpoint[]>([]);
   const [stream, setStream] = useState<Record<string, string>>({});
   const [liveTurn, setLiveTurn] = useState<Turn | null>(null);
   // D40: one transcript, or two side by side. Never more than two, and never a grid.
@@ -97,6 +101,7 @@ export default function SessionView({
   const [capInput, setCapInput] = useState("");
   const [keyPresent, setKeyPresent] = useState<boolean | null>(tauri ? null : true);
   const [warning, setWarning] = useState(false);
+  const [exporting, setExporting] = useState(false);
   // Who the composer sends to. A Claude turn is run by the harness; everything else is the
   // native loop. The picker is the only place this is chosen, so the transcript header can say
   // which agent answered.
@@ -116,6 +121,11 @@ export default function SessionView({
   const [approvals, setApprovals] = useState<PendingApproval[]>(() =>
     tauri ? [] : previewApprovals.map((pending) => ({ ...pending })),
   );
+  const approvalsSeen = useRef(0);
+  const defaultsRef = useRef<Settings | null>(defaults);
+  useEffect(() => {
+    defaultsRef.current = defaults;
+  }, [defaults]);
 
   const spendMicros = budget?.session_micros ?? (session ? session.spend_cents * 10_000 : 0);
   const capMicros = budget?.cap_micros ?? (session?.budget_cents ? session.budget_cents * 10_000 : null);
@@ -140,7 +150,19 @@ export default function SessionView({
     const tick = async () => {
       try {
         const open = await api.approvals.pending();
-        if (alive) setApprovals(open);
+        if (alive) {
+          if (open.length > approvalsSeen.current) {
+            notify(
+              "approval",
+              "Rigel · approval waiting",
+              open[open.length - 1]?.title ?? "A command is waiting for your answer.",
+              defaultsRef.current,
+              document.visibilityState === "visible" && document.hasFocus(),
+            );
+          }
+          approvalsSeen.current = open.length;
+          setApprovals(open);
+        }
       } catch {
         // A window that cannot read the channel shows no card; the command stays refused.
       }
@@ -176,16 +198,18 @@ export default function SessionView({
     const current = sessionRef.current;
     if (!tauri || !projectRef.current || !current) return;
     try {
-      const [nextTurns, nextAgents, nextPatches, nextSession, nextTeam] = await Promise.all([
+      const [nextTurns, nextAgents, nextPatches, nextSession, nextTeam, nextCheckpoints] = await Promise.all([
         api.transcript(projectRef.current, current.id),
         api.listAgents(projectRef.current, current.id),
         api.listPatches(projectRef.current, current.id),
         api.getSession(projectRef.current, current.id),
         api.team(projectRef.current, current.id),
+        api.listCheckpoints(projectRef.current, current.id),
       ]);
       setTurns(nextTurns);
       setAgents(nextAgents);
       setPatches(nextPatches);
+      setCheckpoints(nextCheckpoints);
       setTeam(nextTeam);
       setSession(nextSession);
       if (nextAgents[0]) {
@@ -202,21 +226,25 @@ export default function SessionView({
       setTurns([]);
       setAgents([]);
       setPatches([]);
+      setCheckpoints([]);
       setTeam([]);
       setBudget(null);
       setError(null);
       if (!tauri || !project) return;
       try {
-        const [loadedTurns, loadedAgents, loadedPatches, fresh, loadedTeam] = await Promise.all([
-          api.transcript(project, next.id),
-          api.listAgents(project, next.id),
-          api.listPatches(project, next.id),
-          api.getSession(project, next.id),
-          api.team(project, next.id),
-        ]);
+        const [loadedTurns, loadedAgents, loadedPatches, fresh, loadedTeam, loadedCheckpoints] =
+          await Promise.all([
+            api.transcript(project, next.id),
+            api.listAgents(project, next.id),
+            api.listPatches(project, next.id),
+            api.getSession(project, next.id),
+            api.team(project, next.id),
+            api.listCheckpoints(project, next.id),
+          ]);
         setTurns(loadedTurns);
         setAgents(loadedAgents);
         setPatches(loadedPatches);
+        setCheckpoints(loadedCheckpoints);
         setTeam(loadedTeam);
         setSession(fresh);
         if (loadedAgents[0]) {
@@ -287,6 +315,9 @@ export default function SessionView({
         provider: "omniroute",
         model: nextModel,
         effort: nextEffort,
+        notify_approval: true,
+        notify_turn_done: true,
+        notify_turn_failed: true,
       };
       const next = { ...base, model: nextModel, effort: nextEffort };
       setDefaults(next);
@@ -393,6 +424,23 @@ export default function SessionView({
             break;
           }
           case "turn_finished": {
+            if (payload.status === "failed") {
+              notify(
+                "failed",
+                "Rigel · turn failed",
+                "The turn stopped with an error. Open the transcript for the reason.",
+                defaultsRef.current,
+                document.visibilityState === "visible" && document.hasFocus(),
+              );
+            } else if (payload.status === "completed") {
+              notify(
+                "finished",
+                "Rigel · turn finished",
+                `Spent ${money(payload.usage.cost_micros)} this turn.`,
+                defaultsRef.current,
+                document.visibilityState === "visible" && document.hasFocus(),
+              );
+            }
             setStream((previous) => {
               const next = { ...previous };
               delete next[payload.turn_id];
@@ -891,6 +939,27 @@ export default function SessionView({
               <input type="checkbox" checked={raw} onChange={(event) => setRaw(event.target.checked)} />
               raw
             </label>
+            {session ? (
+              <button
+                className="chip"
+                disabled={exporting}
+                onClick={() => {
+                  setExporting(true);
+                  void api
+                    .exportSession(project, session.id)
+                    .then((bundle) => {
+                      onNotice(`Session exported to ${bundle.markdown_path}`);
+                      void navigator.clipboard?.writeText(bundle.markdown);
+                    })
+                    .catch((failure) =>
+                      onNotice(failure instanceof Error ? failure.message : "Export failed."),
+                    )
+                    .finally(() => setExporting(false));
+                }}
+              >
+                {exporting ? "Exporting…" : "Export session"}
+              </button>
+            ) : null}
             {liveTurn ? (
               <button className="danger-button" onClick={() => void cancel()}>
                 Stop turn
@@ -961,6 +1030,24 @@ export default function SessionView({
                         turns={turns}
                         raw={raw}
                         stream={stream}
+                        checkpoint={checkpoints.find((row) => row.turn_id === entry.turn.id)}
+                        onRestore={async (checkpoint) => {
+                          if (
+                            !window.confirm(
+                              "Restore the tree to this turn's checkpoint? Files changed since then will be replaced. The transcript and patch journal stay.",
+                            )
+                          ) {
+                            return;
+                          }
+                          try {
+                            const report = await api.restoreCheckpoint(project, checkpoint.id);
+                            onNotice(`Restored ${report.files_restored} file(s) from turn checkpoint.`);
+                          } catch (failure) {
+                            onNotice(
+                              failure instanceof Error ? failure.message : "Restore failed.",
+                            );
+                          }
+                        }}
                       />
                     ))}
                   </section>
@@ -1273,11 +1360,15 @@ function TurnCard({
   turns,
   raw,
   stream,
+  checkpoint,
+  onRestore,
 }: {
   entry: TurnTranscript;
   turns: TurnTranscript[];
   raw: boolean;
   stream: Record<string, string>;
+  checkpoint?: Checkpoint;
+  onRestore?: (checkpoint: Checkpoint) => void;
 }) {
   const children = turns.filter((candidate) => candidate.turn.parent_turn_id === entry.turn.id);
   const childSpend = children.reduce(
@@ -1293,6 +1384,15 @@ function TurnCard({
           <span className="turn-stop">{entry.turn.stop_reason}</span>
         ) : null}
         <span className="grow" />
+        {checkpoint && entry.turn.status === "completed" && onRestore ? (
+          <button
+            className="chip"
+            title={`Snapshot taken after this turn · ${when(checkpoint.created_at)}`}
+            onClick={() => onRestore(checkpoint)}
+          >
+            Restore checkpoint
+          </button>
+        ) : null}
         {children.length > 0 ? (
           <span className="turn-subagents" title="Child turns are billed to their own agents">
             {children.length} subagent{children.length === 1 ? "" : "s"} · {money(childSpend)}

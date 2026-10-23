@@ -40,12 +40,32 @@ export interface Settings {
   model: string;
   /** Separate reasoning effort: low, medium or high. */
   effort: string;
+  /** D90: per-event desktop notifications; no sound, and a watched turn stays silent. */
+  notify_approval: boolean;
+  notify_turn_done: boolean;
+  notify_turn_failed: boolean;
 }
 
 /** D82: an opt-in, local-only diagnostics bundle. Nothing leaves the machine. */
 export interface DiagnosticsBundle {
   path: string;
   body: string;
+}
+
+/** D89: a per-turn tree checkpoint. `turn_id` names the turn it followed. */
+export interface Checkpoint {
+  id: string;
+  session_id: string;
+  turn_id: string | null;
+  tree_hash: string;
+  created_at: number;
+}
+
+/** D95: one Markdown session bundle, with its JSON beside it. */
+export interface SessionExport {
+  markdown_path: string;
+  json_path: string;
+  markdown: string;
 }
 
 /** Live state of the local OmniRoute router. `origin` is where it listens. */
@@ -828,6 +848,9 @@ export const api = {
         provider: "omniroute",
         model: "gpt-5.6-sol-medium",
         effort: "medium",
+        notify_approval: true,
+        notify_turn_done: true,
+        notify_turn_failed: true,
       };
     }
     return call<Settings>("settings_get");
@@ -836,6 +859,23 @@ export const api = {
   async saveSettings(settings: Settings): Promise<Settings> {
     if (!isTauri()) return settings;
     return call<Settings>("settings_set", { settings });
+  },
+
+  /** Per-turn checkpoints, newest last. */
+  async listCheckpoints(project: string, session: string): Promise<Checkpoint[]> {
+    if (!isTauri()) return [];
+    return call<Checkpoint[]>("checkpoint_list", { project, session });
+  },
+
+  /** Restore the snapshot a turn recorded. Explicit; the journal is not rolled back. */
+  async restoreCheckpoint(project: string, id: string): Promise<{ files_restored: number }> {
+    return call<{ files_restored: number }>("checkpoint_restore", { project, id });
+  },
+
+  /** Write a session's Markdown and JSON under the app data folder. */
+  async exportSession(project: string, id: string): Promise<SessionExport> {
+    if (!isTauri()) throw new Error("Export a session from the desktop app, not the browser preview.");
+    return call<SessionExport>("session_export", { project, id });
   },
 
   /** Assemble the diagnostics bundle on demand; it is written locally and returned for copying. */
