@@ -1,22 +1,12 @@
-/** The mark: a chain of stars — three belt stars, two bright anchors, one shoulder. */
+/** Rigel's mark: a single bright star, the anchor the name points to. */
 export function RigelMark({ size = 18 }: { size?: number }) {
   return (
     <svg width={size} height={size} viewBox="0 0 24 24" fill="none" aria-hidden>
+      <circle cx="12" cy="12" r="5.5" fill="currentColor" fillOpacity="0.14" />
       <path
-        d="M7.2 5.6 10.6 12.4 12.6 11.9 14.6 11.4 17.4 18.6"
-        stroke="currentColor"
-        strokeWidth="1.7"
-        strokeLinecap="round"
-        strokeLinejoin="round"
+        d="M12 4 Q12.9 11.1 20 12 Q12.9 12.9 12 20 Q11.1 12.9 4 12 Q11.1 11.1 12 4 Z"
+        fill="currentColor"
       />
-      <g fill="currentColor">
-        <circle cx="10.6" cy="12.4" r="1.7" />
-        <circle cx="12.6" cy="11.9" r="1.7" />
-        <circle cx="14.6" cy="11.4" r="1.7" />
-        <circle cx="15.4" cy="6.2" r="1.1" />
-        <circle cx="7.2" cy="5.6" r="2.4" />
-        <circle cx="17.4" cy="18.6" r="2.2" />
-      </g>
     </svg>
   );
 }

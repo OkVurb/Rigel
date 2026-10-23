@@ -1,61 +1,70 @@
 #!/usr/bin/env python3
-"""Generate crates/rigel-app/icons/icon.ico from the star-chain mark.
+"""Generate crates/rigel-app/icons/icon.ico from the single-star mark.
 
-The mark is a chain of six stars on near-black. This rasterises it at 32x32 with the same
-palette as the SVG (#0b0c0e background, #e9a23b stars) so the window icon matches the
-favicon without pulling an image library into the build.
+The mark matches public/rigel.svg: an amber four-point star with a faint glow on a
+near-black rounded tile. It is drawn at 1024 px and downsampled, so every size in the
+.ico is antialiased. Requires Pillow (pip install pillow).
 """
 
 from __future__ import annotations
 
-import struct
 from pathlib import Path
 
-SIZE = 32
-BG = (0x0B, 0x0C, 0x0E)
-AMBER = (0xE9, 0xA2, 0x3B)
+from PIL import Image, ImageDraw
 
-# Star centres and radii in the 24-unit SVG space, from public/rigel.svg.
-STARS = [
-    (10.6, 12.4, 0.8),
-    (12.6, 11.9, 0.8),
-    (14.6, 11.4, 0.8),
-    (15.4, 6.2, 0.55),
-    (7.2, 5.6, 1.15),
-    (17.4, 18.6, 1.05),
+BIG = 1024
+BG = (0x0B, 0x0C, 0x0E, 255)
+AMBER = (0xE9, 0xA2, 0x3B, 255)
+GLOW = (0xE9, 0xA2, 0x3B, 36)  # 0.14 alpha, as in the SVG
+SIZES = [(16, 16), (24, 24), (32, 32), (48, 48), (64, 64), (128, 128), (256, 256)]
+
+# Coordinates are in the 24-unit SVG space, from public/rigel.svg.
+STAR_CURVES = [
+    ((12, 4), (12.9, 11.1), (20, 12)),
+    ((20, 12), (12.9, 12.9), (12, 20)),
+    ((12, 20), (11.1, 12.9), (4, 12)),
+    ((4, 12), (11.1, 11.1), (12, 4)),
 ]
 
 
-def build_pixels() -> bytearray:
-    scale = SIZE / 24.0
-    pixels = bytearray()
-
-    # BMP rows are bottom-up.
-    for y in range(SIZE - 1, -1, -1):
-        for x in range(SIZE):
-            cx, cy = (x + 0.5) / scale, (y + 0.5) / scale
-            lit = False
-            for sx, sy, r in STARS:
-                rr = max(r * scale, 0.9)
-                if (cx - sx) ** 2 + (cy - sy) ** 2 <= rr * rr:
-                    lit = True
-                    break
-            r, g, b = AMBER if lit else BG
-            pixels += bytes((b, g, r, 255))
-    return pixels
+def to_px(x: float, y: float, scale: float) -> tuple[float, float]:
+    return x * scale, y * scale
 
 
-def build_ico(pixels: bytearray) -> bytes:
-    header = struct.pack("<IiiHHIIiiII", 40, SIZE, SIZE * 2, 1, 32, 0, 0, 0, 0, 0, 0)
-    mask = bytes((SIZE // 8) * SIZE)  # all zero: no transparency holes
-    image = header + bytes(pixels) + mask
+def quad_points(p0, c, p1, scale: float, steps: int = 40):
+    out = []
+    for i in range(steps):
+        t = i / steps
+        x = (1 - t) ** 2 * p0[0] + 2 * (1 - t) * t * c[0] + t**2 * p1[0]
+        y = (1 - t) ** 2 * p0[1] + 2 * (1 - t) * t * c[1] + t**2 * p1[1]
+        out.append(to_px(x, y, scale))
+    return out
 
-    directory = struct.pack("<HHH", 0, 1, 1)
-    entry = struct.pack("<BBBBHHII", SIZE, SIZE, 0, 0, 1, 32, len(image), 22)
-    return directory + entry + image
+
+def render(size: int = BIG) -> Image.Image:
+    scale = size / 24.0
+    img = Image.new("RGBA", (size, size), (0, 0, 0, 0))
+    draw = ImageDraw.Draw(img)
+
+    draw.rounded_rectangle((0, 0, size - 1, size - 1), radius=5 * scale, fill=BG)
+
+    r = 5.5 * scale
+    cx = cy = 12 * scale
+    draw.ellipse((cx - r, cy - r, cx + r, cy + r), fill=GLOW)
+
+    points: list[tuple[float, float]] = []
+    for p0, c, p1 in STAR_CURVES:
+        points += quad_points(p0, c, p1, scale)
+    draw.polygon(points, fill=AMBER)
+    return img
 
 
-out = Path(__file__).resolve().parent.parent / "crates/rigel-app/icons/icon.ico"
-out.parent.mkdir(parents=True, exist_ok=True)
-out.write_bytes(build_ico(build_pixels()))
-print(f"wrote {out} ({out.stat().st_size} bytes)")
+def main() -> None:
+    out = Path(__file__).resolve().parent.parent / "crates/rigel-app/icons/icon.ico"
+    out.parent.mkdir(parents=True, exist_ok=True)
+    render().save(out, format="ICO", sizes=SIZES)
+    print(f"wrote {out} ({out.stat().st_size} bytes)")
+
+
+if __name__ == "__main__":
+    main()
