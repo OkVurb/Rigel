@@ -438,7 +438,67 @@ runs a Gemini turn and prints five harness rows. Gemini's vendor-login file is r
 calling an OAuth session an API key; its current builds migrate that file into a hybrid store, so
 an absent file is not proof of being signed out.
 
-Environment facts a fresh agent will trip over: the debug app loads `http://localhost:5173`, so
+**Round 3 of the grilling (Q87–Q101) was answered on the evening of 22 Oct; decisions D71–D85.** It is the
+first round that is about shipping rather than building, and it changes the open list more than any
+session since the merge. In the order the answers force:
+
+1. **The release sequence is settled (D86):** an unsigned private beta first, the certificate ordered in
+   parallel, and no public tag, release page or launch post until it exists. D84's launch is the gate the
+   certificate holds.
+2. **The room becomes installable and remote-capable.** D74 freezes `run.py` into a sidecar; D76 copies
+   the transcript into the project DB; D75 adds the auth-path badge; D87 puts a LAN bind with per-agent
+   auth in 0.1.0, which supersedes D70 for the room. This is the largest block of new work and the one
+   that makes the flagship true on a clean machine and on a second one.
+3. **Two safety-shaped items before a public binary:** D78's sliding-window redactor, and D82's
+   diagnostics export plus crash log. Both are bounded and testable with the existing fixtures.
+4. **Two deviations stop being deviations:** D79 builds the real three-way merge and D80 makes spawned
+   subagents writable. D80 is the riskier of the two — writable subagents move claims, snapshots,
+   budgets, attribution and merge review (D53, D64) onto a path that has never carried them, and
+   `agent::spawn` is read-only by construction today.
+5. **The harness claim narrows.** D81 keeps Cursor's and Cline's code and fixtures but takes them out of
+   README, PLATFORMS and the roster's supported set; the prose must stop saying five.
+6. **D83 rewrites a promise, not a test:** a startup update check means the settings copy and SECURITY.md
+   say a request happens at launch, and `update.rs`'s "nothing checks at startup" assertion moves to "one
+   check, then never again this launch".
+
+**Round 4 (Q104–Q123, decisions D88–D107) turned the feature question into a build queue.** Thirteen
+features are in 0.1.0, seven are explicitly after it, and one overrode a recommendation. The queue, in
+an order that respects dependencies:
+
+| # | Work | Size | Note |
+|---|---|---|---|
+| 1 | Rules interop (D91) | S | read-only first; export is a Settings action |
+| 2 | Desktop notifications (D90) | XS | three events, no sound |
+| 3 | Session export (D95) | XS | shares the diagnostics assembly |
+| 4 | Skills over MCP (D96) | XS | two tools, local index only |
+| 5 | Spend view + per-task cap (D92) | S | query over existing usage rows |
+| 6 | Per-turn checkpoints (D89) | S | `snapshot.rs` already restores |
+| 7 | Hunk comments (D88) | S | needs a delivery turn to the author agent |
+| 8 | Role presets (D94) | S | saved prompt + model/effort + tools |
+| 9 | skills.sh import (D93) | S | audit verdict stored as dated evidence |
+| 10 | Plan mode (D98) | M | a new first phase in the turn loop |
+| 11 | PR via `gh` (D97) | M | explicit click only; no token |
+| 12 | Container sandbox (D107) | L | **conflicts with D56 and PLATFORMS**: optional backend only, Docker/WSL2 detected, app must pass P7.9 without it |
+
+The seven deferrals (D99–D106) are the task board, MCP catalogue, skills lockfile, mobile read-only
+view, remote approvals, issue import, hooks and the merge queue. They wait on D80 or on a second
+machine, and they are recorded so they are not re-proposed as new.
+
+**Round 5 (Q124–Q135, decisions D108–D119) settled signing, three safety defaults and the launch path.**
+Everything except the certificate is consistent; D109 blocks the rest.
+
+- **The release path is:** ten hand-onboarded users → Show HN → Console.dev and the Rust/Tauri
+  subreddits (D112); direct signed MSI/EXE with winget and a Scoop bucket (D110/D111); Store after 1.0.
+- **The signing route is settled (D120):** SignPath Foundation first (free for qualifying OSS), Azure Artifact Signing at $9.99/month as the fallback, both started in parallel. D86's gate stands — nothing public ships unsigned, and the private beta does not wait for it.
+- **The safety defaults are code, not docs:** three writable agents (D113), plan approval before the first
+  edit (D114), a blocking clean-context reviewer on writable merges (D115), and a $20/day global cap
+  (D116). These land with D80's writable subagents — a writable path without them would be the exact
+  failure the evidence documents.
+- **Imported text is data, not instruction** (D117): rule sources are named in the transcript, skill
+  bodies are shown before first use, and scripts still ask.
+- **Verification gets its own harness** (D118), and support stays asynchronous (D119).
+
+**Environment facts a fresh agent will trip over:** the debug app loads `http://localhost:5173`, so
 `npm --prefix ui run dev` must be running before `cargo run -p rigel-app`; `vendor/agentchattr`
 and `.mcp.json` are local-only; never launch agents with `vendor/agentchattr/windows/*.bat`
 (windowed consoles, orphaned on restart); and `--json` runs default to deny, so an approved
@@ -522,6 +582,56 @@ command must say so explicitly.
 | D68 | **Teammate awareness, final shape.** The full-broadcast clause of D52 is **overturned on re-ask in plain language** (the cost was underweighted): agents receive a live roster block plus **running status summaries** of teammates, and a full teammate transcript is **readable on demand via a tool call** — nothing hidden, but nothing shepherded into every prompt. The claim gate (D53) and coordinator shape (D54) were re-confirmed unchanged. | grilling round 5, 21 Oct |
 | D69 | **Provider coverage on this machine:** the user holds an **OpenAI** key and a **Google (Gemini) API key**, and wants a **small local model running on this PC** joining the agent team as the slow-but-cheap teammate — explicitly accepted as slower. Rigel treats the local model as a normal provider connection (via the router's local endpoint), and the roster labels it `local / slow`. Local-model turns are best suited to cheap roles (review pass, deliberation, summarising). **Setup verified 21 Oct:** Ollama connected through OmniRoute (`ollama-local`), winner of the head-to-head race is `qwen35-4b-q4-original` with `think: false` (without it the model narrates its reasoning into replies); evidence in `docs/qa/local-model.md`. | grilling round 5, 21 Oct |
 | D70 | **Remote access is a future want, not a v1 goal:** the user pictures checking on agent work from a phone or another machine someday. Nothing remote ships in v1; the architecture must not preclude it (local-first state, no assumptions that the UI and core are always on the same machine). | grilling round 5, 21 Oct |
+| D71 | **Code signing is deferred for the beta.** The first installable builds are **unsigned**, published with a SHA-256 next to the artifact; the signing pipeline stays in the repo and the throwaway-certificate exercise stays in `scripts/p7-exit-test.sh`. P7.5 is re-scoped from "signed installer" to "post-beta"; this confirms D49 and amends D37's signed-MSI clause. | grilling round 6 (Q87), 22 Oct |
+| D72 | **The first public version is `0.1.0`, labelled beta**; `1.0` is reserved for the day P7.9 passes on a machine nobody built on. Note the collision with D71 on *when* the beta goes out — put to the user as Q102. | grilling round 6 (Q88), 22 Oct |
+| D73 | **The Windows floor is stated honestly:** 1809 remains the documented technical floor (WebView2 requires it), and the verified line is **Windows 11 22H2+**. `docs/PLATFORMS.md` must carry both sentences and never call 1809 supported. | grilling round 6 (Q89), 22 Oct |
+| D74 | **The room ships as a frozen sidecar.** `run.py` and its dependencies are bundled with PyInstaller and installed with the app; `vendor/agentchattr` stays the developer-only path, and `RIGEL_AGENTCHAT_DIR` still overrides. This is what keeps PLATFORMS' "no Python required" promise true while the Chat tab works on a clean machine. The sidecar is a second runtime (S4 permits exactly one, for a surface the Rust core cannot reach) and owns no state beyond the room's own JSONL. | grilling round 6 (Q90), 22 Oct |
+| D75 | **Both auth paths, one badge.** External harness agents may use their own CLI's login (subscription included); the native provider path stays keys-only. Rigel never reads or stores a subscription credential, and bills nothing for turns a vendor CLI pays for. The roster shows which path each agent is on. **Amends D21.** | grilling round 6 (Q91), 22 Oct |
+| D76 | **A room transcript is copied read-only into the project database**, so resume and the transcript pane show what the room said, with its own agent rows. It is **not** ingested into the billing ledger: external CLIs bill themselves, and a cost Rigel did not observe would be the first invented number in a product whose pitch is an honest bill. | grilling round 6 (Q92), 22 Oct |
+| D77 | **The room may bind a LAN interface, with real per-agent auth.** If it ships in v1 this **supersedes D70** and turns `127.0.0.1:8300` plus one session token into an authenticated multi-machine surface; the loopback-only refusal in `agentchat.rs` and the local-user sentence in SECURITY.md are then wrong and must move with it. Scope put to the user as Q103. | grilling round 6 (Q93), 22 Oct |
+| D78 | **Redaction gets a sliding window.** A streaming delta holds back a partial-secret tail (at most the longest secret's length minus one) and flushes it on the next chunk or at end of stream, so a credential split across chunks cannot reach a rendered event. This closes the deviation recorded under P4.6 rather than documenting it. | grilling round 6 (Q94), 22 Oct |
+| D79 | **The conflict view becomes a real three-way merge:** rendered base/ours/theirs text, and a resolution that writes a merged file through the CAS patch pipeline. Replaces the hash-only deviation under P5.4; `migrations/project/0004_patch_hunks.sql` and `diff.tsx` grow with it. This is new implementation work, not a rename. | grilling round 6 (Q95), 22 Oct |
+| D80 | **Spawned subagents become writable**, putting worktrees (P5.5) on the main path instead of the external-agent side road. Every safety surface moves with them: claims gate (D53), pre-destructive snapshot, per-agent budget, attribution and merge-back review (D64). Closes the P5.5 deviation by removing it rather than declaring it. | grilling round 6 (Q96), 22 Oct |
+| D81 | **Cursor and Cline leave the advertised matrix.** Their adapters stay in the tree behind the fixture harnesses and the exit test keeps exercising them, but README, PLATFORMS, the roster and the Phase 4 prose stop claiming five supported harnesses: Codex, Claude and Gemini are the supported set, and the other two are labelled "unverified on this machine". **Amends the Phase 4 exit-test claim, not its coverage.** | grilling round 6 (Q97), 22 Oct |
+| D82 | **Diagnostics are opt-in and never sent.** An "Export diagnostics" action gathers doctor JSON, the last turn and a redacted log into one copyable bundle, and a local crash log is written beside the app data. Nothing phones home; D37's no-telemetry clause is untouched. | grilling round 6 (Q98), 22 Oct |
+| D83 | **The updater may check at startup.** The Ed25519 manifest check runs once at launch (behind the existing switch), which **amends D37's opt-in-only clause and P7.7's "nothing checks at startup"**. Consequences to carry: the settings copy must say a request is made at launch, the offline path must fail silently and fast, and the update test that asserts no startup check must be rewritten. | grilling round 6 (Q99), 22 Oct |
+| D84 | **The first users come from a public launch post**, not one-at-a-time recruiting. **Collides with D65** (public visibility deferred to the 1.0 signed line) and with D71 (unsigned beta): a launch while unsigned is the largest risk this round accepted, and it is the question Q102 settles. | grilling round 6 (Q100), 22 Oct |
+| D85 | **No paid surface in year one.** MIT/Apache-2.0 stays, nothing is gated, and the shared cross-machine room/claims plane is explicitly later. Adoption and interventions-per-task (D17) are the only measures. | grilling round 6 (Q101), 22 Oct |
+| D86 | **The release sequence is settled: an unsigned private beta now, a public launch only once a trusted certificate exists.** D71's unsigned builds go to a handful of people with a published SHA-256; D84's launch post waits for signing, so D65's "visibility at 1.0" becomes "visibility once signed". D72's condition is corrected rather than dropped: it is the *public* beta that waits for the certificate, not the private one. P7.5 is therefore ordered in parallel with the beta, not after it. | grilling round 6 follow-up (Q102), 22 Oct |
+| D87 | **The LAN room is v1 scope, not a direction.** D77 stands as scope: 0.1.0 may bind a LAN interface with real auth, which supersedes D70's "nothing remote in v1" **for the room only**. Shipping with it: a bind setting, a token per agent instead of one session token, the auth design in SECURITY.md, and tests for a wrong-token agent and a foreign-origin post. Everything else in D70 (phone access, cross-machine sessions) stays out. | grilling round 6 follow-up (Q103), 22 Oct |
+| D88 | **Inline hunk comments are in 0.1.0.** A comment attaches to a `patch_hunks` row, names its author agent, and is delivered to that agent as a turn. The Diff tab gains a comment box per hunk; the patch stays read-only. | grilling round 7 (Q104), 22 Oct |
+| D89 | **Per-turn checkpoints are in 0.1.0.** `snapshot.rs` takes a checkpoint at the end of every turn (in addition to the pre-destructive one), lists it in the transcript, and restores it on request. The pre-destructive snapshot keeps its own id and reason. | grilling round 7 (Q105), 22 Oct |
+| D90 | **Desktop notifications are in 0.1.0** for three events: approval waiting, turn finished, turn failed. Per-event toggles, no sound by default, no notification for a turn the user is watching. | grilling round 7 (Q106), 22 Oct |
+| D91 | **Rules interop is in 0.1.0.** The session preamble reads `AGENTS.md`, `CLAUDE.md` and `.cursor/rules/*`; Settings lists which sources were used; Rigel's memory can be exported as an `AGENTS.md` block. Reading is additive — D2/D43 memory stays the source of record. | grilling round 7 (Q107), 22 Oct |
+| D92 | **A cross-session spend view and per-task caps are in 0.1.0.** A query over existing usage rows answers cost per project and per agent over time, and a task may set its own cap below the session cap. **Amends D10 additively** — the session cap is still the outer bound. | grilling round 7 (Q108), 22 Oct |
+| D93 | **skills.sh import is in 0.1.0**, storing the audit verdict (Gen/Socket/Snyk) with its date as trust evidence. Rigel's own arithmetic stays the visible score; an audit is an input, not a grade. | grilling round 7 (Q109), 22 Oct |
+| D94 | **Agent role presets are in 0.1.0:** implementer, reviewer, tester, researcher — each a saved prompt, model/effort pair and tool allowance, applied from the roster. | grilling round 7 (Q110), 22 Oct |
+| D95 | **Session export is in 0.1.0:** one Markdown bundle per session (prompt, turns, tool calls, per-agent spend, linked patches) with the JSON beside it. Shares the assembly path with D82's diagnostics export. | grilling round 7 (Q111), 22 Oct |
+| D96 | **The shelf is queryable over MCP in 0.1.0:** `rigel_skills_search` and `rigel_skills_show` return id, source, trust score, pins and install path from the local index. No network. | grilling round 7 (Q112), 22 Oct |
+| D97 | **PR creation from the Diff tab is in 0.1.0**, only when `gh` is present and authenticated, only on an explicit click, composing title and body from the turns. Rigel never holds a forge token. | grilling round 7 (Q113), 22 Oct |
+| D98 | **Plan mode is in 0.1.0:** a read-only first phase writes a plan and proposed claims to the transcript and waits for approval before any edit or command. | grilling round 7 (Q114), 22 Oct |
+| D99 | **The task board is deferred to after 0.1.0.** It is a view over worktrees and writable agents (D80); building it before D80 would show tasks that cannot execute. | grilling round 7 (Q115), 22 Oct |
+| D100 | **The MCP catalogue is deferred.** The read-only registry view can come sooner than the trust cards; the scanning half is not scoped. | grilling round 7 (Q116), 22 Oct |
+| D101 | **A skills lockfile is deferred** until the Agent Skills `skills.json` RFC settles; session pins (D9/D59) remain the guarantee in the meantime. | grilling round 7 (Q117), 22 Oct |
+| D102 | **A mobile read-only room view is deferred** until after D87 has been used on a second machine. | grilling round 7 (Q118), 22 Oct |
+| D103 | **Remote approvals are deferred**, and are gated on D102 having shipped: approval is the first remote action that can destroy work. | grilling round 7 (Q119), 22 Oct |
+| D104 | **Issue import is deferred** behind the task board (D99); it is one integration per tracker. | grilling round 7 (Q120), 22 Oct |
+| D105 | **Lifecycle hooks are deferred.** MCP already covers most of the ground without a second scripting layer inside the turn loop. | grilling round 7 (Q121), 22 Oct |
+| D106 | **A merge queue is deferred** behind D80: it earns its keep only when several writable agents merge at once. | grilling round 7 (Q122), 22 Oct |
+| D107 | **Container sandbox execution is in 0.1.0 — and it is the riskiest thing this round added.** It **supersedes D56's "no container isolation in v1"** and collides with PLATFORMS' "no package manager required": a real container needs Docker Desktop or WSL2, neither of which the installer ships. The only shape that keeps both promises is an **optional backend**: `run_command` detects a container runtime, offers it per agent, and falls back to today's approval + cwd-jail path when none exists. The app must start, run a turn and pass P7.9 with no container runtime present. Decide the backend (Docker Desktop vs WSL2) before writing code. | grilling round 7 (Q123), 22 Oct |
+| D108 | **The signing identity is a US/Canada individual**, which makes Azure Artifact Signing's individual Public Trust route available at **$9.99/month** — the cheapest compliant route found ($120/yr, no hardware token, key in Microsoft's HSM). Identity validation (1–20 business days) is the long pole and can start before any code is written. | grilling round 8 (Q124), 22 Oct |
+| D109 | **The signing budget is $0 — stay unsigned.** This **collides with D86** (the certificate gates the public launch) and with D110 (a signed direct installer plus winget). Pending Q136, which reconciles them; until it is answered, no release step may rely on either. | grilling round 8 (Q125), 22 Oct |
+| D110 | **Direct download first, Store later.** A signed MSI/EXE from GitHub Releases, winget as the package channel, and the Microsoft Store revisited after 1.0 — a second packaging pipeline (offline WebView2, +127 MB, MSIX via a Windows-11-only CLI) is not a beta task. | grilling round 8 (Q126), 22 Oct |
+| D111 | **winget plus a Scoop bucket at the first signed release.** Both are manifests, not code: winget wants a stable URL, SHA-256 and a silent install (all exist), and the Scoop bucket is a repo Rigel owns. Chocolatey only if enterprise users ask. | grilling round 8 (Q127), 22 Oct |
+| D112 | **Ten hand-onboarded users before any public launch**, then Show HN, then Console.dev and r/rust/r/tauri. Product Hunt is optional and later; paid promotion is not the plan. The evidence is that launches produce attention and attention converts only when installation needs no help. | grilling round 8 (Q128), 22 Oct |
+| D113 | **Three writable agents at once, unlimited read-only.** The cap is a safety default, configurable upward, and sits alongside D80's writable subagents. Evidence: multi-agent traces fail 41–86.7%, and a reported 13-worktree run lost work to Git lock contention. | grilling round 8 (Q129), 22 Oct |
+| D114 | **Plan approval is mandatory before a writable agent's first edit**, skippable per task with a recorded reason. Uses D98's plan phase; read-only agents are exempt. | grilling round 8 (Q130), 22 Oct |
+| D115 | **A clean-context reviewer blocks writable-agent merges by default**, overridable with a recorded reason. D64's review becomes blocking rather than advisory; the reviewer sees the diff, not the author's context. | grilling round 8 (Q131), 22 Oct |
+| D116 | **A $20/day global spend cap is on by default**, with a visible alert and a one-click raise; it sits above D10's session cap and D92's per-task cap. A cap that can be raised in one click is a guardrail, not a lock. | grilling round 8 (Q132), 22 Oct |
+| D117 | **Imported rules and skills are read, displayed, and never treated as authority.** The transcript names which rule sources loaded, a skill's body is shown before first use (D93), and no skill script runs outside the normal approval path. D91's interop stands; this settles its trust treatment. | grilling round 8 (Q133), 22 Oct |
+| D118 | **`rigel bench` is built internally now; numbers publish only after 30 real tasks.** The harness is also how D88–D98 get verified, and it measures the claim Rigel can actually defend — bounded, reviewable, billed — not SWE-bench. | grilling round 8 (Q134), 22 Oct |
+| D119 | **Support is GitHub issues plus Discussions; Discord only if demand appears, with no support promise.** D82's diagnostics export is the intake format. | grilling round 8 (Q135), 22 Oct |
+| D120 | **Signing route: SignPath Foundation first, Azure Artifact Signing as the fallback.** SignPath signs qualifying OSS for free, which fits the MIT/Apache licence already chosen; Azure's individual Public Trust route is open to a US/Canada individual at **$9.99/month** if SignPath declines. Start the SignPath application and the Azure identity validation in parallel, because validation is 1–20 business days and it is the long pole. **Supersedes D109's blanket $0:** the budget ceiling is $120/year, not zero. D86 and D110 stand — nothing public ships unsigned. | grilling round 8 follow-up (Q136), 22 Oct |
 
 ### 3.2 Stack
 
@@ -562,6 +672,15 @@ because Rust owns it. The sidecar never touches SQLite, claims, patches or budge
 | "Full transcript broadcast" (D52, round 4) | §3.1 | Overturned by D68 on plain-language re-ask: live summaries + on-demand reads instead; the token cost of broadcasting everyone into everyone was underweighted when the first answer was given. |
 | "Open source, build in public" (interview answer 59, *timing*) | docs/interview-answers.md | Amended by D65: the license is unchanged, but public visibility waits for the 1.0 line (D37). |
 | Claude Code as the first harness | §15 draft recommendation | D36: Codex first; Claude deferred. |
+| "API keys only, never a subscription login" (D21) | §3.1 | D75: external harnesses may use their own CLI login; only the native provider path is keys-only. |
+| "Signed MSI" as the 1.0 line (D37) | §3.1, §11 Phase 7 | D71: the beta ships unsigned with a published SHA-256; signing moves after the beta, and P7.5 is re-scoped. |
+| "Opt-in updater; nothing checks on a timer or at startup" (D37, P7.7) | §3.1, P7.7 | D83: one manifest check at launch behind the switch, with the copy and the test changed to match. |
+| "Public visibility deferred to 1.0" (D65) | §3.1 | D86: a private unsigned beta may go out first, but the public launch waits for a trusted certificate. |
+| "Nothing remote ships in v1" (D70) | §3.1 | D87: the room binds LAN in 0.1.0 with per-agent auth; other remote access stays out. |
+| Hash-only conflict record, no merged file (P5.4 deviation) | §11 Phase 5 | D79: rendered base/ours/theirs and a merged file through the CAS pipeline. |
+| Worktrees serve external agents only (P5.5 deviation) | §11 Phase 5 | D80: spawned subagents become writable and worktrees sit on the main path. |
+| "Five harnesses supported" (Phase 4 prose, README) | §11 Phase 4, README | D81: Codex, Claude and Gemini are supported; Cursor and Cline keep their adapters and fixtures but leave the advertised set. |
+| "Signing budget is $0 — stay unsigned" (D109) | §3.1 | D120: SignPath first, Azure at $9.99/mo as the fallback; the ceiling is $120/year. |
 
 ---
 
