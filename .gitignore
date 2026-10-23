@@ -36,3 +36,9 @@ vendor/
 
 # local README render check, not part of the repository
 .preview/
+
+# per-thread handoff note; crossing threads, never history
+ACTIVE-WORK.md
+
+# scratch space for local runs and one-off previews
+/tmp/
