@@ -1484,6 +1484,20 @@ input {
   flex: 1;
 }
 
+/* Who answers: the native loop, or a harness turn. Kept inside the actions column so it is
+   part of the send decision rather than a session-wide setting. */
+.composer-actions .harness-pick select {
+  width: 100%;
+  height: 26px;
+  padding: 0 6px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--panel);
+  color: var(--text);
+  font: inherit;
+  font-size: 12px;
+}
+
 .composer-actions .swarm {
   height: 26px;
 }

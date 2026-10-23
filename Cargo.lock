@@ -3104,6 +3104,7 @@ dependencies = [
  "reqwest 0.12.28",
  "rigel-adapters",
  "rigel-core",
+ "rigel-mcp",
  "serde",
  "serde_json",
  "tauri",

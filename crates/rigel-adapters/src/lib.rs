@@ -14,6 +14,7 @@ pub mod claude;
 pub mod codex;
 pub mod normalise;
 pub mod registry;
+pub mod turn;
 
 pub use acp::{
     AcpClient, AcpConfig, AcpEvent, AcpTurn, AcpUsage, ApprovalDecision, ApprovalOption,
@@ -27,6 +28,7 @@ pub use codex::{
 };
 pub use normalise::NormalItem;
 pub use registry::{AdapterCache, probe_all, probe_cached};
+pub use turn::{Recorded, TurnEnd, resolve_session, write_mcp_config};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]

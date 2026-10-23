@@ -95,6 +95,10 @@ export default function SessionView({
   const [capInput, setCapInput] = useState("");
   const [keyPresent, setKeyPresent] = useState<boolean | null>(tauri ? null : true);
   const [warning, setWarning] = useState(false);
+  // Who the composer sends to. A Claude turn is run by the harness; everything else is the
+  // native loop. The picker is the only place this is chosen, so the transcript header can say
+  // which agent answered.
+  const [target, setTarget] = useState<"native" | "claude">("native");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [starting, setStarting] = useState(false);
@@ -547,10 +551,17 @@ export default function SessionView({
 
     setBusy(true);
     try {
-      let worker = agents[0];
+      let worker = agents.find((agent) => agent.harness === target);
       if (!worker) {
-        worker = await api.spawnAgent(project, session.id, "worker", model);
-        setAgents([worker]);
+        const spawned = await api.spawnAgent(
+          project,
+          session.id,
+          target,
+          target === "claude" ? "claude" : "worker",
+          model,
+        );
+        setAgents((previous) => [...previous, spawned]);
+        worker = spawned;
       }
       const reply = await api.sendTurn(project, session.id, worker.id, prompt, model, effort);
       setLiveTurn(reply.turn);
@@ -567,7 +578,7 @@ export default function SessionView({
     } finally {
       setBusy(false);
     }
-  }, [text, session, busy, tauri, agents, project, model, effort]);
+  }, [text, session, busy, tauri, agents, project, model, effort, target]);
 
   /** Swarm, first press: freeze the task and ask the room who can take it. */
   const prepareSwarm = useCallback(async () => {
@@ -990,6 +1001,17 @@ export default function SessionView({
                 disabled={live}
               />
               <div className="composer-actions">
+                <label className="harness-pick" title="Which agent answers the next turn">
+                  <select
+                    value={target}
+                    onChange={(event) => setTarget(event.target.value as "native" | "claude")}
+                    disabled={live}
+                    aria-label="Agent"
+                  >
+                    <option value="native">native</option>
+                    <option value="claude">claude</option>
+                  </select>
+                </label>
                 {onSwarmPrepare ? (
                   <button
                     className="chip swarm"
@@ -1156,8 +1178,11 @@ export default function SessionView({
  * and `rigel agent acp`. D40 wants that difference visible, so a harness row says so rather than
  * looking sendable.
  */
+/** A harness Rigel can hand a turn to from this window. Codex, Cursor and Cline are read-only. */
+const SENDS = new Set(["native", "claude"]);
+
 function observedOnly(agent: Agent): boolean {
-  return agent.harness !== "native";
+  return !SENDS.has(agent.harness);
 }
 
 

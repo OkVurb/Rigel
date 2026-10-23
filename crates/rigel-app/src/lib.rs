@@ -31,6 +31,9 @@ use rigel_core::{
 use serde::{Deserialize, Serialize};
 use tauri::{Emitter, State};
 
+mod claude;
+pub use claude::mcp_mode;
+
 #[derive(Debug, Clone, Serialize)]
 pub struct ProjectInfo {
     pub root: String,
@@ -399,9 +402,9 @@ fn agent_spawn(
     model: Option<String>,
 ) -> Result<Agent, String> {
     let harness = harness.unwrap_or_else(|| "native".to_string());
-    if harness != "native" {
+    if !matches!(harness.as_str(), "native" | "claude") {
         return Err(format!(
-            "{harness} adapters arrive in Phase 4; the native agent is available now"
+            "{harness} is not wired in the window yet; native and claude are"
         ));
     }
     let model = model.unwrap_or_else(|| load_settings().model);
@@ -409,7 +412,7 @@ fn agent_spawn(
         SessionService::open(Path::new(&project))
             .await
             .map_err(message)?
-            .register_agent_with(&session, "native", role.as_deref(), Some(&model))
+            .register_agent_with(&session, &harness, role.as_deref(), Some(&model))
             .await
             .map_err(message)
     })
@@ -464,6 +467,34 @@ fn turn_send(
         &effort,
         &provider,
     );
+
+    // A Claude turn is not the native loop: the harness runs it and the window's approval card
+    // answers its questions. The row is created here so the renderer gets it back at once, and
+    // `claude::start` adopts that same row (P4.6).
+    let agent_row = tauri::async_runtime::block_on(service.agent(&agent)).map_err(message)?;
+    if agent_row.harness == "claude" {
+        let turn = tauri::async_runtime::block_on(service.append_turn(&agent, Some(&prompt)))
+            .map_err(message)?;
+        let cap = tauri::async_runtime::block_on(service.get(&session))
+            .ok()
+            .and_then(|stored| stored.budget_cents);
+        claude::start(
+            app,
+            claude::ClaudeTurn {
+                service,
+                root,
+                session_id: session,
+                agent: agent_row,
+                turn: turn.clone(),
+                prompt,
+                model: model_name,
+            },
+        )?;
+        return Ok(TurnReply {
+            turn,
+            budget_cents: cap,
+        });
+    }
 
     // A local router that is down is a process to launch, not a configuration error: the
     // first turn after a reboot starts OmniRoute before it sends anything.

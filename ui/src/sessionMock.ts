@@ -60,8 +60,8 @@ export const previewAgents: Agent[] = [
     tokens_in: 2_900,
     tokens_out: 180,
   },
-  // A harness agent: Rigel shows its turns but cannot send it work until the harness turns land
-  // (P4.10), so the roster labels it "observed only".
+  // A harness agent the window can send to (P4.6/P4.10): no "observed only" label, and the
+  // composer's picker will find it by harness.
   {
     id: "agent-preview-reviewer",
     session_id: previewSession.id,

@@ -603,13 +603,14 @@ export const api = {
   async spawnAgent(
     project: string,
     session: string,
+    harness: "native" | "claude" = "native",
     role?: string,
     model?: string,
   ): Promise<Agent> {
     return call<Agent>("agent_spawn", {
       project,
       session,
-      harness: "native",
+      harness,
       role: role ?? null,
       model: model ?? null,
     });
