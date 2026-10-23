@@ -52,6 +52,22 @@ export interface DiagnosticsBundle {
   body: string;
 }
 
+/** D97: the exact title and body a pull request would use. */
+export interface PullRequestPlan {
+  title: string;
+  body: string;
+  branch: string;
+  base: string;
+}
+
+/** D91: one project rule file the native preamble reads. */
+export interface RuleSource {
+  path: string;
+  bytes: number;
+  kind: "agents" | "claude" | "cursor" | string;
+  truncated: boolean;
+}
+
 /** D89: a per-turn tree checkpoint. `turn_id` names the turn it followed. */
 export interface Checkpoint {
   id: string;
@@ -859,6 +875,28 @@ export const api = {
   async saveSettings(settings: Settings): Promise<Settings> {
     if (!isTauri()) return settings;
     return call<Settings>("settings_set", { settings });
+  },
+
+  /** Compose the PR title/body locally, for a review before creating it. */
+  async pullRequestPlan(project: string, session: string): Promise<PullRequestPlan> {
+    return call<PullRequestPlan>("pull_request_plan", { project, session });
+  },
+
+  /** Run gh pr create. Only an explicit click calls this. */
+  async createPullRequest(project: string, session: string): Promise<string> {
+    return call<string>("pull_request_create", { project, session });
+  },
+
+  /** Project rule files a native turn would read (D91). */
+  async rulesSources(project: string): Promise<RuleSource[]> {
+    if (!isTauri()) return [];
+    return call<RuleSource[]>("rules_sources", { project });
+  },
+
+  /** Committed memory as one copyable AGENTS.md block. */
+  async exportMemory(project: string): Promise<string> {
+    if (!isTauri()) return "";
+    return call<string>("rules_export_memory", { project });
   },
 
   /** Per-turn checkpoints, newest last. */

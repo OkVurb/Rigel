@@ -527,6 +527,14 @@ silent, never fire for a focused window, and use the WebView Notification API af
 permission. Session export, checkpoints and notifications each have their own tests or build
 coverage; no external service is involved.
 
+**Three more queue items (23 Oct 2026):** D91 adds `rigel_core::rules`, which reads
+`AGENTS.md`, `CLAUDE.md` and `.cursor/rules/*` with per-file and total caps, labels them as
+imported data in the native preamble, lists the sources in Settings and copies committed memory
+as an `AGENTS.md` block. D96 exposes `rigel_skills_show` over MCP: source, trust evidence, session
+pin, index body hash and install path, all from the local index with no network. D97 composes a
+pull-request title and body from the session's turns and runs `gh pr create` only from an explicit
+Diff-tab click; `gh` supplies its own auth and Rigel never holds a forge token.
+
 **Environment facts a fresh agent will trip over:** the debug app loads `http://localhost:5173`, so
 `npm --prefix ui run dev` must be running before `cargo run -p rigel-app`; `vendor/agentchattr`
 and `.mcp.json` are local-only; never launch agents with `vendor/agentchattr/windows/*.bat`

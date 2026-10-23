@@ -435,6 +435,16 @@ impl Coordinator {
             system.push_str("\n\n");
             system.push_str(&team::board(&board, Some(agent_id)));
         }
+        // D91: the project's own rule files join the preamble, labelled as imported data.
+        let rules = crate::rules::load(&self.project_root);
+        if !rules.text.is_empty() {
+            system.push_str(
+                "
+
+",
+            );
+            system.push_str(&rules.text);
+        }
         let mut messages = vec![ChatMessage::system(system), ChatMessage::user(prompt)];
         let mut total = Usage::default();
         let mut steps = 0;

@@ -468,6 +468,48 @@ fn diagnostics_export(
     })
 }
 
+/// D91: which rule files a turn would read, for Settings. Read-only; no file is changed.
+#[tauri::command]
+fn rules_sources(project: String) -> Result<Vec<rigel_core::rules::RuleSource>, String> {
+    let root = std::fs::canonicalize(&project).map_err(message)?;
+    Ok(rigel_core::rules::load(&root).sources)
+}
+
+/// D91: the committed memory rendered as one copyable `AGENTS.md` block.
+#[tauri::command]
+fn rules_export_memory(project: String) -> Result<String, String> {
+    let root = std::fs::canonicalize(&project).map_err(message)?;
+    Ok(rigel_core::rules::export_memory(&root))
+}
+
+/// D97: the exact title and body the next click would send to gh.
+#[tauri::command]
+fn pull_request_plan(
+    project: String,
+    session: String,
+) -> Result<rigel_core::forge::PullRequestPlan, String> {
+    tauri::async_runtime::block_on(async move {
+        let root = std::fs::canonicalize(&project).map_err(message)?;
+        let service = SessionService::open(&root).await.map_err(message)?;
+        let session = service.get(&session).await.map_err(message)?;
+        let turns = service.transcript(&session.id).await.map_err(message)?;
+        rigel_core::forge::plan(&root, &session, &turns).map_err(message)
+    })
+}
+
+/// D97: the explicit click. gh authenticates itself; Rigel never sees a forge token.
+#[tauri::command]
+fn pull_request_create(project: String, session: String) -> Result<String, String> {
+    tauri::async_runtime::block_on(async move {
+        let root = std::fs::canonicalize(&project).map_err(message)?;
+        let service = SessionService::open(&root).await.map_err(message)?;
+        let session = service.get(&session).await.map_err(message)?;
+        let turns = service.transcript(&session.id).await.map_err(message)?;
+        let plan = rigel_core::forge::plan(&root, &session, &turns).map_err(message)?;
+        rigel_core::forge::create(&root, &plan).map_err(message)
+    })
+}
+
 #[tauri::command]
 fn checkpoint_list(
     project: String,
@@ -1519,6 +1561,10 @@ pub fn run() {
             session_resume,
             diagnostics_export,
             session_export,
+            rules_sources,
+            pull_request_plan,
+            pull_request_create,
+            rules_export_memory,
             checkpoint_list,
             checkpoint_restore,
             agent_list,

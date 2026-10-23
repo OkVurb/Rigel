@@ -157,6 +157,8 @@ function ago(at: number): string {
 export default function DiffView({ project, session }: { project: string; session: string | null }) {
   const tauri = isTauri();
   const [view, setView] = useState<CoordinationView>(() => (tauri ? { claims: [], unverified_changes: [], conflicts: [] } : PREVIEW));
+  const [prBusy, setPrBusy] = useState(false);
+  const [prResult, setPrResult] = useState<string | null>(null);
   const [patches, setPatches] = useState<Patch[]>(() => (tauri ? [] : PREVIEW_PATCHES));
   const [hunks, setHunks] = useState<AttributedHunk[]>([]);
   const [error, setError] = useState<string | null>(null);
@@ -246,7 +248,48 @@ export default function DiffView({ project, session }: { project: string; sessio
             {view.conflicts.length === 1 ? "" : "s"} · {total} applied patch{total === 1 ? "" : "es"}
           </p>
         </div>
+        <div className="session-tools">
+          {session ? (
+            <button
+              className="chip"
+              disabled={prBusy}
+              onClick={() => {
+                setPrBusy(true);
+                setPrResult(null);
+                void (async () => {
+                  try {
+                    const plan = await api.pullRequestPlan(project, session);
+                    if (
+                      !window.confirm(
+                        `${plan.title}
+
+${plan.body}
+
+Open this pull request from ${plan.branch} into ${plan.base} with gh?`,
+                      )
+                    ) {
+                      return;
+                    }
+                    setPrResult(await api.createPullRequest(project, session));
+                  } catch (failure) {
+                    setError(failure instanceof Error ? failure.message : "Pull request failed.");
+                  } finally {
+                    setPrBusy(false);
+                  }
+                })();
+              }}
+            >
+              {prBusy ? "Opening…" : "Open pull request"}
+            </button>
+          ) : null}
+        </div>
       </header>
+
+      {prResult ? (
+        <p className="notice" role="status">
+          Pull request: {prResult}
+        </p>
+      ) : null}
 
       <p className="notice" role="status">
         {error

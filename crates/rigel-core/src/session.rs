@@ -867,6 +867,22 @@ impl SessionService {
         Ok(())
     }
 
+    /// The body hash this session pinned for a skill, without changing anything.
+    pub async fn skill_pin(
+        &self,
+        session_id: &str,
+        skill_id: &str,
+    ) -> Result<Option<String>, SessionError> {
+        let row: Option<(String,)> = sqlx::query_as(
+            "SELECT body_sha FROM session_skills WHERE session_id = ? AND skill_id = ?",
+        )
+        .bind(session_id)
+        .bind(skill_id)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(row.map(|row| row.0))
+    }
+
     /// Pin a skill to the body hash the session first loaded (§8.7). Re-pinning requires
     /// `repin: true`, which only the UI's explicit action passes.
     pub async fn pin_skill(

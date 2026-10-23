@@ -5,6 +5,7 @@ import {
   type HarnessInfo,
   type KeyStatus,
   type OmnirouteStatus,
+  type RuleSource,
   type Settings,
 } from "./api";
 import { ModelControls } from "./modelpicker";
@@ -246,11 +247,27 @@ export default function SettingsView({ keys, project, session, onKeys, onNotice 
   const [harnesses, setHarnesses] = useState<HarnessInfo[] | null>(null);
   const [probing, setProbing] = useState(false);
   const [diagnostics, setDiagnostics] = useState<{ path: string; body: string } | null>(null);
+  const [rules, setRules] = useState<RuleSource[]>([]);
   const [exporting, setExporting] = useState(false);
 
   const provider = settings?.provider ?? "omniroute";
   const providerInfo = PROVIDERS.find((item) => item.id === provider) ?? PROVIDERS[0];
   const present = keys ? (provider === "omniroute" ? keys.omniroute : keys.openrouter) : null;
+
+  useEffect(() => {
+    if (!project) {
+      setRules([]);
+      return;
+    }
+    let live = true;
+    api
+      .rulesSources(project)
+      .then((next) => live && setRules(next))
+      .catch(() => live && setRules([]));
+    return () => {
+      live = false;
+    };
+  }, [project]);
 
   useEffect(() => {
     let live = true;
@@ -617,6 +634,58 @@ export default function SettingsView({ keys, project, session, onKeys, onNotice 
                 onNotice={onNotice}
               />
             ))}
+          </div>
+        </section>
+
+
+        <section className="settings-section">
+          <div className="settings-head">
+            <h3>Project rules</h3>
+            <span className={`pill ${rules.length ? "completed" : "cancelled"}`}>
+              {rules.length ? `${rules.length} source${rules.length === 1 ? "" : "s"}` : "none"}
+            </span>
+          </div>
+          <p className="fine">
+            Read-only, imported as data before every native turn. Memory stays the source of
+            record; an <code>AGENTS.md</code> here does not outrank the current request.
+          </p>
+          {rules.length ? (
+            <div className="harness-list">
+              {rules.map((rule) => (
+                <div className="harness-row" key={rule.path}>
+                  <code className="harness-path">{rule.path}</code>
+                  <p className="fine">
+                    {rule.kind} · {Math.round(rule.bytes / 1024)} KiB
+                    {rule.truncated ? " · truncated to the context cap" : ""}
+                  </p>
+                </div>
+              ))}
+            </div>
+          ) : (
+            <p className="fine">No AGENTS.md, CLAUDE.md or .cursor/rules file in this project.</p>
+          )}
+          <div className="settings-actions">
+            <button
+              className="chip"
+              disabled={!project}
+              onClick={() => {
+                void api
+                  .exportMemory(project ?? "")
+                  .then((body) => {
+                    if (!body) {
+                      onNotice("No committed memory to export yet.");
+                      return;
+                    }
+                    void navigator.clipboard?.writeText(body);
+                    onNotice("Memory copied as an AGENTS.md block.");
+                  })
+                  .catch((failure) =>
+                    onNotice(failure instanceof Error ? failure.message : "Export failed."),
+                  );
+              }}
+            >
+              Copy memory as AGENTS.md
+            </button>
           </div>
         </section>
 
