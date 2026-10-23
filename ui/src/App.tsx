@@ -86,6 +86,8 @@ export default function App() {
   const [repoInput, setRepoInput] = useState("");
   const [indexing, setIndexing] = useState(false);
   const searchRef = useRef<HTMLInputElement | null>(null);
+  /** Which project root the local services were last booted for; `undefined` means never. */
+  const bootedFor = useRef<string | null | undefined>(undefined);
 
   /* ----------------------------- data ----------------------------- */
 
@@ -262,6 +264,16 @@ export default function App() {
     }
     if (remembered) void openPath(remembered);
   }, [openPath]);
+
+  // Start every local service the app fronts as it opens, then again once the project is
+  // known: the chat checkout is found beside it. Nothing waits on this; each tab polls state.
+  useEffect(() => {
+    if (!isTauri()) return;
+    const root = project?.root ?? null;
+    if (bootedFor.current === root) return;
+    bootedFor.current = root;
+    void api.startServers(root).catch(() => {});
+  }, [project?.root]);
 
   const chooseFolder = useCallback(async () => {
     try {

@@ -16,6 +16,7 @@ import {
   type Turn,
   type SwarmTarget,
   type TurnQuote,
+  type TeamAgent,
   type TurnTranscript,
 } from "./api";
 import { ModelControls } from "./modelpicker";
@@ -82,6 +83,7 @@ export default function SessionView({
   const tauri = isTauri();
   const [session, setSession] = useState<Session | null>(() => (tauri ? null : previewSession));
   const [agents, setAgents] = useState<Agent[]>(() => (tauri ? [] : previewAgents));
+  const [team, setTeam] = useState<TeamAgent[]>([]);
   const [turns, setTurns] = useState<TurnTranscript[]>(() => (tauri ? [] : previewTranscript));
   const [budget, setBudget] = useState<BudgetSnapshot | null>(() => (tauri ? null : previewBudget));
   const [patches, setPatches] = useState<Patch[]>(() => (tauri ? [] : previewPatches));
@@ -174,15 +176,17 @@ export default function SessionView({
     const current = sessionRef.current;
     if (!tauri || !projectRef.current || !current) return;
     try {
-      const [nextTurns, nextAgents, nextPatches, nextSession] = await Promise.all([
+      const [nextTurns, nextAgents, nextPatches, nextSession, nextTeam] = await Promise.all([
         api.transcript(projectRef.current, current.id),
         api.listAgents(projectRef.current, current.id),
         api.listPatches(projectRef.current, current.id),
         api.getSession(projectRef.current, current.id),
+        api.team(projectRef.current, current.id),
       ]);
       setTurns(nextTurns);
       setAgents(nextAgents);
       setPatches(nextPatches);
+      setTeam(nextTeam);
       setSession(nextSession);
       if (nextAgents[0]) {
         setBudget(await api.getBudget(projectRef.current, nextAgents[0].id));
@@ -198,19 +202,22 @@ export default function SessionView({
       setTurns([]);
       setAgents([]);
       setPatches([]);
+      setTeam([]);
       setBudget(null);
       setError(null);
       if (!tauri || !project) return;
       try {
-        const [loadedTurns, loadedAgents, loadedPatches, fresh] = await Promise.all([
+        const [loadedTurns, loadedAgents, loadedPatches, fresh, loadedTeam] = await Promise.all([
           api.transcript(project, next.id),
           api.listAgents(project, next.id),
           api.listPatches(project, next.id),
           api.getSession(project, next.id),
+          api.team(project, next.id),
         ]);
         setTurns(loadedTurns);
         setAgents(loadedAgents);
         setPatches(loadedPatches);
+        setTeam(loadedTeam);
         setSession(fresh);
         if (loadedAgents[0]) {
           setBudget(await api.getBudget(project, loadedAgents[0].id));
@@ -244,6 +251,7 @@ export default function SessionView({
           setSession(null);
           setTurns([]);
           setAgents([]);
+          setTeam([]);
         }
         onSessions(listed);
       } catch (problem) {
@@ -789,7 +797,10 @@ export default function SessionView({
         </div>
 
         <div className="rows">
-          {roster.map(({ agent, nested }) => (
+          {roster.map(({ agent, nested }) => {
+            const assignment = team.find((row) => row.agent_key === agent.id);
+            const working = assignment?.files.join(", ");
+            return (
             <button
               key={agent.id}
               className={`row agent-row${nested ? " nested" : ""}${shown.includes(agent.id) ? " on" : ""}`}
@@ -819,11 +830,14 @@ export default function SessionView({
                     </span>
                   ) : null}
                 </span>
-                <span className="row-desc">{agent.model ?? "no model"}</span>
+                <span className="row-desc" title={assignment?.task}>
+                {working ? `working on ${working}` : agent.model ?? "no model"}
+              </span>
               </span>
               <span className="row-meta">{money(agent.spend_micros)}</span>
             </button>
-          ))}
+            );
+          })}
           {agents.length === 0 && session ? (
             <p className="empty subtle">No agent yet. The first turn starts one.</p>
           ) : null}

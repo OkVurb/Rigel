@@ -111,9 +111,17 @@ pub async fn status() -> ServerStatus {
     }
 }
 
+/// Serialises cold starts: the window's boot and a turn can both see a dead router, and only
+/// one of them should launch a daemon.
+fn start_lock() -> &'static tokio::sync::Mutex<()> {
+    static LOCK: std::sync::OnceLock<tokio::sync::Mutex<()>> = std::sync::OnceLock::new();
+    LOCK.get_or_init(|| tokio::sync::Mutex::new(()))
+}
+
 /// Health first, launch second. Returns an error only when a router was missing and could not
 /// be brought up, so a caller can show one actionable message.
 pub async fn ensure_server() -> Result<ServerStatus, String> {
+    let _starting = start_lock().lock().await;
     let client = health_client();
     let origin = origin();
     let base = base_url();

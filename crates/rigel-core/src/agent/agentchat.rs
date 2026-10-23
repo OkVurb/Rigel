@@ -234,9 +234,17 @@ fn setup_help(project_root: Option<&str>) -> String {
     )
 }
 
+/// Serialises cold starts: the window's boot and a tab action can both see a dead server,
+/// and only one of them should spawn a process.
+fn start_lock() -> &'static tokio::sync::Mutex<()> {
+    static LOCK: std::sync::OnceLock<tokio::sync::Mutex<()>> = std::sync::OnceLock::new();
+    LOCK.get_or_init(|| tokio::sync::Mutex::new(()))
+}
+
 /// Health first, launch second — the OmniRoute contract. Spawning is what earns Rigel the
 /// session token: `run.py` prints it, and an instance started outside Rigel stays unshared.
 pub async fn ensure_server(project_root: Option<&str>) -> Result<ChatStatus, String> {
+    let _starting = start_lock().lock().await;
     let client = http_client();
     if healthy(&client).await {
         return Ok(status(project_root).await);

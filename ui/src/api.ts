@@ -63,6 +63,16 @@ export interface Agent {
   tokens_out: number;
 }
 
+/// One file-scoped assignment on the session work board.
+export interface TeamAgent {
+  agent_key: string;
+  role: string | null;
+  kind: "native" | "room";
+  files: string[];
+  task: string;
+  status: "assigned" | "working" | "done" | "failed" | string;
+}
+
 export interface Usage {
   input_tokens: number;
   cached_input_tokens: number;
@@ -610,6 +620,10 @@ export const api = {
     return call<Agent[]>("agent_list", { project, session });
   },
 
+  async team(project: string, session: string): Promise<TeamAgent[]> {
+    return call<TeamAgent[]>("agent_team", { project, session });
+  },
+
   async spawnAgent(
     project: string,
     session: string,
@@ -784,6 +798,15 @@ export const api = {
   async omnirouteStart(): Promise<OmnirouteStatus> {
     if (!isTauri()) throw new Error("Start OmniRoute from the desktop app, not the browser preview.");
     return call<OmnirouteStatus>("omniroute_start");
+  },
+
+  /**
+   * Boot every local service a turn may need — the router, and the chat server once the
+   * project's checkout is known. Fire-and-forget: each service reports itself in its tab.
+   */
+  async startServers(project: string | null): Promise<void> {
+    if (!isTauri()) return;
+    await call<void>("servers_start", { project });
   },
 
   async usage(project: string, session: string): Promise<Usage> {

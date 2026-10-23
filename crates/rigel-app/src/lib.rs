@@ -25,8 +25,8 @@ use rigel_core::{
     CommandApprover, CommandDecision, CommandRequest, ConflictWatcher, EventSink, InterruptSink,
     MemoryFile, MemoryService, Model, OpenRouterModel, POLL_INTERVAL, Patch, PatchPipeline,
     ResumeOutcome, Scopes, Session, SessionService, SkillDetail, SkillIndex, SkillsError, StopAt,
-    Store, SubagentPolicy, SyncPolicy, Tools, Turn, TurnQuote, TurnTranscript, UnverifiedChange,
-    Usage, WriteMode, credentials, skills::search::SearchHit,
+    Store, SubagentPolicy, SyncPolicy, TeamAgent, Tools, Turn, TurnQuote, TurnTranscript,
+    UnverifiedChange, Usage, WriteMode, credentials, skills::search::SearchHit,
 };
 use serde::{Deserialize, Serialize};
 use tauri::{Emitter, State};
@@ -386,6 +386,19 @@ fn agent_list(project: String, session: String) -> Result<Vec<Agent>, String> {
             .await
             .map_err(message)?
             .agents(&session)
+            .await
+            .map_err(message)
+    })
+}
+
+/// The session work board: which agent holds which files, so the roster can show it.
+#[tauri::command]
+fn agent_team(project: String, session: String) -> Result<Vec<TeamAgent>, String> {
+    tauri::async_runtime::block_on(async move {
+        SessionService::open(Path::new(&project))
+            .await
+            .map_err(message)?
+            .team(&session)
             .await
             .map_err(message)
     })
@@ -1263,11 +1276,44 @@ fn warm_router() {
         .ok();
 }
 
+/// Launch the chat server when the open project carries its checkout and nothing is answering.
+/// Same contract as `warm_router`: a thread, a dropped error, and the Chat tab as the place the
+/// reason appears. `ensure_server` already returns without spawning when the checkout is not
+/// there, so a fresh clone costs one failed lookup rather than a hanging launch.
+fn warm_chat(project: Option<String>) {
+    std::thread::Builder::new()
+        .name("rigel-agentchat".to_string())
+        .spawn(move || {
+            let Ok(runtime) = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+            else {
+                return;
+            };
+            let _ = runtime.block_on(rigel_core::agent::agentchat::ensure_server(
+                project.as_deref(),
+            ));
+        })
+        .ok();
+}
+
+/// Every local service a session can need, started as the window opens and again once the
+/// remembered project is restored (the chat checkout sits beside it). The window calls this
+/// once; neither start blocks the launch, and a service that cannot start is a status the
+/// relevant tab explains rather than an error at boot.
+#[tauri::command]
+fn servers_start(project: Option<String>) {
+    warm_router();
+    warm_chat(project);
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
+            // The project is not known until the window restores it; `servers_start` runs
+            // again from there for the chat checkout. The router needs no project.
             warm_router();
             spawn_conflict_watcher(app.handle().clone());
             Ok(())
@@ -1285,6 +1331,7 @@ pub fn run() {
             session_transcript,
             session_resume,
             agent_list,
+            agent_team,
             agent_spawn,
             agent_stop,
             turn_send,
@@ -1307,6 +1354,7 @@ pub fn run() {
             key_set,
             key_delete,
             harness_probe,
+            servers_start,
             omniroute_status,
             omniroute_start,
             models_list,

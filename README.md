@@ -1,4 +1,45 @@
-# Rigel
+<div align="center">
+
+# ⭐ Rigel
+
+**A local index for agent skills, with an honest measured-vs-advertised column.**
+
+[![Rust](https://img.shields.io/badge/Rust-workspace-orange?logo=rust)](Cargo.toml)
+[![Tauri](https://img.shields.io/badge/Tauri-2-24C8DB?logo=tauri&logoColor=white)](crates/rigel-app)
+[![React](https://img.shields.io/badge/React-UI-61DAFB?logo=react&logoColor=black)](ui)
+[![Platform](https://img.shields.io/badge/platform-Windows-0078D6?logo=windows&logoColor=white)](docs/PLATFORMS.md)
+[![License](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue)](#-licence)
+
+</div>
+
+## 🖼️ Screenshots
+
+| Shelf | Evidence |
+|---|---|
+| ![Shelf](screenshots/p2-shelf.png) | ![Evidence](screenshots/p2-evidence.png) |
+| **Session** | **Safety** |
+| ![Session](screenshots/p3-session.png) | ![Safety](screenshots/safety-panel.png) |
+| **Targets (Claude)** | **Settings** |
+| ![Targets](screenshots/targets-claude.png) | ![Settings](screenshots/settings-key.png) |
+
+## ✨ Features
+
+- 🔎 **Search** across GitHub and the marketplaces, offline, from one catalogue
+- 🧬 **Duplicate detection** with SimHash clusters and variants under each row
+- 🛡️ **Static safety review** with `file:line` evidence
+- 📊 **Measured vs advertised**: advertised numbers stay `unmeasured` until measured
+- 🤖 **Native agent** with budget caps, approvals, snapshots and subagents
+- 🔀 **Diff view** with attributed writes, conflict strip and per-patch revert
+- 🩺 **Doctor** command with exit codes `0` clear, `1` warnings, `2` failures
+
+## 🚀 Quick start
+
+```bash
+cargo build --workspace
+cargo run -p rigel-app
+```
+
+> 💡 Prefer the browser prototype? `cd prototype && npm install && npm run dev`
 
 A local index for agent skills: one catalogue across GitHub and the marketplaces, with duplicate
 detection, a static safety scan, an honest measured-vs-advertised column, and an install matrix per agent
@@ -8,7 +49,7 @@ The claim it is built around: **the number on the package is usually not the num
 measured three token-saving skills against their advertised claims — one delivered a third of its claim,
 one made things worse. Star counts and install numbers surface none of that.
 
-## Status
+## 📌 Status
 
 Phases 0–6 are complete. The window has five surfaces and one database per project:
 
@@ -31,7 +72,7 @@ That shifts the product's spine from grading an index to sandboxing what an agen
 see [interview-answers.md](docs/interview-answers.md) for the answers and the seven collisions they
 leave behind.
 
-## Run it
+## 🛠️ Run it
 
 ```bash
 cd prototype
@@ -129,7 +170,7 @@ The prototype's Discover view talks to two marketplaces that send no CORS header
 **dev-only** proxy (`/__hub`, see `prototype/vite.config.ts`). The Rust indexer does not need one:
 `rigel skills sync skillsmp|skillhub` talks to them server-side (`crates/rigel-core/src/skills/hub.rs`).
 
-## What works
+## ✅ What works
 
 | Surface | State |
 |---|---|
@@ -148,7 +189,7 @@ The prototype's Discover view talks to two marketplaces that send no CORS header
 | Snapshots | **real**: before an approved destructive command, `git stash create` object (kept alive by `refs/rigel/snapshots/<id>`) plus raw copies of changed and untracked files; a non-git tree or a repository with no commit is copied whole; 2 000 files / 200 MB cap, refusing above it. `rigel snapshot capture\|list\|restore` |
 | Deliberation | **real**: a destructive command first gets one round of three read-only advisors (advocate, opponent, referee) on the parent's model, billed to its own turn and shown before the approval prompt; the answers are advisory and cannot allow, deny or alter the gate. Scripted runs record that advice was not gathered instead of consuming their fixed steps |
 | Egress | **real**: `fetch_url` asks per origin with `once` / `session` / `always` scopes (`always` persists in `<index dir>/approved-origins.json`), re-approves a redirect that crosses origins, reads only text-like content types, caps the body at 256 KB, and records the page as a `web_search` item with `untrusted: true` |
-| Subagents | **real**: `spawn_agents` runs up to 4 read-only children concurrently per turn on an eight-model cheap allowlist (GPT-5/5.4 nano, Gemini Flash-Lite/3 Flash, DeepSeek V4.1 Flash, Qwen3 Coder, Haiku 5.5, GPT-5.4 mini); each child is its own agent row and bill, nested under the parent turn. The allowlist is OpenRouter-shaped, so the tool is hidden on the Gemini provider rather than handing it ids Google rejects |
+| Subagents | **real**: `spawn_agents` runs up to 4 read-only children concurrently per turn on an eight-model cheap allowlist (GPT-5/5.4 nano, Gemini Flash-Lite/3 Flash, DeepSeek V4.1 Flash, Qwen3 Coder, Haiku 5.5, GPT-5.4 mini); each child is its own agent row and bill, nested under the parent turn, and must be given a role, an explicit file list and a task. The split is recorded on the session work board, every child sees it and may read only its own files, and each starts its answer with the files it worked on; `assign_agents` gives the same file-scoped work to agents already in the chat room. The allowlist is OpenRouter-shaped, so the tool is hidden on the Gemini provider rather than handing it ids Google rejects |
 | The bill | **real**: micro-dollar accounting from provider usage, local price fallback, 80% warning, cap enforced within one turn, `reconcile` |
 | Session surface | **real**: roster, role-gutter transcript, streaming text, collapsed tool lines, patch diffs, raw/debug toggle, inline 80% prompt, a live model and effort picker fed by the provider catalogue (provider stays in Settings), and a Swarm button that hands the typed task to every agent in the chat room |
 | Patches | **real**: CAS check, write-ahead journal, fsync + rename, idempotent apply, revert once applied |
@@ -164,11 +205,12 @@ The prototype's Discover view talks to two marketplaces that send no CORS header
 | Diff | **real**: conflict strip with both names and hashes, claims with stale rows, unverified counts, per-patch revert |
 | Tools and trust | **real**: twelve curated tools probed per host, cached with path and SHA-256; requirements inferred from `allowed-tools` and body commands with their line; the five-factor arithmetic printed by `rigel trust explain`; approval-gated installs with exit code and duration in the ledger; unattended queues; apt shown and refused |
 | Doctor | **real**: index and project integrity, schema versions, blob rows vs files, stale claims, budget reconcile, keychain, config age, one row per harness, tool hash pins, unfinished installs, update switch; exit 0/1/2 |
-| Updates | **real but off**: an Ed25519 manifest check over `version / url / sha256`, an artifact SHA-256 check, a switch that defaults off, and no automatic request |
+| Updates | **real but off**: an Ed25519 manifest check over `version / url / sha256`, an artifact SHA-256 check, a switch that defaults off, and no automatic request. The Ed25519 publisher key is not the Authenticode certificate that signs the installers |
+| Local services | **real**: the window starts every service a turn can need as it opens — OmniRoute when the provider uses it, and the agentchattr room when its checkout sits beside the restored project. Both run off the UI thread; a service that cannot start is a status in its tab, never a failed launch |
 | Prototype migration | `rigel skills import --from` + [the export snippet](docs/migrating-prototype-index.md) |
 | Discover / Targets / Dependencies (prototype) | still the Phase 0 browser app; Phase 6 ports them |
 
-## Docs
+## 📚 Docs
 
 - [CONTRIBUTING.md](CONTRIBUTING.md) — build, checks, layout and the rules for a schema change
 - [SECURITY.md](SECURITY.md) — the threat model, every network call, and what is not defended
@@ -186,7 +228,7 @@ The prototype's Discover view talks to two marketplaces that send no CORS header
 - [phase-1-plan.md](docs/phase-1-plan.md) — the earlier index-only plan; superseded by the handoff
 - [grilling-50.md](docs/grilling-50.md) — 66 questions to stress-test the plan
 
-## Scripts
+## 🧰 Scripts
 
 - `node scripts/export-installed-skills.mjs` — snapshot installed skill names into the prototype
 - `node scripts/verify-ecc.mjs` — verify ECC across every harness; non-zero on failure
@@ -199,7 +241,7 @@ The prototype's Discover view talks to two marketplaces that send no CORS header
 - `bash scripts/p7-exit-test.sh` — doctor, licence files, installer config, updates and no network
 - `scripts/fixtures/p4-subagents.json` — a scripted parent that delegates to two cheap readers; `rigel agent run --script` prints their bills
 
-## Limits, stated plainly
+## ⚠️ Limits, stated plainly
 
 - The safety grade is a static scan of one file. It does not execute anything and cannot prove a skill
   is harmless. `A` is unreachable from a static scan and stays reserved until Phase 6 weighs
@@ -233,14 +275,14 @@ The prototype's Discover view talks to two marketplaces that send no CORS header
   signatures are still open.
 - `prototype/src/installed.json` contains the names of skills present on the machine that generated it.
 
-## Naming
+## 🏷️ Naming
 
 Rigel, named for the bright anchor star in the mark. The Phase 0 document is titled Skill Index, and
 the prototype still uses `skilldb:` keys; both are now historical. Phase 2 moved that data into
 `index.db` — see [the migration note](docs/migrating-prototype-index.md) — and nothing in `crates/`
 or `ui/` reads those keys.
 
-## Licence
+## 📄 Licence
 
 MIT OR Apache-2.0, at your option. The workspace, every crate and the renderer carry the same
 expression; the texts are in [LICENSE-MIT](LICENSE-MIT) and [LICENSE-APACHE](LICENSE-APACHE).
