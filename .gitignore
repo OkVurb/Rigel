@@ -33,3 +33,6 @@ vendor/
 
 # Local MCP wiring for the chat agents: absolute paths and per-machine agent ids
 .mcp.json
+
+# local README render check, not part of the repository
+.preview/
