@@ -31,8 +31,10 @@
 </p>
 
 <p align="center">
-  <img src="screenshots/p3-session.png" width="880" alt="The Session surface: agent roster, streaming tool calls, patch diffs and a running bill" />
+  <img src="screenshots/rigel-demo.gif" width="800" alt="A loop through the Rigel window: the session turn, the shell, the evidence table and targets" />
 </p>
+
+<p align="center"><sub>Session · the shell · evidence · targets</sub></p>
 
 ## 💡 Why Rigel
 
