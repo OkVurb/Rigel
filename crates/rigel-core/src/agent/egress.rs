@@ -16,8 +16,8 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use futures::StreamExt;
-use reqwest::Url;
 use reqwest::header::{CONTENT_LENGTH, CONTENT_TYPE, LOCATION};
+use reqwest::Url;
 use serde::{Deserialize, Serialize};
 
 /// Per response. The model only ever sees [`crate::agent::tools`]' result cap on top of this.

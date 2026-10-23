@@ -14,7 +14,7 @@ use serde::Serialize;
 use crate::budget::{BudgetError, BudgetService, ReconcileReport};
 use crate::patches::{PatchError, PatchPipeline, Recovery};
 use crate::session::{Checkpoint, Session, SessionError, SessionService, SessionStatus, Turn};
-use crate::tree::{TreeError, tree_hash};
+use crate::tree::{tree_hash, TreeError};
 
 #[derive(Debug, Serialize)]
 pub struct ResumeOutcome {

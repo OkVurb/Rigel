@@ -80,6 +80,18 @@ pub struct Agent {
     pub tokens_out: i64,
 }
 
+/// A writable subagent as the Diff view lists it (D80/D114/D115): who it is, what it was
+/// approved to do, and where its pending work lives. The pending diff itself is read on
+/// demand, not on the two-second coordination poll.
+#[derive(Debug, Clone, Serialize)]
+pub struct WritableAgent {
+    pub agent: Agent,
+    /// The plan the user approved; `None` means the gate was waived.
+    pub plan: Option<String>,
+    /// The waiver, when the plan gate was skipped.
+    pub plan_note: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct TeamAgent {
     /// Native children use their agent id; chat-room agents use their room name.
@@ -146,6 +158,9 @@ pub enum SessionError {
 
     #[error("agent {0} does not exist")]
     AgentNotFound(String),
+
+    #[error("unknown role preset `{0}`; use implementer, reviewer, tester or researcher")]
+    InvalidRole(String),
 
     #[error("turn {0} does not exist")]
     TurnNotFound(String),
@@ -331,6 +346,32 @@ impl SessionService {
         self.agent(&id).await
     }
 
+    /// D94: apply a named role preset to an existing agent. The prompt, effort and tool
+    /// allowance are looked up from the preset on every turn; the row remembers the role and
+    /// model so the roster shows what was chosen.
+    pub async fn apply_role_preset(
+        &self,
+        session_id: &str,
+        agent_id: &str,
+        preset: &str,
+    ) -> Result<Agent, SessionError> {
+        let Some(preset) = crate::agent::roles::preset(Some(preset)) else {
+            return Err(SessionError::InvalidRole(preset.to_string()));
+        };
+        let result =
+            sqlx::query("UPDATE agents SET role = ?, model = ? WHERE id = ? AND session_id = ?")
+                .bind(preset.id)
+                .bind(preset.model)
+                .bind(agent_id)
+                .bind(session_id)
+                .execute(&self.pool)
+                .await?;
+        if result.rows_affected() == 0 {
+            return Err(SessionError::AgentNotFound(agent_id.to_string()));
+        }
+        self.agent(agent_id).await
+    }
+
     pub async fn agents(&self, session_id: &str) -> Result<Vec<Agent>, SessionError> {
         let rows: Vec<AgentRow> = sqlx::query_as(
             "SELECT id, session_id, harness, role, model, worktree, status, started_at,
@@ -462,6 +503,86 @@ impl SessionService {
             .execute(&self.pool)
             .await?;
         Ok(())
+    }
+
+    /// D80/D114: remember that this agent may write, and which plan the user approved (or
+    /// why the gate was skipped). Written before the child starts, so a child that dies
+    /// mid-turn still has a record of what it was allowed to do.
+    pub async fn mark_writable(
+        &self,
+        agent_id: &str,
+        plan: &str,
+        note: Option<&str>,
+    ) -> Result<(), SessionError> {
+        let result = sqlx::query(
+            "UPDATE agents SET writable = 1, plan_json = ?, plan_note = ? WHERE id = ?",
+        )
+        .bind(plan)
+        .bind(note)
+        .bind(agent_id)
+        .execute(&self.pool)
+        .await?;
+        if result.rows_affected() == 0 {
+            return Err(SessionError::AgentNotFound(agent_id.to_string()));
+        }
+        Ok(())
+    }
+
+    /// D113: writable children currently running in this session. The cap counts these, not
+    /// the ones that already finished: a finished child no longer holds a worktree open.
+    pub async fn writable_running(&self, session_id: &str) -> Result<i64, SessionError> {
+        let (count,): (i64,) = sqlx::query_as(
+            "SELECT COUNT(*) FROM agents WHERE session_id = ? AND writable = 1
+             AND status = 'running'",
+        )
+        .bind(session_id)
+        .fetch_one(&self.pool)
+        .await?;
+        Ok(count)
+    }
+
+    /// Every agent in the session that may write, in registration order. This is the list the
+    /// Diff view shows with their plans and reviews; it is small by construction (D113 caps
+    /// the running ones).
+    pub async fn writable_agents(
+        &self,
+        session_id: &str,
+    ) -> Result<Vec<WritableAgent>, SessionError> {
+        let ids: Vec<(String, Option<String>, Option<String>)> = sqlx::query_as(
+            "SELECT id, plan_json, plan_note FROM agents
+             WHERE session_id = ? AND writable = 1 ORDER BY started_at, rowid",
+        )
+        .bind(session_id)
+        .fetch_all(&self.pool)
+        .await?;
+        let mut out = Vec::with_capacity(ids.len());
+        for (id, plan, plan_note) in ids {
+            out.push(WritableAgent {
+                agent: self.agent(&id).await?,
+                plan,
+                plan_note,
+            });
+        }
+        Ok(out)
+    }
+
+    /// The plan an agent was approved to carry out, if any.
+    pub async fn plan_of(&self, agent_id: &str) -> Result<Option<String>, SessionError> {
+        let row: Option<(Option<String>,)> =
+            sqlx::query_as("SELECT plan_json FROM agents WHERE id = ?")
+                .bind(agent_id)
+                .fetch_optional(&self.pool)
+                .await?;
+        Ok(row.and_then(|(plan,)| plan))
+    }
+
+    /// Whether this agent was registered as writable.
+    pub async fn is_writable(&self, agent_id: &str) -> Result<bool, SessionError> {
+        let row: Option<(i64,)> = sqlx::query_as("SELECT writable FROM agents WHERE id = ?")
+            .bind(agent_id)
+            .fetch_optional(&self.pool)
+            .await?;
+        Ok(row.map(|(writable,)| writable != 0).unwrap_or(false))
     }
 
     /// Open a turn for an agent. Sequence numbers are per agent, not global.
@@ -653,6 +774,47 @@ impl SessionService {
             created_at,
             raw: None,
         })
+    }
+
+    /// Where a note about `agent_id`'s work belongs: the parent turn that spawned its latest
+    /// run, so the note reads beside the child's own rows, or the agent's latest turn when it
+    /// has no parent. The parent link is the turn's, not the agent's (`turns.parent_turn_id`),
+    /// which is the one a spawned child actually records.
+    pub async fn note_turn(&self, agent_id: &str) -> Result<Option<Turn>, SessionError> {
+        let row: Option<TurnRow> = sqlx::query_as(
+            "SELECT id, agent_id, seq, status, prompt, started_at, completed_at, usage_json,\n                    stop_reason, parent_turn_id\n             FROM turns WHERE agent_id = ? ORDER BY started_at DESC, seq DESC LIMIT 1",
+        )
+        .bind(agent_id)
+        .fetch_optional(&self.pool)
+        .await?;
+        let Some(latest) = row.map(turn_from_row).transpose()? else {
+            return Ok(None);
+        };
+        match latest.parent_turn_id.clone() {
+            Some(parent) => self.turn(&parent).await.map(Some),
+            None => Ok(Some(latest)),
+        }
+    }
+
+    /// The notes left on this agent's previous turn, in the order they were posted. Every turn
+    /// starts from a fresh prompt, so this is the one path by which something the user did in
+    /// the window reaches the next model call.
+    pub async fn previous_notes(
+        &self,
+        agent_id: &str,
+        current_turn: &str,
+    ) -> Result<Vec<serde_json::Value>, SessionError> {
+        let rows: Vec<(String,)> = sqlx::query_as(
+            "SELECT body_json FROM items\n             WHERE kind = 'note' AND turn_id = (\n               SELECT id FROM turns WHERE agent_id = ? AND id != ?\n               ORDER BY started_at DESC, seq DESC LIMIT 1\n             ) ORDER BY seq",
+        )
+        .bind(agent_id)
+        .bind(current_turn)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows
+            .into_iter()
+            .filter_map(|(body,)| serde_json::from_str(&body).ok())
+            .collect())
     }
 
     /// Record a checkpoint after a turn. Resume compares `tree_hash` later (I8).

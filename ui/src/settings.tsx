@@ -6,7 +6,9 @@ import {
   type KeyStatus,
   type OmnirouteStatus,
   type RuleSource,
+  type SafetyView,
   type Settings,
+  type SpendReport,
 } from "./api";
 import { ModelControls } from "./modelpicker";
 import { ensurePermission } from "./notify";
@@ -236,6 +238,16 @@ function HarnessKeyRow({
  * OmniRoute has a second axis OpenRouter does not: the router is a process on this machine,
  * so this screen reports whether it is answering and can start it.
  */
+function dollarsLabel(micros: number | null): string {
+  return micros === null ? "no cap" : dollars(micros);
+}
+
+function dollars(micros: number): string {
+  const sign = micros < 0 ? "-" : "";
+  const value = Math.abs(micros);
+  return `${sign}$${Math.floor(value / 1_000_000)}.${String(Math.floor((value % 1_000_000) / 100)).padStart(4, "0")}`;
+}
+
 export default function SettingsView({ keys, project, session, onKeys, onNotice }: Props) {
   const [value, setValue] = useState("");
   const [busy, setBusy] = useState(false);
@@ -249,6 +261,11 @@ export default function SettingsView({ keys, project, session, onKeys, onNotice 
   const [diagnostics, setDiagnostics] = useState<{ path: string; body: string } | null>(null);
   const [rules, setRules] = useState<RuleSource[]>([]);
   const [exporting, setExporting] = useState(false);
+  const [spend, setSpend] = useState<SpendReport | null>(null);
+  const [safety, setSafety] = useState<SafetyView | null>(null);
+  const [writableInput, setWritableInput] = useState("");
+  const [dailyInput, setDailyInput] = useState("");
+  const [safetyBusy, setSafetyBusy] = useState(false);
 
   const provider = settings?.provider ?? "omniroute";
   const providerInfo = PROVIDERS.find((item) => item.id === provider) ?? PROVIDERS[0];
@@ -283,10 +300,29 @@ export default function SettingsView({ keys, project, session, onKeys, onNotice 
       .harnessProbe(false)
       .then((next) => live && setHarnesses(next))
       .catch(() => live && setHarnesses(null));
+    if (project) {
+      api
+        .spendReport(project)
+        .then((next) => live && setSpend(next))
+        .catch(() => live && setSpend(null));
+      api
+        .safetyGet(project)
+        .then((next) => {
+          if (!live) return;
+          setSafety(next);
+          setWritableInput(String(next.writable_agents));
+          setDailyInput(
+            next.daily_cap_micros === null
+              ? ""
+              : String(Math.round(next.daily_cap_micros / 10_000)),
+          );
+        })
+        .catch(() => live && setSafety(null));
+    }
     return () => {
       live = false;
     };
-  }, []);
+  }, [project]);
 
   const refreshHarnesses = async (force = false) => {
     setProbing(force);
@@ -321,6 +357,41 @@ export default function SettingsView({ keys, project, session, onKeys, onNotice 
       onNotice(failure instanceof Error ? failure.message : "Could not assemble diagnostics.");
     } finally {
       setExporting(false);
+    }
+  };
+
+  // D113/D116: one save writes both knobs, because they are read together everywhere.
+  const saveSafety = async (clearDaily = false) => {
+    if (!project) {
+      onNotice("Open a project first — the safety settings live in its database.");
+      return;
+    }
+    setSafetyBusy(true);
+    try {
+      const count = Number.parseInt(writableInput, 10);
+      const dailyDollars = clearDaily ? null : Number.parseFloat(dailyInput);
+      const next = await api.safetySet(project, session ?? "", {
+        writableAgents: Number.isFinite(count) ? Math.max(1, Math.min(16, count)) : undefined,
+        dailyCapCents:
+          !clearDaily && dailyDollars !== null && Number.isFinite(dailyDollars)
+            ? Math.max(1, Math.round(dailyDollars * 100))
+            : undefined,
+        clearDailyCap: clearDaily,
+      });
+      setSafety(next);
+      setWritableInput(String(next.writable_agents));
+      setDailyInput(
+        next.daily_cap_micros === null ? "" : String(Math.round(next.daily_cap_micros / 10_000)),
+      );
+      onNotice(
+        clearDaily
+          ? "Daily cap turned off. Session caps still apply."
+          : `Safety saved: ${next.writable_agents} writable agent(s), ${dollarsLabel(next.daily_cap_micros)} a day.`,
+      );
+    } catch (failure) {
+      setError(failure instanceof Error ? failure.message : String(failure));
+    } finally {
+      setSafetyBusy(false);
     }
   };
 
@@ -637,6 +708,103 @@ export default function SettingsView({ keys, project, session, onKeys, onNotice 
           </div>
         </section>
 
+
+        <section className="settings-section">
+          <div className="settings-head">
+            <h3>Spend</h3>
+            <span className="pill cancelled">
+              {spend ? `${spend.turns} turns` : "no data"}
+            </span>
+          </div>
+          <p className="fine">
+            Every recorded turn, grouped across sessions. The session database is the source
+            of truth; nothing here is estimated a second time.
+          </p>
+          {spend ? (
+            <>
+              <p className="settings-total">
+                {dollars(spend.total_micros)} total
+              </p>
+              <div className="harness-list">
+                {spend.by_day.slice(0, 7).map((row) => (
+                  <div className="harness-row spend-row" key={row.key}>
+                    <span>{row.label}</span>
+                    <span className="mono">{dollars(row.micros)}</span>
+                    <span className="fine">{row.turns} turns</span>
+                  </div>
+                ))}
+                {spend.by_session.slice(0, 5).map((row) => (
+                  <div className="harness-row spend-row" key={row.key}>
+                    <span>{row.label}</span>
+                    <span className="mono">{dollars(row.micros)}</span>
+                    <span className="fine">{row.turns} turns</span>
+                  </div>
+                ))}
+              </div>
+            </>
+          ) : (
+            <p className="fine">Open a project to see its recorded spend.</p>
+          )}
+        </section>
+
+        <section className="settings-section">
+          <div className="settings-head">
+            <h3>Safety</h3>
+            <span className={`pill ${safety ? "completed" : "cancelled"}`}>
+              {safety ? `${dollars(safety.today_micros)} today` : "no data"}
+            </span>
+          </div>
+          <p className="fine">
+            Three writable agents at once by default; read-only helpers are not counted. The
+            daily cap applies to every session in this project and stops every running agent
+            when it is crossed. Both are recorded in the project database, not a settings file.
+          </p>
+          {safety ? (
+            <div className="safety-form">
+              <label>
+                <span>Writable agents at once</span>
+                <input
+                  value={writableInput}
+                  onChange={(event) => setWritableInput(event.target.value)}
+                  inputMode="numeric"
+                  aria-label="Writable agents at once"
+                />
+              </label>
+              <label>
+                <span>Daily cap, $</span>
+                <input
+                  value={dailyInput}
+                  onChange={(event) => setDailyInput(event.target.value)}
+                  inputMode="decimal"
+                  placeholder="off"
+                  aria-label="Daily cap in dollars"
+                />
+              </label>
+              <div className="cap-form">
+                <button
+                  className="chip"
+                  onClick={() => void saveSafety(false)}
+                  disabled={safetyBusy}
+                >
+                  Save safety
+                </button>
+                <button
+                  className="chip danger"
+                  onClick={() => void saveSafety(true)}
+                  disabled={safetyBusy}
+                >
+                  Turn the daily cap off
+                </button>
+              </div>
+              <p className="fine mono">
+                {safety.day} · {dollars(safety.today_micros)} of{" "}
+                {dollarsLabel(safety.daily_cap_micros)} · {safety.writable_agents} writable
+              </p>
+            </div>
+          ) : (
+            <p className="fine">Open a project to see its safety settings.</p>
+          )}
+        </section>
 
         <section className="settings-section">
           <div className="settings-head">

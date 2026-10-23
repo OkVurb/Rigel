@@ -28,19 +28,21 @@ pub mod model;
 pub mod omniroute;
 pub mod openrouter;
 pub mod pricing;
+pub mod roles;
 pub mod scripted;
 pub mod team;
 pub mod tools;
 
 pub use approval::{
-    ApprovalScope, CommandApprover, CommandDecision, CommandRequest, DenyCommands, Scopes,
+    ApprovalScope, CommandApprover, CommandDecision, CommandRequest, DenyCommands, DenyPlans,
+    PlanAgent, PlanApprover, PlanDecision, PlanRequest, Scopes,
 };
 pub use coordinator::{
-    AgentError, Cancels, Coordinator, DEFAULT_MAX_STEPS, DEFAULT_SUBAGENT_MODEL, SUBAGENT_MODELS,
-    StopReason, SubagentPolicy, TurnRun, fixed_context_chars,
+    fixed_context_chars, AgentError, Cancels, Coordinator, StopReason, SubagentPolicy, TurnRun,
+    DEFAULT_MAX_STEPS, DEFAULT_SUBAGENT_MODEL, MAX_PLAN_CHARS, REVIEW_MODEL, SUBAGENT_MODELS,
 };
 pub use deliberation::{Deliberation, Deliberator, ModelDeliberator, NoDeliberation, Position};
-pub use destructive::{Finding, POLICIES, Policy, classify};
+pub use destructive::{classify, Finding, Policy, POLICIES};
 pub use egress::{
     DenyOrigins, Egress, EgressError, Fetched, OriginApprover, OriginDecision, OriginRequest,
 };
@@ -49,6 +51,7 @@ pub use model::{
     ToolCallBuilder, ToolSpec,
 };
 pub use omniroute::ServerStatus;
-pub use openrouter::{DEFAULT_BASE_URL, DEFAULT_MODEL, OpenRouterModel};
+pub use openrouter::{OpenRouterModel, DEFAULT_BASE_URL, DEFAULT_MODEL};
+pub use roles::{RolePreset, PRESETS as ROLE_PRESETS};
 pub use scripted::{Script, ScriptedModel};
 pub use tools::{ToolOutcome, Tools};

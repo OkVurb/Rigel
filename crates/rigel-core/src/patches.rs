@@ -68,6 +68,8 @@ pub enum RecoveryState {
 /// the gutter of every hunk instead of one name per file.
 #[derive(Debug, Clone, Serialize)]
 pub struct AttributedHunk {
+    /// The `patch_hunks` row: what a comment attaches to.
+    pub id: String,
     pub patch_id: String,
     pub path: String,
     pub ordinal: i64,
@@ -564,7 +566,7 @@ impl PatchPipeline {
         session_id: &str,
     ) -> Result<Vec<AttributedHunk>, PatchError> {
         let rows: Vec<AttributedRow> = sqlx::query_as(
-            "SELECT h.patch_id, h.path, h.ordinal, h.agent_id, h.header, h.old_start,
+            "SELECT h.id, h.patch_id, h.path, h.ordinal, h.agent_id, h.header, h.old_start,
                     h.old_lines, h.new_start, h.new_lines, h.created_at, p.status
              FROM patch_hunks h JOIN patches p ON p.id = h.patch_id
              WHERE p.session_id = ?
@@ -576,17 +578,18 @@ impl PatchPipeline {
         Ok(rows
             .into_iter()
             .map(|row| AttributedHunk {
-                patch_id: row.0,
-                path: row.1,
-                ordinal: row.2,
-                agent_id: row.3,
-                header: row.4,
-                old_start: row.5,
-                old_lines: row.6,
-                new_start: row.7,
-                new_lines: row.8,
-                created_at: row.9,
-                status: row.10,
+                id: row.0,
+                patch_id: row.1,
+                path: row.2,
+                ordinal: row.3,
+                agent_id: row.4,
+                header: row.5,
+                old_start: row.6,
+                old_lines: row.7,
+                new_start: row.8,
+                new_lines: row.9,
+                created_at: row.10,
+                status: row.11,
             })
             .collect())
     }
@@ -662,6 +665,7 @@ impl PatchPipeline {
 }
 
 type AttributedRow = (
+    String,
     String,
     String,
     i64,
@@ -951,6 +955,24 @@ fn apply_hunks(diff: &str, current: &str, removed: char) -> Result<String, Patch
     }
     out.extend(text_lines[index..].iter().map(|s| s.to_string()));
     Ok(out.concat())
+}
+
+/// Rebuild the content a stored patch replaced, from the text it produced (D79).
+///
+/// The merge view's `base` and `ours` are recovered this way: each is the parent of a diff Rigel
+/// itself wrote, and the caller checks the rebuilt bytes against the hash in the ledger before
+/// showing them. Nothing here guesses what a version looked like.
+pub fn reverse_patch(diff: &str, produced: &str) -> Result<String, PatchError> {
+    // `apply_reverse` removes the `+` side from the produced text and puts the `-` side back.
+    apply_reverse(diff, produced)
+}
+
+/// Apply a stored patch's diff to its base text, producing the content the patch wrote.
+///
+/// This is the forward half of [`reverse_patch`], used by the conflict view to walk an agent's
+/// applied patches from the version it claimed forward to the version it produced (D79).
+pub fn apply_patch_text(diff: &str, base: &str) -> Result<String, PatchError> {
+    reverse_apply(diff, base)
 }
 
 fn apply_reverse(diff: &str, current: &str) -> Result<String, PatchError> {

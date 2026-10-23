@@ -8,29 +8,31 @@
 //! `read_file` records the hash it served. `edit_file` refuses unless that read happened and
 //! the file still hashes to it, which is what makes the model's `old_string` meaningful.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 use tokio::io::AsyncReadExt;
 use tokio::process::Command as ProcessCommand;
 
 use super::approval::{
-    ApprovalScope, CommandApprover, CommandDecision, CommandRequest, DenyCommands, Scopes,
+    ApprovalScope, CommandApprover, CommandDecision, CommandRequest, DenyCommands, DenyPlans,
+    PlanApprover, PlanDecision, PlanRequest, Scopes,
 };
 use super::deliberation::{Deliberator, NoDeliberation};
 use super::egress::{DenyOrigins, Egress, OriginApprover};
 use super::model::ToolSpec;
 use crate::budget::BudgetService;
 use crate::domain::ItemKind;
-use crate::patches::{PatchError, PatchPipeline, StopAt, sha256_empty, sha256_hex};
+use crate::patches::{sha256_empty, sha256_hex, PatchError, PatchPipeline, StopAt};
 use crate::session::SessionService;
 use crate::skills::index::SkillIndex;
-use crate::skills::{SkillsError, blob::BlobStore};
+use crate::skills::{blob::BlobStore, SkillsError};
 use crate::snapshot::SnapshotService;
 
 const MAX_READ_LINES: usize = 2_000;
@@ -57,6 +59,10 @@ pub struct Tools {
     /// restriction is enforced here as well as hidden from the schema: a model that calls a
     /// tool it was not offered still gets an error, not a write.
     read_only: bool,
+    /// D94: the exact tools a role preset allows. `None` is a custom role with the normal set.
+    allowed: Mutex<Option<HashSet<String>>>,
+    /// D98: plan mode hides every tool that can change the tree or run a command.
+    plan_mode: AtomicBool,
     /// The project-relative files a subagent was assigned. `None` means unrestricted (the
     /// coordinator); `Some` means `read_file` refuses anything not on the list. The work board
     /// states the same list in the prompt, but the tool enforces it.
@@ -70,6 +76,9 @@ pub struct Tools {
     /// Answers already given at session, project or always scope (N2). Shared with every tool
     /// set built from this one, so `session` means the session and not the turn.
     scopes: Scopes,
+    /// D114: who approves a writable fan-out. Defaults to refusing, so a headless caller
+    /// cannot start a writable child by asking for one.
+    plans: Arc<dyn PlanApprover>,
 }
 
 #[derive(Debug, Clone)]
@@ -130,11 +139,14 @@ impl Tools {
             stop_at,
             reads: Mutex::new(HashMap::new()),
             read_only: false,
+            allowed: Mutex::new(None),
+            plan_mode: AtomicBool::new(false),
             scope: None,
             commands: Arc::new(DenyCommands),
             egress: Egress::new(Arc::new(DenyOrigins), index_dir.clone()),
             deliberator: Arc::new(NoDeliberation),
             scopes,
+            plans: Arc::new(DenyPlans),
         }
     }
 
@@ -164,6 +176,17 @@ impl Tools {
         self
     }
 
+    /// Install the surface that approves a writable fan-out (D114).
+    pub fn with_plan_approval(mut self, approver: Arc<dyn PlanApprover>) -> Self {
+        self.plans = approver;
+        self
+    }
+
+    /// Ask the installed surface. No surface means no writable children.
+    pub async fn approve_plan(&self, request: &PlanRequest) -> PlanDecision {
+        self.plans.approve_plan(request).await
+    }
+
     /// The tool set a subagent gets: the same reads and index, no writes, no spawning.
     pub fn subagent(&self) -> Self {
         Self {
@@ -175,12 +198,64 @@ impl Tools {
             stop_at: StopAt::Never,
             reads: Mutex::new(HashMap::new()),
             read_only: true,
+            allowed: Mutex::new(None),
+            plan_mode: AtomicBool::new(false),
             scope: None,
             commands: self.commands.clone(),
             egress: self.egress.clone(),
             deliberator: self.deliberator.clone(),
             scopes: self.scopes.clone(),
+            plans: self.plans.clone(),
         }
+    }
+
+    /// The tool set a writable child gets: the full set, rooted at its worktree and limited
+    /// to the files the coordinator assigned. The scope is the write allowlist as well as the
+    /// read one, so a child cannot edit a file it was not given.
+    pub fn writer(&self, root: PathBuf, files: Vec<String>) -> Self {
+        let pipeline = PatchPipeline::new(&root, self.session.pool().clone());
+        // A command grant keyed by text is also a grant in that directory. A worktree is a
+        // different directory, so it starts with no remembered grants: the same command is
+        // asked once more there rather than riding on a session answer from the main tree.
+        let scopes = Scopes::new(&root, &self.index_dir);
+        Self {
+            root,
+            session: self.session.clone(),
+            pipeline,
+            budget: self.budget.clone(),
+            index_dir: self.index_dir.clone(),
+            stop_at: StopAt::Never,
+            reads: Mutex::new(HashMap::new()),
+            read_only: false,
+            allowed: Mutex::new(None),
+            plan_mode: AtomicBool::new(false),
+            scope: Some(files),
+            commands: self.commands.clone(),
+            egress: self.egress.clone(),
+            deliberator: self.deliberator.clone(),
+            scopes,
+            plans: self.plans.clone(),
+        }
+    }
+
+    /// D98: set the plan-phase guard for this turn.
+    pub fn set_plan_mode(&self, on: bool) {
+        self.plan_mode.store(on, Ordering::SeqCst);
+    }
+
+    /// D94: restrict this turn to a role preset's tools. `None` restores the normal set.
+    pub fn restrict_to(&self, tools: Option<Vec<String>>) {
+        if let Ok(mut allowed) = self.allowed.lock() {
+            *allowed = tools.map(|names| names.into_iter().collect());
+        }
+    }
+
+    fn tool_allowed(&self, name: &str) -> bool {
+        self.allowed
+            .lock()
+            .ok()
+            .and_then(|allowed| allowed.as_ref().map(|set| set.contains(name)))
+            .unwrap_or(true)
     }
 
     /// Limit a read-only child to the files the coordinator assigned it.
@@ -214,6 +289,15 @@ impl Tools {
         &self.pipeline
     }
 
+    /// Whether a relative path is on this child's assignment. Writes use this, because a new
+    /// file has no canonical path to check yet.
+    fn rel_in_scope(&self, rel: &str) -> bool {
+        match &self.scope {
+            None => true,
+            Some(files) => files.iter().any(|file| file == &normalize(rel)),
+        }
+    }
+
     pub fn forget_reads(&self) {
         if let Ok(mut reads) = self.reads.lock() {
             reads.clear();
@@ -225,6 +309,19 @@ impl Tools {
     pub fn specs(&self) -> Vec<ToolSpec> {
         Self::specs_all()
             .into_iter()
+            .filter(|spec| self.tool_allowed(&spec.name))
+            .filter(|spec| {
+                !(self.plan_mode.load(Ordering::SeqCst)
+                    && matches!(
+                        spec.name.as_str(),
+                        "edit_file"
+                            | "write_file"
+                            | "run_command"
+                            | "spawn_agents"
+                            | "assign_agents"
+                            | "merge_subagent"
+                    ))
+            })
             .filter(|spec| {
                 !(self.read_only
                     && matches!(
@@ -360,10 +457,24 @@ impl Tools {
                                     "files": { "type": "array", "minItems": 1, "maxItems": 8, "items": { "type": "string" }, "description": "Project-relative files this helper may read; no two helpers may share a file" },
                                     "prompt": { "type": "string", "minLength": 1, "maxLength": 2000, "description": "Exactly what this helper should produce" },
                                     "task": { "type": "string", "maxLength": 400, "description": "One-line task for the work board; defaults to the prompt" },
-                                    "model": { "type": "string", "enum": super::coordinator::SUBAGENT_MODELS, "description": "Defaults to the cheapest nano model; name a larger one only when the reading is subtle." }
+                                    "model": { "type": "string", "enum": super::coordinator::SUBAGENT_MODELS, "description": "Defaults to the cheapest nano model; name a larger one only when the reading is subtle." },
+                                    "mode": { "type": "string", "enum": ["read", "write"], "description": "read (default) or write. A write child gets its own worktree and may edit only its files; its work lands only after merge_subagent." },
+                                    "plan": { "type": "string", "maxLength": 4000, "description": "Required for mode write: the numbered plan the user approves before the child starts." }
                                 }
                             }
                         }
+                    }
+                }),
+            },
+            ToolSpec {
+                name: "merge_subagent".to_string(),
+                description: "Review and merge a writable subagent's worktree. Name the child by agent_id or role. A clean-context reviewer reads only the diff and must approve; a blocked review needs override_reason, which is recorded. Changed files land through the same compare-and-swap patch journal as any other write.".to_string(),
+                parameters: json!({
+                    "type": "object",
+                    "properties": {
+                        "agent_id": { "type": "string", "description": "The writable child whose worktree to review and merge" },
+                        "role": { "type": "string", "description": "Or the role you gave it at spawn; the latest writable child with that role is used" },
+                        "override_reason": { "type": "string", "maxLength": 400, "description": "Why a blocked review is being overridden; stored beside the verdict" }
                     }
                 }),
             },
@@ -402,6 +513,28 @@ impl Tools {
         name: &str,
         args: Value,
     ) -> ToolOutcome {
+        if !self.tool_allowed(name) {
+            return ToolOutcome::error(
+                "NOT_ALLOWED",
+                format!("this role preset does not offer {name}"),
+            );
+        }
+        if self.plan_mode.load(Ordering::SeqCst)
+            && matches!(
+                name,
+                "edit_file"
+                    | "write_file"
+                    | "run_command"
+                    | "spawn_agents"
+                    | "assign_agents"
+                    | "merge_subagent"
+            )
+        {
+            return ToolOutcome::error(
+                "PLAN_MODE",
+                format!("{name} is unavailable in plan mode; approve the plan to start work"),
+            );
+        }
         if self.read_only
             && matches!(
                 name,
@@ -429,6 +562,10 @@ impl Tools {
             "spawn_agents" => ToolOutcome::error(
                 "INTERNAL",
                 "spawn_agents is run by the coordinator, not this dispatcher",
+            ),
+            "merge_subagent" => ToolOutcome::error(
+                "INTERNAL",
+                "merge_subagent is run by the coordinator, not this dispatcher",
             ),
             other => ToolOutcome::error("UNKNOWN_TOOL", format!("unknown tool {other}")),
         };
@@ -554,6 +691,12 @@ impl Tools {
         if old == new {
             return ToolOutcome::error("NO_CHANGES", "old_string and new_string are identical");
         }
+        if !self.rel_in_scope(rel) {
+            return ToolOutcome::error(
+                "OUT_OF_SCOPE",
+                format!("{rel} is not in this agent's assignment; ask the coordinator for it"),
+            );
+        }
         let key = normalize(rel);
         let Some(base) = self
             .reads
@@ -623,6 +766,12 @@ impl Tools {
         let (Some(rel), Some(content)) = (arg_str(args, "path"), arg_text(args, "content")) else {
             return ToolOutcome::error("BAD_ARGUMENTS", "path and content are required");
         };
+        if !self.rel_in_scope(rel) {
+            return ToolOutcome::error(
+                "OUT_OF_SCOPE",
+                format!("{rel} is not in this agent's assignment; ask the coordinator for it"),
+            );
+        }
         let path = match self.pipeline.resolve(rel) {
             Ok(path) => path,
             Err(error) => return path_error(error),

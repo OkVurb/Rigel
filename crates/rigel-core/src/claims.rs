@@ -16,7 +16,9 @@ use serde::{Deserialize, Serialize};
 use sqlx::{Row, SqlitePool};
 
 use crate::migrate::now_ms;
-use crate::patches::sha256_hex;
+use crate::patches::{
+    apply_patch_text, reverse_patch, sha256_hex, Patch, PatchError, PatchPipeline, StopAt,
+};
 
 /// §8.1: a claim path is project-relative and at most 200 characters.
 pub const MAX_PATH_CHARS: usize = 200;
@@ -24,6 +26,11 @@ pub const MAX_PATH_CHARS: usize = 200;
 pub const CLAIM_TTL: Duration = Duration::from_secs(24 * 60 * 60);
 /// A heartbeat older than this makes a claim stale; stale is reported, never auto-released.
 pub const STALE_AFTER: Duration = Duration::from_secs(90);
+/// A claim keeps the text it started from for the conflict view, up to this size (D79).
+pub const MAX_CLAIM_TEXT_BYTES: usize = 1024 * 1024;
+/// How many of one agent's patches the conflict view will walk forward (D79). A longer chain is
+/// still a chain; it is just not worth an unbounded query to render one conflict.
+const MAX_PATCH_CHAIN: usize = 64;
 
 #[derive(Debug, thiserror::Error)]
 pub enum ClaimError {
@@ -35,6 +42,21 @@ pub enum ClaimError {
 
     #[error("agent {0} is not registered in this project")]
     UnknownAgent(String),
+
+    #[error("no conflict {0} in this project")]
+    UnknownConflict(String),
+
+    #[error("conflict {0} is already resolved")]
+    ConflictClosed(String),
+
+    #[error("this conflict cannot be merged: {0}")]
+    SidesUnavailable(String),
+
+    #[error("patch error: {0}")]
+    Patch(#[from] PatchError),
+
+    #[error("merge error: {0}")]
+    Merge(#[from] crate::merge::MergeError),
 
     #[error("database error: {0}")]
     Database(#[from] sqlx::Error),
@@ -94,6 +116,68 @@ pub struct ClaimConflict {
     pub resolution: Option<String>,
 }
 
+/// Who a merged file is attributed to in the patch ledger (D79). It is not an agent: the human
+/// resolved the conflict, and the Diff view shows `you` in the hunk's gutter.
+pub const MERGE_AUTHOR: &str = "user";
+
+/// One version of a conflicted file: its text and the hash those bytes must have.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ConflictText {
+    pub hash: String,
+    pub text: String,
+}
+
+/// The three rendered versions of a conflict (D79).
+///
+/// `base` is what the claimant started from, `ours` is the claimant's version, `theirs` is what
+/// the file holds. Only `theirs` is read from disk; the other two are rebuilt from the diffs Rigel
+/// wrote and kept only when the rebuilt bytes hash to the recorded value. A side that cannot be
+/// rebuilt is `None`, and `note` says which and why.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ConflictSides {
+    pub id: String,
+    pub path: String,
+    pub base: Option<ConflictText>,
+    pub ours: Option<ConflictText>,
+    pub theirs: Option<ConflictText>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
+    /// The patch that carried a merged file, once a resolution wrote one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub merged_patch_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub merged_hash: Option<String>,
+}
+
+/// The text [`ClaimService::merge`] would write, before anything is written.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct MergedConflict {
+    pub id: String,
+    pub path: String,
+    /// `<<<<<<< ours` … `>>>>>>> theirs` where the two sides disagree.
+    pub merged: String,
+    /// How many blocks need a human.
+    pub conflicts: usize,
+    pub clean: bool,
+}
+
+/// What a merged resolution did. `patch` is `None` when the file already held the text.
+#[derive(Debug, Clone, Serialize)]
+pub struct MergeResolution {
+    pub path: String,
+    pub patch: Option<Patch>,
+    pub unchanged: bool,
+}
+
+/// The captured sides, before they are stored.
+#[derive(Default)]
+struct ConflictCapture {
+    base: Option<ConflictText>,
+    ours: Option<ConflictText>,
+    theirs: Option<ConflictText>,
+    note: Option<String>,
+}
+
 #[derive(Clone)]
 pub struct ClaimService {
     pool: SqlitePool,
@@ -106,6 +190,10 @@ impl ClaimService {
             pool,
             root: root.into(),
         }
+    }
+
+    pub fn pool(&self) -> &SqlitePool {
+        &self.pool
     }
 
     /// Claim each path. Never blocks and never steals: a live claim held by another agent is
@@ -170,10 +258,12 @@ impl ClaimService {
             }
 
             let base_hash = read_hash(&self.root, &path);
+            let base_text = read_text(&self.root, &path);
             let id = new_claim_id(&path, agent_id, now);
             sqlx::query(
-                "INSERT INTO claims (id, path, agent_id, base_hash, acquired_at, heartbeat_at)
-                 VALUES (?, ?, ?, ?, ?, ?)",
+                "INSERT INTO claims (id, path, agent_id, base_hash, acquired_at, heartbeat_at,
+                                     base_text)
+                 VALUES (?, ?, ?, ?, ?, ?, ?)",
             )
             .bind(&id)
             .bind(&path)
@@ -181,6 +271,7 @@ impl ClaimService {
             .bind(&base_hash)
             .bind(now)
             .bind(now)
+            .bind(&base_text)
             .execute(&self.pool)
             .await?;
             results.push(ClaimResult {
@@ -392,6 +483,20 @@ impl ClaimService {
         .bind(now)
         .execute(&self.pool)
         .await?;
+
+        // The conflict row is the record; the renderable sides are what makes it answerable.
+        // A capture that fails must not lose the conflict, so its error is not propagated —
+        // the row is still resolvable, it just cannot be merged.
+        let captured = self
+            .capture_sides(
+                path,
+                claimant,
+                base_hash.as_deref(),
+                observed_hash.as_deref(),
+            )
+            .await;
+        let _ = self.store_sides(&id, &captured).await;
+
         Ok(ClaimConflict {
             id,
             path: path.to_string(),
@@ -403,6 +508,241 @@ impl ClaimService {
             resolved_at: None,
             resolution: None,
         })
+    }
+
+    /// Read the three versions a conflict is about, once, when it is recorded (D79).
+    ///
+    /// `theirs` is the file as it stands. `base` is the text captured when the claim was taken —
+    /// the version the claimant started from — and `ours` is the claimant's applied patches walked
+    /// forward from it. Every step is checked against the hash the ledger recorded, so a rendered
+    /// pane is never a reconstruction that disagrees with the record.
+    ///
+    /// When no claim text exists (a claim from before 0010, or a binary file) the sides are rebuilt
+    /// backwards from the writer's patch instead. Either way a side that cannot be rebuilt is
+    /// `None`, and `note` says why.
+    async fn capture_sides(
+        &self,
+        path: &str,
+        claimant: Option<&str>,
+        claim_base: Option<&str>,
+        observed: Option<&str>,
+    ) -> ConflictCapture {
+        let mut captured = ConflictCapture::default();
+        let mut notes: Vec<String> = Vec::new();
+
+        let pipeline = PatchPipeline::new(&self.root, self.pool.clone());
+        let (theirs_text, theirs_hash) = match pipeline.read(path) {
+            Ok(pair) => pair,
+            Err(_) => {
+                captured.note = Some(
+                    "the file could not be read after the conflict (binary or gone)".to_string(),
+                );
+                return captured;
+            }
+        };
+        match observed {
+            Some(observed) if observed != theirs_hash => {
+                notes.push("the file changed again after the conflict was recorded".to_string());
+            }
+            Some(_) => {}
+            None => notes.push(
+                "no observed version was recorded (a claim collision, or a deleted file); the pane shows the file as it stands"
+                    .to_string(),
+            ),
+        }
+        captured.theirs = Some(ConflictText {
+            hash: theirs_hash.clone(),
+            text: theirs_text.clone(),
+        });
+
+        match self.claimed_text(path, claimant).await {
+            Some(base) => {
+                captured.base = Some(base.clone());
+                match self.claimant_version(path, claimant, &base).await {
+                    Some(ours) => captured.ours = Some(ours),
+                    None => notes.push(
+                        "ours could not be rebuilt: the claimant's patches no longer hash to the recorded text"
+                            .to_string(),
+                    ),
+                }
+            }
+            None => {
+                let (base, ours) = self
+                    .rebuilt_backwards(
+                        path,
+                        &theirs_text,
+                        &theirs_hash,
+                        claimant,
+                        claim_base,
+                        &mut notes,
+                    )
+                    .await;
+                captured.base = base;
+                captured.ours = ours;
+            }
+        }
+
+        captured.note = if notes.is_empty() {
+            None
+        } else {
+            Some(format!("{}.", notes.join("; ")))
+        };
+        captured
+    }
+
+    /// The text a claim started from, if it was captured and still hashes to the claim's hash.
+    async fn claimed_text(&self, path: &str, claimant: Option<&str>) -> Option<ConflictText> {
+        let agent = claimant?;
+        let row: Option<(Option<String>, Option<String>)> = sqlx::query_as(
+            "SELECT base_hash, base_text FROM claims
+             WHERE path = ? AND agent_id = ?
+             ORDER BY acquired_at DESC LIMIT 1",
+        )
+        .bind(path)
+        .bind(agent)
+        .fetch_optional(&self.pool)
+        .await
+        .ok()
+        .flatten();
+        let (hash, text) = row?;
+        let (hash, text) = (hash?, text?);
+        (sha256_hex(text.as_bytes()) == hash).then_some(ConflictText { hash, text })
+    }
+
+    /// The claimant's version: its applied patches, walked forward from `base` and verified at
+    /// every step. With no patches, the claimant's version is the base itself.
+    async fn claimant_version(
+        &self,
+        path: &str,
+        claimant: Option<&str>,
+        base: &ConflictText,
+    ) -> Option<ConflictText> {
+        let mut current = base.clone();
+        for _ in 0..MAX_PATCH_CHAIN {
+            let row: Option<(String, String)> = sqlx::query_as(
+                "SELECT diff, result_hash FROM patches
+                 WHERE path = ? AND status = 'applied' AND base_hash = ?
+                   AND (agent_id = ? OR ? IS NULL)
+                 ORDER BY applied_at ASC, created_at ASC LIMIT 1",
+            )
+            .bind(path)
+            .bind(&current.hash)
+            .bind(claimant)
+            .bind(claimant)
+            .fetch_optional(&self.pool)
+            .await
+            .ok()
+            .flatten();
+            let Some((diff, expected)) = row else {
+                return Some(current);
+            };
+            let next = apply_patch_text(&diff, &current.text).ok()?;
+            let hash = sha256_hex(next.as_bytes());
+            if hash != expected {
+                return None;
+            }
+            current = ConflictText { hash, text: next };
+        }
+        None
+    }
+
+    /// The pre-0010 fallback: rebuild `ours` and `base` from the writer's patch backwards.
+    async fn rebuilt_backwards(
+        &self,
+        path: &str,
+        theirs_text: &str,
+        theirs_hash: &str,
+        claimant: Option<&str>,
+        claim_base: Option<&str>,
+        notes: &mut Vec<String>,
+    ) -> (Option<ConflictText>, Option<ConflictText>) {
+        let writer: Option<(String, String)> = sqlx::query_as(
+            "SELECT diff, base_hash FROM patches
+             WHERE path = ? AND status = 'applied' AND result_hash = ?
+             ORDER BY applied_at DESC, created_at DESC LIMIT 1",
+        )
+        .bind(path)
+        .bind(theirs_hash)
+        .fetch_optional(&self.pool)
+        .await
+        .ok()
+        .flatten();
+        let Some((diff, expected)) = writer else {
+            notes.push(
+                "ours could not be rebuilt: the write that produced this file is not in the patch journal"
+                    .to_string(),
+            );
+            return (None, None);
+        };
+        let ours_text = match reverse_patch(&diff, theirs_text) {
+            Ok(text) => text,
+            Err(_) => {
+                notes
+                    .push("ours could not be rebuilt: the stored diff did not reverse".to_string());
+                return (None, None);
+            }
+        };
+        let ours_hash = sha256_hex(ours_text.as_bytes());
+        if ours_hash != expected {
+            notes.push("ours did not match the hash the ledger recorded".to_string());
+            return (None, None);
+        }
+        let ours = ConflictText {
+            hash: ours_hash.clone(),
+            text: ours_text,
+        };
+
+        let previous: Option<(String, String)> = sqlx::query_as(
+            "SELECT diff, base_hash FROM patches
+             WHERE path = ? AND status = 'applied' AND result_hash = ?
+               AND (agent_id = ? OR ? IS NULL)
+             ORDER BY applied_at DESC, created_at DESC LIMIT 1",
+        )
+        .bind(path)
+        .bind(&ours_hash)
+        .bind(claimant)
+        .bind(claimant)
+        .fetch_optional(&self.pool)
+        .await
+        .ok()
+        .flatten();
+
+        let base = match previous {
+            Some((diff, expected)) => reverse_patch(&diff, &ours.text).ok().and_then(|text| {
+                let hash = sha256_hex(text.as_bytes());
+                (hash == expected).then_some(ConflictText { hash, text })
+            }),
+            None if claim_base == Some(ours_hash.as_str()) => Some(ours.clone()),
+            None => None,
+        };
+        if base.is_none() {
+            notes.push(
+                "base could not be rebuilt: the version ours replaced is not in the journal"
+                    .to_string(),
+            );
+        }
+        (base, Some(ours))
+    }
+
+    async fn store_sides(&self, id: &str, captured: &ConflictCapture) -> Result<(), ClaimError> {
+        sqlx::query(
+            "INSERT INTO conflict_sides
+               (conflict_id, base_text, base_hash, ours_text, ours_hash, theirs_text, theirs_hash,
+                note, captured_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        )
+        .bind(id)
+        .bind(captured.base.as_ref().map(|side| &side.text))
+        .bind(captured.base.as_ref().map(|side| &side.hash))
+        .bind(captured.ours.as_ref().map(|side| &side.text))
+        .bind(captured.ours.as_ref().map(|side| &side.hash))
+        .bind(captured.theirs.as_ref().map(|side| &side.text))
+        .bind(captured.theirs.as_ref().map(|side| &side.hash))
+        .bind(&captured.note)
+        .bind(now_ms())
+        .execute(&self.pool)
+        .await?;
+        Ok(())
     }
 
     /// Open conflict rows, newest first.
@@ -438,6 +778,226 @@ impl ClaimService {
         )
         .bind(now_ms())
         .bind(resolution)
+        .bind(id)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    /// The three rendered versions of a conflict, for the merge view.
+    pub async fn sides(&self, id: &str) -> Result<ConflictSides, ClaimError> {
+        let conflict = self.conflict(id).await?;
+        type SideRow = (
+            Option<String>,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+        );
+        let row: Option<SideRow> = sqlx::query_as(
+            "SELECT base_text, base_hash, ours_text, ours_hash, theirs_text, theirs_hash,
+                    note, merged_patch_id, merged_hash
+             FROM conflict_sides WHERE conflict_id = ?",
+        )
+        .bind(id)
+        .fetch_optional(&self.pool)
+        .await?;
+
+        let Some((
+            base_text,
+            base_hash,
+            ours_text,
+            ours_hash,
+            theirs_text,
+            theirs_hash,
+            note,
+            patch_id,
+            merged_hash,
+        )) = row
+        else {
+            return Ok(ConflictSides {
+                id: conflict.id,
+                path: conflict.path,
+                base: None,
+                ours: None,
+                theirs: None,
+                note: Some(
+                    "recorded before Rigel kept the three versions; it can be resolved but not merged"
+                        .to_string(),
+                ),
+                merged_patch_id: None,
+                merged_hash: None,
+            });
+        };
+
+        let side = |text: Option<String>, hash: Option<String>| match (text, hash) {
+            (Some(text), Some(hash)) => Some(ConflictText { hash, text }),
+            _ => None,
+        };
+        Ok(ConflictSides {
+            id: conflict.id,
+            path: conflict.path,
+            base: side(base_text, base_hash),
+            ours: side(ours_text, ours_hash),
+            theirs: side(theirs_text, theirs_hash),
+            note,
+            merged_patch_id: patch_id,
+            merged_hash,
+        })
+    }
+
+    /// One conflict row by id, resolved or not.
+    pub async fn conflict(&self, id: &str) -> Result<ClaimConflict, ClaimError> {
+        let row = sqlx::query(
+            "SELECT id, path, claimant_id, writer_id, base_hash, observed_hash, detected_at,
+                    resolved_at, resolution
+             FROM claim_conflicts WHERE id = ?",
+        )
+        .bind(id)
+        .fetch_optional(&self.pool)
+        .await?;
+        let Some(row) = row else {
+            return Err(ClaimError::UnknownConflict(id.to_string()));
+        };
+        Ok(ClaimConflict {
+            id: row.get("id"),
+            path: row.get("path"),
+            claimant: row.get("claimant_id"),
+            writer: row.get("writer_id"),
+            base_hash: row.get("base_hash"),
+            observed_hash: row.get("observed_hash"),
+            detected_at: row.get("detected_at"),
+            resolved_at: row.get("resolved_at"),
+            resolution: row.get("resolution"),
+        })
+    }
+
+    /// The merge text for a conflict, computed and not written (D79). Refuses rather than guesses
+    /// when a side could not be rebuilt.
+    pub async fn merge(&self, id: &str) -> Result<MergedConflict, ClaimError> {
+        let sides = self.sides(id).await?;
+        let (base, ours, theirs) = match (&sides.base, &sides.ours, &sides.theirs) {
+            (Some(base), Some(ours), Some(theirs)) => (base, ours, theirs),
+            _ => {
+                return Err(ClaimError::SidesUnavailable(sides.note.unwrap_or_else(
+                    || "a side is missing and Rigel will not invent it".to_string(),
+                )));
+            }
+        };
+        let result = crate::merge::three_way(&base.text, &ours.text, &theirs.text)?;
+        Ok(MergedConflict {
+            id: sides.id,
+            path: sides.path,
+            merged: result.merged,
+            conflicts: result.conflicts,
+            clean: result.clean,
+        })
+    }
+
+    /// Resolve a conflict by writing the merged text through the CAS patch pipeline (D79).
+    ///
+    /// The compare-and-swap base is the file *as it is now*, so a write that lands between the
+    /// merge preview and this call fails with `StaleBase` instead of overwriting it. Nothing is
+    /// marked resolved until the file has been written.
+    pub async fn resolve_with_merge(
+        &self,
+        pipeline: &PatchPipeline,
+        session_id: &str,
+        id: &str,
+        merged: &str,
+    ) -> Result<MergeResolution, ClaimError> {
+        let conflict = self.conflict(id).await?;
+        if conflict.resolved_at.is_some() {
+            return Err(ClaimError::ConflictClosed(id.to_string()));
+        }
+        let sides = self.sides(id).await?;
+
+        let (current_text, current_hash) = match pipeline.read(&conflict.path) {
+            Ok(pair) => pair,
+            Err(PatchError::NotFound(_)) => {
+                return Err(ClaimError::SidesUnavailable(format!(
+                    "{} no longer exists; nothing to write the merge into",
+                    conflict.path
+                )));
+            }
+            Err(error) => return Err(ClaimError::Patch(error)),
+        };
+
+        // The merge the human read was built from the captured sides. If the file has moved on
+        // since then, writing would overwrite a version nobody saw: refuse instead.
+        if let Some(theirs) = &sides.theirs {
+            if current_hash != theirs.hash {
+                return Err(ClaimError::Patch(PatchError::StaleBase {
+                    expected: theirs.hash.clone(),
+                    current: current_hash,
+                }));
+            }
+        }
+
+        if merged == current_text {
+            self.finish_merge(
+                id,
+                None,
+                &current_hash,
+                "merged: the file already held the merged text",
+            )
+            .await?;
+            return Ok(MergeResolution {
+                path: conflict.path,
+                patch: None,
+                unchanged: true,
+            });
+        }
+
+        let patch = pipeline
+            .propose_with(
+                session_id,
+                MERGE_AUTHOR,
+                &conflict.path,
+                &current_hash,
+                merged,
+                StopAt::Never,
+            )
+            .await?;
+        self.finish_merge(
+            id,
+            Some(&patch.id),
+            &patch.result_hash,
+            "merged the three versions",
+        )
+        .await?;
+        Ok(MergeResolution {
+            path: conflict.path,
+            patch: Some(patch),
+            unchanged: false,
+        })
+    }
+
+    async fn finish_merge(
+        &self,
+        id: &str,
+        patch_id: Option<&str>,
+        merged_hash: &str,
+        resolution: &str,
+    ) -> Result<(), ClaimError> {
+        sqlx::query(
+            "UPDATE claim_conflicts SET resolved_at = ?, resolution = ?
+             WHERE id = ? AND resolved_at IS NULL",
+        )
+        .bind(now_ms())
+        .bind(resolution)
+        .bind(id)
+        .execute(&self.pool)
+        .await?;
+        sqlx::query(
+            "UPDATE conflict_sides SET merged_patch_id = ?, merged_hash = ? WHERE conflict_id = ?",
+        )
+        .bind(patch_id)
+        .bind(merged_hash)
         .bind(id)
         .execute(&self.pool)
         .await?;
@@ -598,6 +1158,18 @@ fn short_hash(value: &str) -> String {
 fn read_hash(root: &Path, path: &str) -> Option<String> {
     let bytes = std::fs::read(root.join(path)).ok()?;
     Some(sha256_hex(&bytes))
+}
+
+/// The claimed file's text, when it is text and small enough to keep on the claim row.
+///
+/// This is the only moment the version the claimant started from is on disk (D79). A binary or
+/// oversized file stores nothing: the claim still works, the conflict just shows fewer sides.
+fn read_text(root: &Path, path: &str) -> Option<String> {
+    let bytes = std::fs::read(root.join(path)).ok()?;
+    if bytes.len() > MAX_CLAIM_TEXT_BYTES {
+        return None;
+    }
+    String::from_utf8(bytes).ok()
 }
 
 #[cfg(test)]

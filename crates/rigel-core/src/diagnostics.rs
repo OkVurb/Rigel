@@ -12,7 +12,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde_json::Value;
 
-use crate::credentials::{self, PROVIDERS, Secret};
+use crate::credentials::{self, Secret, PROVIDERS};
 use crate::session::TurnTranscript;
 
 const CRASH_LOG: &str = "crash.log";

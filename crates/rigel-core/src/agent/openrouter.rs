@@ -11,11 +11,11 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use futures::StreamExt;
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 use tokio_util::sync::CancellationToken;
 
 use super::model::{
-    ChatRequest, Delta, DeltaSink, Model, ModelError, RawUsage, SseDecoder, jitter_delay,
+    jitter_delay, ChatRequest, Delta, DeltaSink, Model, ModelError, RawUsage, SseDecoder,
 };
 
 pub const DEFAULT_BASE_URL: &str = "https://openrouter.ai/api/v1";

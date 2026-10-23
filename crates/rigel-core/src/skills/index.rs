@@ -16,16 +16,16 @@ use sqlx::Row;
 
 use super::blob::BlobStore;
 use super::cluster;
-use super::evidence::{Evidence, EvidenceSummary, claims_from_description};
+use super::evidence::{claims_from_description, Evidence, EvidenceSummary};
 use super::github::GitHubSource;
 use super::hub::{SkillHubSource, SkillsMpSource};
 use super::scan::Capability;
-use super::search::{SearchHit, SearchOrder, fts_query};
+use super::search::{fts_query, SearchHit, SearchOrder};
 use super::source::{
-    RepoSnapshot, SkillRecord, Source, SourceState, SourceStatus, SyncPolicy, load_status,
+    load_status, RepoSnapshot, SkillRecord, Source, SourceState, SourceStatus, SyncPolicy,
 };
 use crate::migrate::now_ms;
-use crate::skills::{DEFAULT_TTL, SkillsError};
+use crate::skills::{SkillsError, DEFAULT_TTL};
 use crate::storage::Store;
 
 const GITHUB_BASE: &str = "https://api.github.com";
@@ -156,7 +156,30 @@ impl SkillIndex {
         target: &str,
         policy: SyncPolicy,
     ) -> Result<IngestReport, SkillsError> {
-        let source = self.github().await?;
+        self.walk_repo(target, policy, None).await
+    }
+
+    /// Index one skill by its directory name. The skills.sh import uses this so a page costs
+    /// one body, not a whole repository's worth of requests.
+    pub async fn index_skill(
+        &self,
+        target: &str,
+        policy: SyncPolicy,
+        slug: &str,
+    ) -> Result<IngestReport, SkillsError> {
+        self.walk_repo(target, policy, Some(slug)).await
+    }
+
+    async fn walk_repo(
+        &self,
+        target: &str,
+        policy: SyncPolicy,
+        slug: Option<&str>,
+    ) -> Result<IngestReport, SkillsError> {
+        let mut source = self.github().await?;
+        if let Some(slug) = slug {
+            source = source.with_slug(slug);
+        }
         match source.fetch_repo(target, policy).await {
             Ok(snapshot) => self.ingest(&snapshot).await,
             Err(error) => {

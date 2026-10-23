@@ -16,7 +16,7 @@ use serde::Serialize;
 use sqlx::SqlitePool;
 
 use crate::agent::pricing::{cost_micros, tokens_for};
-use crate::domain::{CostSource, Usage, cents_to_micros, micros_to_cents};
+use crate::domain::{cents_to_micros, micros_to_cents, CostSource, Usage};
 use crate::migrate::now_ms;
 
 /// The soft warning fires here, and the transcript shows an inline *Raise cap / Stop* prompt.
@@ -25,6 +25,15 @@ pub const WARN_PERCENT: i64 = 80;
 /// What a turn costs before it runs: one cent. Enough to refuse a turn on an exhausted
 /// session, small enough not to block a $0.25 cap.
 pub const RESERVE_MICROS: i64 = 10_000;
+
+/// D116: $20 a day, across every session in this project, on by default. It sits above the
+/// session cap (D10) and the task cap (D92), which is why crossing it interrupts every
+/// running agent rather than the one that happened to report last.
+pub const DEFAULT_DAILY_CAP_MICROS: i64 = 20_000_000;
+
+/// D113: three writable agents at once, configurable upward. Read-only children are not
+/// counted and are not limited by this.
+pub const DEFAULT_WRITABLE_AGENTS: i64 = 3;
 
 /// Called when the cap is crossed. The native coordinator's implementation cancels the
 /// turn's token; a future adapter implementation sends the harness its own interrupt.
@@ -49,6 +58,24 @@ pub enum BudgetError {
         cap_micros: i64,
     },
 
+    #[error(
+        "task cap exhausted: {spend_micros}µ$ spent of {cap_micros}µ$ — raise the task cap to continue"
+    )]
+    TaskExhausted {
+        agent_id: String,
+        spend_micros: i64,
+        cap_micros: i64,
+    },
+
+    #[error(
+        "daily budget exhausted: {spend_micros}µ$ spent of {cap_micros}µ$ on {day} - raise the daily cap to continue"
+    )]
+    DailyExhausted {
+        day: String,
+        spend_micros: i64,
+        cap_micros: i64,
+    },
+
     #[error("agent {0} does not exist")]
     AgentNotFound(String),
 
@@ -67,6 +94,41 @@ pub enum BudgetOutcome {
     Warning,
     /// Above the cap. Interrupts have been sent, once.
     Exceeded,
+    /// D116: the day's cap, not the session's, was crossed. Every running agent is interrupted.
+    DailyExceeded,
+}
+
+/// The day's ledger and the settings that bound it (D113, D116).
+#[derive(Debug, Clone, Serialize)]
+pub struct DailyStatus {
+    pub day: String,
+    pub spend_micros: i64,
+    pub cap_micros: Option<i64>,
+}
+
+/// The two safety knobs that live beside the money: how many agents may write at once, and
+/// what the day may cost.
+#[derive(Debug, Clone, Serialize)]
+pub struct SafetySettings {
+    pub writable_agents: i64,
+    pub daily_cap_micros: Option<i64>,
+}
+
+/// A UTC calendar day, so the cap resets at a fixed instant regardless of the machine's
+/// time zone. Civil-date arithmetic (Hinnant) keeps a dependency out of a one-line need.
+pub fn utc_day(now: i64) -> String {
+    let days = now.div_euclid(86_400_000);
+    let z = days + 719_468;
+    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
+    let doe = (z - era * 146_097) as u64;
+    let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365;
+    let y = yoe as i64 + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = (doy - (153 * mp + 2) / 5 + 1) as u32;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 } as u32;
+    let y = y + if m <= 2 { 1 } else { 0 };
+    format!("{y:04}-{m:02}-{d:02}")
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -77,6 +139,8 @@ pub struct BudgetSnapshot {
     pub agent_micros: i64,
     pub cap_micros: Option<i64>,
     pub remaining_micros: Option<i64>,
+    /// D92: a cap on this one agent's task, below the session cap.
+    pub task_cap_micros: Option<i64>,
     pub session_cents: i64,
     pub agent_cents: i64,
     pub cap_cents: Option<i64>,
@@ -167,6 +231,8 @@ struct BudgetState {
     warned: HashSet<String>,
     /// Sessions whose cap has already been enforced. Interrupts are sent once per session.
     killed: HashSet<String>,
+    /// The last day whose daily 80% warning fired (D116).
+    daily_warned: Option<String>,
 }
 
 /// Owns every write to `spend_*`, `turns.usage_json` and the warning/kill bookkeeping.
@@ -200,6 +266,98 @@ impl BudgetService {
 
     pub fn pool(&self) -> &SqlitePool {
         &self.pool
+    }
+
+    /// D113/D116: the two safety knobs, from the one row that holds their defaults.
+    pub async fn safety_settings(&self) -> Result<SafetySettings, BudgetError> {
+        let row: Option<(i64, Option<i64>)> = sqlx::query_as(
+            "SELECT writable_agents, daily_cap_micros FROM safety_settings WHERE id = 1",
+        )
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(match row {
+            Some((writable_agents, daily_cap_micros)) => SafetySettings {
+                writable_agents,
+                daily_cap_micros,
+            },
+            None => SafetySettings {
+                writable_agents: DEFAULT_WRITABLE_AGENTS,
+                daily_cap_micros: Some(DEFAULT_DAILY_CAP_MICROS),
+            },
+        })
+    }
+
+    pub async fn set_writable_agents(&self, count: i64) -> Result<(), BudgetError> {
+        let count = count.clamp(1, 16);
+        sqlx::query("UPDATE safety_settings SET writable_agents = ? WHERE id = 1")
+            .bind(count)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    /// The cap for the day. `None` turns it off; the value is in micro-dollars.
+    pub async fn set_daily_cap(
+        &self,
+        session_id: &str,
+        cap_micros: Option<i64>,
+    ) -> Result<(), BudgetError> {
+        sqlx::query("UPDATE safety_settings SET daily_cap_micros = ? WHERE id = 1")
+            .bind(cap_micros)
+            .execute(&self.pool)
+            .await?;
+        {
+            let mut state = self.state.lock().expect("budget state poisoned");
+            state.daily_warned = None;
+        }
+        sqlx::query(
+            "INSERT INTO interventions (id, session_id, kind, detail_json, at)
+             VALUES (?, ?, 'daily_cap_changed', ?, ?)",
+        )
+        .bind(uuid::Uuid::new_v4().to_string())
+        .bind(session_id)
+        .bind(serde_json::json!({ "cap_micros": cap_micros }).to_string())
+        .bind(now_ms())
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    pub async fn daily_spent(&self, day: &str) -> Result<i64, BudgetError> {
+        let row: Option<(i64,)> = sqlx::query_as("SELECT micros FROM daily_spend WHERE day = ?")
+            .bind(day)
+            .fetch_optional(&self.pool)
+            .await?;
+        Ok(row.map(|(micros,)| micros).unwrap_or(0))
+    }
+
+    pub async fn daily_status(&self) -> Result<DailyStatus, BudgetError> {
+        let day = utc_day(now_ms());
+        let spend_micros = self.daily_spent(&day).await?;
+        let cap_micros = self.safety_settings().await?.daily_cap_micros;
+        Ok(DailyStatus {
+            day,
+            spend_micros,
+            cap_micros,
+        })
+    }
+
+    /// The 80% point of the daily cap, once per day. The caller emits the event; the flag is
+    /// claimed here so two concurrent agents cannot both announce it.
+    pub async fn daily_warning_due(&self) -> Result<Option<DailyStatus>, BudgetError> {
+        let status = self.daily_status().await?;
+        let Some(cap) = status.cap_micros else {
+            return Ok(None);
+        };
+        if cap <= 0 || status.spend_micros * 100 < cap * WARN_PERCENT {
+            return Ok(None);
+        }
+        let mut state = self.state.lock().expect("budget state poisoned");
+        if state.daily_warned.as_deref() == Some(status.day.as_str()) {
+            return Ok(None);
+        }
+        state.daily_warned = Some(status.day.clone());
+        Ok(Some(status))
     }
 
     async fn session_of(&self, agent_id: &str) -> Result<(String, i64, Option<i64>), BudgetError> {
@@ -270,6 +428,72 @@ impl BudgetService {
                 spend_micros: spend,
                 cap_micros: cap,
             });
+        }
+        if let Some(task_cap) = self.task_cap(agent_id).await? {
+            let (agent_spend,): (i64,) =
+                sqlx::query_as("SELECT spend_micros FROM agents WHERE id = ?")
+                    .bind(agent_id)
+                    .fetch_one(&self.pool)
+                    .await?;
+            if agent_spend + estimate > task_cap {
+                return Err(BudgetError::TaskExhausted {
+                    agent_id: agent_id.to_string(),
+                    spend_micros: agent_spend,
+                    cap_micros: task_cap,
+                });
+            }
+        }
+        // D116: the day is the outermost cap, so it is checked last and refuses the turn
+        // outright rather than letting one more step through.
+        if let Some(cap) = self.safety_settings().await?.daily_cap_micros {
+            let day = utc_day(now_ms());
+            let spent = self.daily_spent(&day).await?;
+            if spent + estimate > cap {
+                return Err(BudgetError::DailyExhausted {
+                    day,
+                    spend_micros: spent,
+                    cap_micros: cap,
+                });
+            }
+        }
+        Ok(())
+    }
+
+    /// The task cap for an agent, if one was set (D92).
+    pub async fn task_cap(&self, agent_id: &str) -> Result<Option<i64>, BudgetError> {
+        let row: Option<(i64,)> =
+            sqlx::query_as("SELECT cap_micros FROM task_caps WHERE agent_id = ?")
+                .bind(agent_id)
+                .fetch_optional(&self.pool)
+                .await?;
+        Ok(row.map(|(cap,)| cap))
+    }
+
+    /// Set or clear a task cap. `None` clears it; the session cap still applies.
+    pub async fn set_task_cap(
+        &self,
+        session_id: &str,
+        agent_id: &str,
+        cap_micros: Option<i64>,
+    ) -> Result<(), BudgetError> {
+        if let Some(cap) = cap_micros {
+            sqlx::query(
+                "INSERT INTO task_caps (session_id, agent_id, cap_micros, set_at)
+                 VALUES (?, ?, ?, ?)
+                 ON CONFLICT(session_id, agent_id)
+                 DO UPDATE SET cap_micros = excluded.cap_micros, set_at = excluded.set_at",
+            )
+            .bind(session_id)
+            .bind(agent_id)
+            .bind(cap)
+            .bind(now_ms())
+            .execute(&self.pool)
+            .await?;
+        } else {
+            sqlx::query("DELETE FROM task_caps WHERE agent_id = ?")
+                .bind(agent_id)
+                .execute(&self.pool)
+                .await?;
         }
         Ok(())
     }
@@ -348,7 +572,39 @@ impl BudgetService {
             .execute(&mut *tx)
             .await?;
 
+        // D116: the day's total moves in the same transaction as the session's, so the two
+        // can never disagree after a crash.
+        let day = utc_day(now_ms());
+        sqlx::query(
+            "INSERT INTO daily_spend (day, micros) VALUES (?, ?)
+             ON CONFLICT(day) DO UPDATE SET micros = micros + excluded.micros",
+        )
+        .bind(&day)
+        .bind(usage.cost_micros)
+        .execute(&mut *tx)
+        .await?;
+
         tx.commit().await?;
+
+        // The daily cap is checked before the session one: it is the wider promise, and the
+        // transcript should say which wall was hit.
+        if let Some(cap) = self.safety_settings().await?.daily_cap_micros {
+            if usage.cost_micros > 0 {
+                let spent = self.daily_spent(&day).await?;
+                if spent > cap {
+                    let running: Vec<(String,)> = sqlx::query_as(
+                        "SELECT id FROM agents WHERE session_id = ? AND status = 'running'",
+                    )
+                    .bind(&session_id)
+                    .fetch_all(&self.pool)
+                    .await?;
+                    for (id,) in running {
+                        self.interrupt.interrupt(&id, "daily_budget_exceeded");
+                    }
+                    return Ok(BudgetOutcome::DailyExceeded);
+                }
+            }
+        }
 
         let Some(cap_cents) = cap_cents else {
             return Ok(BudgetOutcome::Ok);
@@ -442,6 +698,7 @@ impl BudgetService {
                 .fetch_one(&self.pool)
                 .await?;
         let cap_micros = cap_cents.map(cents_to_micros);
+        let task_cap_micros = self.task_cap(agent_id).await?;
         Ok(BudgetSnapshot {
             session_id,
             agent_id: agent_id.to_string(),
@@ -449,6 +706,7 @@ impl BudgetService {
             agent_micros,
             cap_micros,
             remaining_micros: cap_micros.map(|cap| cap - session_micros),
+            task_cap_micros,
             session_cents: micros_to_cents(session_micros),
             agent_cents: micros_to_cents(agent_micros),
             cap_cents,

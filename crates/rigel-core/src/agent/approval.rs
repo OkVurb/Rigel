@@ -108,6 +108,67 @@ impl CommandApprover for DenyCommands {
     }
 }
 
+/// One writable child as the user sees it before it starts (D114).
+///
+/// The plan is the child's own numbered statement of what it will change; it is required
+/// because a task line alone does not tell a reader which edits are coming.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PlanAgent {
+    pub role: String,
+    pub files: Vec<String>,
+    pub task: String,
+    pub plan: String,
+}
+
+/// A fan-out of writable children, waiting for one answer.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PlanRequest {
+    pub session_id: String,
+    pub agents: Vec<PlanAgent>,
+}
+
+/// Approve, skip the gate for this fan-out with a reason the ledger keeps, or deny. Denying
+/// starts nothing at all: the plan gate is before registration, not after.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PlanDecision {
+    Approve,
+    Skip { reason: String },
+    Deny,
+}
+
+impl PlanDecision {
+    pub fn is_allowed(&self) -> bool {
+        !matches!(self, Self::Deny)
+    }
+
+    /// What `agents.plan_note` records, so a skipped gate reads as a waiver rather than an
+    /// approval.
+    pub fn note(&self) -> Option<String> {
+        match self {
+            Self::Approve => None,
+            Self::Skip { reason } => Some(format!("skipped by the user: {reason}")),
+            Self::Deny => None,
+        }
+    }
+}
+
+/// Who answers a [`PlanRequest`]. Implementations must fail closed: an error, a timeout or
+/// an unreadable answer denies.
+#[async_trait]
+pub trait PlanApprover: Send + Sync {
+    async fn approve_plan(&self, request: &PlanRequest) -> PlanDecision;
+}
+
+/// Refuses every writable fan-out. The default where no human surface is installed.
+pub struct DenyPlans;
+
+#[async_trait]
+impl PlanApprover for DenyPlans {
+    async fn approve_plan(&self, _request: &PlanRequest) -> PlanDecision {
+        PlanDecision::Deny
+    }
+}
+
 /// What has already been approved, keyed by the exact text the user saw.
 ///
 /// Cloneable and cheap: a turn's tool set and the window share one of these, which is what
@@ -220,9 +281,16 @@ pub struct PendingApproval {
 }
 
 /// What a surface wrote back. `None` is a rejection, which is also what a timeout means.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+///
+/// `skip` is only meaningful for a plan question: it accepts the fan-out without endorsing
+/// the plan, which D114 allows when the surface records why in `note`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AnsweredApproval {
     pub scope: Option<ApprovalScope>,
+    #[serde(default)]
+    pub skip: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
 }
 
 /// The on-disk approval channel. Cheap to clone; every surface points at the same directory.
@@ -253,16 +321,46 @@ impl ApprovalBus {
         pending: PendingApproval,
         wait: std::time::Duration,
     ) -> Result<ApprovalScope, String> {
+        match self.ask_answered(pending, wait).await {
+            Ok(answered) => match answered.scope {
+                Some(scope) => Ok(scope),
+                None => Err("the request was rejected".to_string()),
+            },
+            Err(error) => Err(error),
+        }
+    }
+
+    /// Ask a plan question. A skip is only a skip when a surface said so; a timeout, a
+    /// rejection and an unreadable answer all deny.
+    pub async fn ask_plan(
+        &self,
+        pending: PendingApproval,
+        wait: std::time::Duration,
+    ) -> PlanDecision {
+        match self.ask_answered(pending, wait).await {
+            Ok(answered) if answered.skip => PlanDecision::Skip {
+                reason: answered
+                    .note
+                    .filter(|note| !note.trim().is_empty())
+                    .unwrap_or_else(|| "no reason given".to_string()),
+            },
+            Ok(answered) if answered.scope.is_some() => PlanDecision::Approve,
+            _ => PlanDecision::Deny,
+        }
+    }
+
+    async fn ask_answered(
+        &self,
+        pending: PendingApproval,
+        wait: std::time::Duration,
+    ) -> Result<AnsweredApproval, String> {
         self.publish(&pending)?;
         let deadline = std::time::Instant::now() + wait;
         loop {
             if let Some(answered) = self.take_answer(&pending.id) {
                 let _ =
                     std::fs::remove_file(self.pending_dir().join(format!("{}.json", pending.id)));
-                return match answered.scope {
-                    Some(scope) => Ok(scope),
-                    None => Err("the request was rejected".to_string()),
-                };
+                return Ok(answered);
             }
             if std::time::Instant::now() >= deadline {
                 let _ =
@@ -302,10 +400,28 @@ impl ApprovalBus {
     /// Answer one question. An id that is no longer pending is not an error: a late click after
     /// a timeout must not fail the window that made it.
     pub fn answer(&self, id: &str, scope: Option<ApprovalScope>) -> Result<(), String> {
+        self.answer_with(id, scope, false, None)
+    }
+
+    /// Answer a plan question: a scope approves, `skip` waives the gate, and a note is kept
+    /// with the waiver so the intervention ledger says why.
+    pub fn answer_with(
+        &self,
+        id: &str,
+        scope: Option<ApprovalScope>,
+        skip: bool,
+        note: Option<String>,
+    ) -> Result<(), String> {
         let dir = self.answered_dir();
         std::fs::create_dir_all(&dir)
             .map_err(|error| format!("could not create {}: {error}", dir.display()))?;
-        let answered = AnsweredApproval { scope };
+        let answered = AnsweredApproval {
+            // A skip is an answer in its own right; letting a stale scope ride along would
+            // make the two surfaces disagree about what was approved.
+            scope: if skip { None } else { scope },
+            skip,
+            note: note.filter(|note| !note.trim().is_empty()),
+        };
         let text = serde_json::to_string(&answered).map_err(|error| error.to_string())?;
         std::fs::write(dir.join(format!("{id}.json")), text)
             .map_err(|error| format!("could not write the answer: {error}"))?;

@@ -21,6 +21,17 @@ pub const MAX_ROLE_CHARS: usize = 40;
 /// directory. Validation happens before any child is registered or any chat message is sent,
 /// so a bad split costs nothing.
 pub fn scope(root: &Path, files: &[String]) -> Result<Vec<String>, String> {
+    scope_with(root, files, false)
+}
+
+/// The same, for a writable child (D80): a file it is meant to create is allowed, because
+/// `write_file` is otherwise unreachable. Its parent directory must exist and stay inside
+/// the project, so the assignment is still a place, not a free-form path.
+pub fn scope_for_write(root: &Path, files: &[String]) -> Result<Vec<String>, String> {
+    scope_with(root, files, true)
+}
+
+fn scope_with(root: &Path, files: &[String], allow_missing: bool) -> Result<Vec<String>, String> {
     if files.is_empty() {
         return Err("files must name at least one project file".to_string());
     }
@@ -46,15 +57,33 @@ pub fn scope(root: &Path, files: &[String]) -> Result<Vec<String>, String> {
         {
             return Err(format!("{raw} is not a project-relative file"));
         }
-        let canonical = root
-            .join(path)
-            .canonicalize()
-            .map_err(|_| format!("{raw} does not exist in the project"))?;
+        let joined = root.join(path);
+        let canonical = match joined.canonicalize() {
+            Ok(canonical) => {
+                if !canonical.is_file() {
+                    return Err(format!("{raw} is not a file"));
+                }
+                canonical
+            }
+            // Only the final component may be missing: the parent has to exist, which is
+            // what keeps `../` and a symlinked directory out of the answer.
+            Err(_) if allow_missing => {
+                let parent = joined
+                    .parent()
+                    .and_then(|parent| parent.canonicalize().ok())
+                    .ok_or_else(|| format!("{raw} does not exist in the project"))?;
+                if !parent.starts_with(&root) {
+                    return Err(format!("{raw} is outside the project"));
+                }
+                let name = joined
+                    .file_name()
+                    .ok_or_else(|| format!("{raw} is not a file"))?;
+                parent.join(name)
+            }
+            Err(_) => return Err(format!("{raw} does not exist in the project")),
+        };
         if !canonical.starts_with(&root) {
             return Err(format!("{raw} is outside the project"));
-        }
-        if !canonical.is_file() {
-            return Err(format!("{raw} is not a file"));
         }
         let relative = canonical
             .strip_prefix(&root)
@@ -104,7 +133,7 @@ pub fn board(rows: &[TeamAgent], me: Option<&str>) -> String {
 
 /// The child's own assignment, stated before the board so it cannot be missed.
 pub fn assignment(row: &TeamAgent) -> String {
-    format!(
+    let mut text = format!(
         "Your assignment from the coordinator:\n\
          Role: {}\n\
          Files you may read (and only these): {}\n\
@@ -123,7 +152,12 @@ pub fn assignment(row: &TeamAgent) -> String {
         } else {
             row.files.join(", ")
         }
-    )
+    );
+    if let Some(guidance) = crate::agent::roles::guidance(row.role.as_deref()) {
+        text.push('\n');
+        text.push_str(&guidance);
+    }
+    text
 }
 
 /// The message the coordinator posts to the chat room for a room agent.
@@ -184,6 +218,14 @@ mod tests {
         std::fs::write(root.join("docs/one.md"), "one").unwrap();
         assert!(scope(&root, &["docs/one.md".to_string()]).is_ok());
         assert!(scope(&root, &["docs/missing.md".to_string()]).is_err());
+        assert!(
+            scope_for_write(&root, &["docs/new.md".to_string()]).is_ok(),
+            "a writable child may be assigned a file it is meant to create"
+        );
+        assert!(
+            scope_for_write(&root, &["missing/new.md".to_string()]).is_err(),
+            "but not under a directory that does not exist"
+        );
         assert!(scope(&root, &["../escape.md".to_string()]).is_err());
         assert!(scope(&root, &["docs".to_string()]).is_err());
         std::fs::remove_dir_all(&root).ok();

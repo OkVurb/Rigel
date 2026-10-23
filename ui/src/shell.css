@@ -1438,6 +1438,16 @@ input {
   font-size: 12px;
 }
 
+/* A decision the user made in the window; the transcript's own voice, not the model's. */
+.note-line {
+  margin: 0 0 8px 76px;
+  padding: 6px 8px;
+  border-left: 2px solid var(--hairline);
+  color: var(--muted);
+  font-size: 12px;
+  font-style: italic;
+}
+
 /* composer */
 
 .composer {
@@ -1873,6 +1883,19 @@ input {
   margin: 0;
 }
 
+.spend-row {
+  grid-template-columns: 1fr auto auto;
+  align-items: center;
+  gap: 12px;
+}
+
+.settings-total {
+  margin: 0 0 10px;
+  color: var(--text);
+  font-family: var(--mono);
+  font-size: 18px;
+}
+
 .harness-row .needs-key {
   color: var(--accent);
 }
@@ -2284,6 +2307,57 @@ input {
   font-size: 11px;
 }
 
+/* D114: the writable fan-out question lists each child's plan before its first edit. */
+.plan-rows li {
+  display: block;
+  padding: 8px 0;
+  border-top: 1px solid var(--hairline);
+}
+
+.plan-files {
+  margin-left: 6px;
+  color: var(--faint);
+}
+
+.plan-body {
+  max-height: 180px;
+  margin: 6px 0 0;
+  padding: 8px 10px;
+  overflow: auto;
+  border: 1px solid var(--hairline);
+  border-radius: 4px;
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--mono);
+  font-size: 11px;
+  white-space: pre-wrap;
+}
+
+/* D113/D116: the two knobs in Settings. */
+.safety-form {
+  display: grid;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+.safety-form label {
+  display: grid;
+  gap: 4px;
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.safety-form input {
+  height: 24px;
+  padding: 0 8px;
+  border: 1px solid var(--hairline);
+  border-radius: 4px;
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--mono);
+  font-size: 11px;
+}
+
 .approval-actions {
   display: flex;
   flex-wrap: wrap;
@@ -2363,6 +2437,84 @@ input {
   display: flex;
   gap: 6px;
   margin-top: 8px;
+  flex-wrap: wrap;
+  align-items: center;
+}
+
+/* The three rendered versions (D79). Three columns while there is room, stacked when narrow;
+   each pane scrolls on its own so a long file does not push the merge editor off-screen. */
+.conflict-merge {
+  margin-top: 10px;
+  padding-top: 10px;
+  border-top: 1px dashed var(--hairline);
+}
+
+.conflict-note {
+  margin: 0 0 8px;
+  font-size: 11px;
+  color: var(--faint);
+}
+
+.conflict-sides {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 8px;
+}
+
+.conflict-side {
+  min-width: 0;
+  border: 1px solid var(--hairline);
+  border-radius: 6px;
+  background: var(--well);
+}
+
+.conflict-side header {
+  display: flex;
+  justify-content: space-between;
+  gap: 6px;
+  padding: 4px 8px;
+  border-bottom: 1px solid var(--hairline);
+  font-size: 11px;
+  color: var(--muted);
+}
+
+.conflict-text {
+  max-height: 180px;
+  overflow: auto;
+  margin: 0;
+  padding: 6px 8px;
+  font-family: var(--mono);
+  font-size: 11px;
+  white-space: pre;
+}
+
+.conflict-side .empty {
+  margin: 0;
+  padding: 8px;
+}
+
+.conflict-editor {
+  display: block;
+  margin-top: 8px;
+}
+
+.conflict-editor .faint {
+  display: block;
+  margin-bottom: 4px;
+  font-size: 11px;
+}
+
+.merged-text {
+  width: 100%;
+  box-sizing: border-box;
+  padding: 8px;
+  border: 1px solid var(--hairline);
+  border-radius: 6px;
+  background: var(--well);
+  color: inherit;
+  font-family: var(--mono);
+  font-size: 11px;
+  resize: vertical;
 }
 
 .claims-block,
@@ -2408,6 +2560,153 @@ input {
   margin: 8px 0 0;
   color: var(--accent);
   font-size: 11px;
+}
+
+/* writable subagents (D80/D115): plans, review verdicts and worktree diffs */
+
+.writable-block {
+  margin-top: 22px;
+}
+
+.writable-list {
+  margin: 8px 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.writable-row {
+  margin-top: 8px;
+  padding: 8px 10px;
+  border: 1px solid var(--hairline);
+  border-radius: 6px;
+  background: var(--well);
+}
+
+/* Something landed that a reviewer said no to: the one row that should not read as routine. */
+.writable-row.overridden {
+  border-color: #b4453a;
+  box-shadow: inset 2px 0 0 #b4453a;
+}
+
+.writable-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.writable-head .grow {
+  flex: 1;
+}
+
+.writable-id {
+  color: var(--muted);
+}
+
+.writable-plan-label {
+  margin: 8px 0 0;
+  color: var(--faint);
+}
+
+.writable-files {
+  margin: 4px 0 0;
+  color: var(--faint);
+  word-break: break-all;
+}
+
+.review-line {
+  margin-top: 8px;
+  padding-top: 8px;
+  border-top: 1px solid var(--hairline);
+}
+
+.review-line .fine {
+  margin: 0;
+  color: var(--faint);
+}
+
+.review-reason {
+  margin: 6px 0 0;
+  padding-left: 8px;
+  border-left: 2px solid var(--hairline);
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.review-reason.blocked {
+  border-left-color: #b4453a;
+  color: var(--text);
+}
+
+.review-override {
+  margin: 6px 0 0;
+  color: var(--faint);
+  font-size: 11px;
+}
+
+.writable-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+.writable-actions .grow {
+  flex: 1;
+}
+
+.writable-path {
+  overflow: hidden;
+  max-width: 60ch;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.writable-diff {
+  margin-top: 8px;
+}
+
+.review-decision {
+  margin-top: 10px;
+  padding-top: 8px;
+  border-top: 1px solid var(--hairline);
+}
+
+.review-decision .fine {
+  margin: 0;
+  color: var(--faint);
+}
+
+.override-reason {
+  width: 100%;
+  margin-top: 6px;
+  padding: 6px 8px;
+  border: 1px solid var(--hairline);
+  border-radius: 4px;
+  background: var(--bg);
+  color: var(--text);
+  font-family: inherit;
+  font-size: 12px;
+  resize: vertical;
+}
+
+.override-reason:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+
+.review-decision-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+.merge-report {
+  margin: 8px 0 0;
+}
+
+.merge-report.conflicted {
+  color: #b4453a;
 }
 
 .patch {
@@ -2458,6 +2757,60 @@ input {
   border-bottom: none;
   border-radius: 6px 6px 0 0;
   background: var(--surface, transparent);
+}
+
+.hunk-comments {
+  display: grid;
+  gap: 8px;
+  padding: 8px 10px;
+  border: 1px solid var(--hairline);
+  border-top: none;
+  border-radius: 0 0 6px 6px;
+  background: color-mix(in srgb, var(--surface, transparent) 60%, transparent);
+}
+
+.hunk-comment {
+  display: grid;
+  grid-template-columns: auto 1fr auto;
+  align-items: start;
+  gap: 8px;
+  font-size: 12px;
+}
+
+.hunk-comment p {
+  margin: 0;
+  white-space: pre-wrap;
+}
+
+.hunk-comment-author {
+  font-family: var(--mono);
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  opacity: 0.65;
+}
+
+.hunk-comment-new {
+  display: flex;
+  gap: 8px;
+  align-items: flex-end;
+}
+
+.hunk-comment-new textarea {
+  flex: 1;
+  resize: vertical;
+  min-height: 2.4rem;
+  padding: 6px 8px;
+  border: 1px solid var(--hairline);
+  border-radius: 6px;
+  background: var(--bg, transparent);
+  color: inherit;
+  font: inherit;
+  font-size: 12px;
+}
+
+.pill.sent {
+  opacity: 0.7;
 }
 
 .hunk-agent {

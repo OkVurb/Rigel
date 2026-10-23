@@ -60,7 +60,7 @@ one made things worse. Star counts and install numbers surface none of that.
 | 🧬 | **Duplicate detection** | SimHash clusters, with variants listed under every row |
 | 🛡️ | **Static safety review** | Six capability rules, each with the `file:line` that triggered it |
 | 📊 | **Measured vs advertised** | An advertised number stays `unmeasured` until a measurement exists |
-| 🤖 | **Native agent** | Streaming turns, ten path-checked tools, approvals and snapshots, subagents, and a cap that holds within one turn |
+| 🤖 | **Native agent** | Streaming turns, ten path-checked tools, approvals and snapshots, read and writable subagents with a review before merge, and a cap that holds within one turn |
 | 🔀 | **Attributed diff** | Every agent's writes merged, a conflict strip, and per-patch revert |
 | 🧰 | **Tools and trust** | What is installed, what a skill needs (with the line that said so), and the five-factor arithmetic |
 | 🩺 | **Doctor** | One row per check and an exit code: `0` clear, `1` warnings, `2` failures |
@@ -244,8 +244,9 @@ each surface and the evidence for it.
 |---|---|
 | **Shelf** | FTS5 search, six-rule static review with `file:line` evidence, evidence table, variants — all offline |
 | **Session** | The native agent streaming turns, approvals, snapshots, subagents, a live model picker, and a cap that holds within one turn |
+| **Safety** | Three writable agents at once, a per-child plan the user approves, a clean-context reviewer on every merge, and a $20/day cap across the project |
 | **Harnesses** | Codex, Claude, Gemini CLI, Cursor and Cline, each probed as its own row with its own key |
-| **Diff** | Attributed writes, the conflict strip, claims with stale rows, per-patch revert |
+| **Diff** | Attributed writes, the conflict strip, claims with stale rows, per-patch revert, subagent plans with their merge reviews and pending worktree diffs, and a merge or recorded override for an unmerged review |
 | **Tools** | Twelve probed tools, requirements traced to the line that said so, the trust arithmetic, gated installs |
 | **Doctor** | One row per check and an exit code: `0` clear, `1` warnings, `2` failures |
 | **MCP** | A stdio host scoped to one session and one agent, sharing the same tools |
@@ -365,7 +366,17 @@ no weakened assertion, no lint silenced with an `allow` attribute.
 - Skill bodies live on disk in `blobs/`, not in SQLite. Deleting that directory forces a re-fetch; the
   rows will report `body: not fetched` until one happens. `rigel skills gc` only removes blobs no row
   or cache entry names.
-- **Subagents are cheap, read-only and concurrent.** The allowlist is eight models, all at
+- **The merge reviewer is a model, not a proof.** It sees the diff and nothing else, and its
+  APPROVE is a signal, not a guarantee; the patch journal and the worktree are what make a bad
+  merge recoverable. The daily cap is counted in the project database, so it is global across
+  this project's sessions, not across every project the window has opened.
+- **Subagents are cheap and concurrent; up to three may write.** Read children cannot write or
+  spawn. A writable child is started only with a plan the user approved (or skipped with a
+  recorded reason), holds a claim on each of its files, works in its own worktree, and merges
+  only after a clean-context reviewer reads the diff. A blocked review needs a typed override,
+  which is stored beside the verdict. The writable count and the $20/day cap live in
+  Settings → Safety; the cap covers every session in the project and interrupts every running
+  agent after the step that crosses it. The allowlist is eight models, all at
   $5/M output or less: `openai/gpt-5-nano` (default), `openai/gpt-5.4-nano`,
   `google/gemini-2.5-flash-lite`, `deepseek/deepseek-v4.1-flash`,
   `qwen/qwen3-coder-30b-a3b-instruct`, `anthropic/claude-haiku-5.5`,

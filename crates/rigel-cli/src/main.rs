@@ -142,6 +142,14 @@ enum Command {
         command: HarnessCommand,
     },
 
+    /// Spend across every session in a project (D92).
+    Spend {
+        #[arg(long, value_name = "PATH", default_value = ".")]
+        project: PathBuf,
+        #[arg(long)]
+        json: bool,
+    },
+
     /// Run the stdio MCP server an adapter injects into an agent.
     Mcp {
         #[arg(long, value_name = "PATH", default_value = ".")]
@@ -274,10 +282,14 @@ enum SkillCommand {
         json: bool,
     },
 
-    /// Import the prototype's `skilldb:entries:v1` export.
+    /// Import the prototype's export, or one skills.sh page with its dated audits.
     Import {
-        #[arg(long, value_name = "FILE")]
-        from: PathBuf,
+        /// The prototype's `skilldb:entries:v1` JSON export.
+        #[arg(long, value_name = "FILE", conflicts_with = "skills_sh")]
+        from: Option<PathBuf>,
+        /// A skills.sh skill page, e.g. https://www.skills.sh/owner/repo/skill.
+        #[arg(long = "skills-sh", value_name = "URL")]
+        skills_sh: Option<String>,
         #[arg(long)]
         json: bool,
     },
@@ -336,6 +348,61 @@ async fn main() -> ExitCode {
         Command::Claude { command } => harness::run_claude(command, &dir).await,
 
         Command::Harness { command } => harness::run_harness(command, &dir).await,
+
+        Command::Spend {
+            project,
+            json: as_json,
+        } => match Store::open_project(&project).await {
+            Ok(store) => match rigel_core::spend::report(store.pool()).await {
+                Ok(report) => {
+                    if as_json {
+                        println!(
+                            "{}",
+                            serde_json::to_string_pretty(&report).unwrap_or_default()
+                        );
+                    } else {
+                        println!("total  {}", dollars(report.total_micros));
+                        println!("turns  {}", report.turns);
+                        println!("\nby session");
+                        for row in &report.by_session {
+                            println!(
+                                "  {:<40} {:>10}  ({} turns)",
+                                truncate(&row.label, 40),
+                                dollars(row.micros),
+                                row.turns
+                            );
+                        }
+                        println!("\nby day");
+                        for row in &report.by_day {
+                            println!(
+                                "  {:<12} {:>10}  ({} turns)",
+                                row.label,
+                                dollars(row.micros),
+                                row.turns
+                            );
+                        }
+                        println!("\nby agent");
+                        for row in &report.by_agent {
+                            println!(
+                                "  {:<40} {:>10}  ({} turns)",
+                                truncate(&row.label, 40),
+                                dollars(row.micros),
+                                row.turns
+                            );
+                        }
+                    }
+                    ExitCode::SUCCESS
+                }
+                Err(error) => {
+                    eprintln!("rigel: {error}");
+                    ExitCode::from(2)
+                }
+            },
+            Err(error) => {
+                eprintln!("rigel: {error}");
+                ExitCode::from(2)
+            }
+        },
 
         Command::Tools { command } => tools::run_tools(&dir, command).await,
 
@@ -639,27 +706,73 @@ async fn run_skills(dir: &Path, command: SkillCommand) -> ExitCode {
 
         SkillCommand::Import {
             from,
+            skills_sh,
             json: as_json,
-        } => {
-            let text = match std::fs::read_to_string(&from) {
-                Ok(text) => text,
-                Err(error) => return skills_failure(SkillsError::Io(error), as_json),
-            };
-            match index.import_prototype_entries(&text).await {
-                Ok(report) => {
-                    if as_json {
-                        println!("{}", serde_json::to_string(&report).unwrap_or_default());
-                    } else {
-                        println!(
-                            "imported {} · skipped {} (already present) · invalid {}",
-                            report.imported, report.skipped, report.invalid
-                        );
+        } => match (from, skills_sh) {
+            (Some(from), None) => {
+                let text = match std::fs::read_to_string(&from) {
+                    Ok(text) => text,
+                    Err(error) => return skills_failure(SkillsError::Io(error), as_json),
+                };
+                match index.import_prototype_entries(&text).await {
+                    Ok(report) => {
+                        if as_json {
+                            println!("{}", serde_json::to_string(&report).unwrap_or_default());
+                        } else {
+                            println!(
+                                "imported {} · skipped {} (already present) · invalid {}",
+                                report.imported, report.skipped, report.invalid
+                            );
+                        }
+                        ExitCode::SUCCESS
                     }
-                    ExitCode::SUCCESS
+                    Err(error) => skills_failure(error, as_json),
                 }
-                Err(error) => skills_failure(error, as_json),
             }
-        }
+            (None, Some(url)) => {
+                let policy = rigel_core::SyncPolicy::normal();
+                match rigel_core::skills::skillssh::import(&index, &url, policy).await {
+                    Ok(report) => {
+                        if as_json {
+                            println!("{}", serde_json::to_string(&report).unwrap_or_default());
+                        } else {
+                            println!(
+                                "{}  {}",
+                                report.repo,
+                                report
+                                    .skill_id
+                                    .as_deref()
+                                    .unwrap_or("(the repository no longer carries this skill)")
+                            );
+                            for audit in &report.audits {
+                                println!(
+                                    "  {:<22} {:<6} {}",
+                                    audit.vendor,
+                                    audit.verdict,
+                                    audit.audited_on.as_deref().unwrap_or("date unavailable")
+                                );
+                            }
+                            println!(
+                                "  indexed {} skills ({} added, {} updated)",
+                                report.indexed.found, report.indexed.added, report.indexed.updated
+                            );
+                        }
+                        ExitCode::SUCCESS
+                    }
+                    Err(error) => skills_failure(error, as_json),
+                }
+            }
+            (None, None) => {
+                eprintln!(
+                    "rigel: pass --from <file> for the prototype export, or --skills-sh <url> for a skills.sh page"
+                );
+                ExitCode::from(1)
+            }
+            (Some(_), Some(_)) => {
+                eprintln!("rigel: pass one of --from or --skills-sh, not both");
+                ExitCode::from(1)
+            }
+        },
 
         SkillCommand::Gc { json: as_json } => {
             let live = match index.live_blobs().await {
@@ -729,6 +842,17 @@ fn print_detail(detail: &rigel_core::SkillDetail) {
         println!();
         println!("evidence");
         for row in &detail.evidence {
+            if row.label == "audited" {
+                // A directory's verdict is a date and a link, not a number: print it that way
+                // so nobody reads the empty measured/advertised columns as a zero.
+                println!(
+                    "  {:<24} [audited] {}  {}",
+                    row.metric,
+                    rigel_core::skills::fmt_time(row.observed_at),
+                    row.source
+                );
+                continue;
+            }
             println!(
                 "  {:<18} measured {:<6} advertised {:<6} [{}] {}",
                 row.metric,
@@ -751,6 +875,15 @@ fn print_detail(detail: &rigel_core::SkillDetail) {
             println!("  {}  {}", variant.id, variant.delta);
         }
     }
+}
+
+/// Micro-dollars as `$0.1234`; the canonical unit is µ$ everywhere else.
+fn dollars(micros: i64) -> String {
+    format!(
+        "${}.{:04}",
+        micros / 1_000_000,
+        (micros % 1_000_000).abs() / 100
+    )
 }
 
 fn truncate(value: &str, max: usize) -> String {

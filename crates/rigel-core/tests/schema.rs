@@ -93,6 +93,7 @@ async fn project_schema_has_every_table_the_plan_names() {
         "checkpoints",
         "claim_conflicts",
         "claims",
+        "conflict_sides",
         "interventions",
         "items",
         "memory_index",

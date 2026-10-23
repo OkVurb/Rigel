@@ -168,3 +168,28 @@ async fn checkpoints_record_the_tree_hash_for_resume() {
         Err(SessionError::SessionNotFound(_))
     ));
 }
+
+#[tokio::test]
+async fn applying_a_role_preset_rewrites_the_roster_row_and_rejects_unknown_names() {
+    let tmp = TempDir::new().unwrap();
+    let service = SessionService::open(tmp.path()).await.unwrap();
+    let session = service.start(Some("roles"), None).await.unwrap();
+    let agent = service
+        .register_agent_with(&session.id, "native", None, None)
+        .await
+        .unwrap();
+
+    let applied = service
+        .apply_role_preset(&session.id, &agent.id, "reviewer")
+        .await
+        .unwrap();
+    assert_eq!(applied.role.as_deref(), Some("reviewer"));
+    assert_eq!(applied.model.as_deref(), Some("openai/gpt-5.4-mini"));
+
+    assert!(matches!(
+        service
+            .apply_role_preset(&session.id, &agent.id, "nonexistent")
+            .await,
+        Err(SessionError::InvalidRole(_))
+    ));
+}

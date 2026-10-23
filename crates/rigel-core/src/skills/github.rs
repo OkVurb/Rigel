@@ -14,13 +14,13 @@ use async_trait::async_trait;
 use futures::StreamExt;
 use sqlx::SqlitePool;
 
-use super::blob::{BlobStore, sha256_hex};
+use super::blob::{sha256_hex, BlobStore};
 use super::frontmatter;
 use super::http::Http;
 use super::scan;
 use super::source::{FetchedSkill, RepoSnapshot, SkillRecord, Source, SourceStatus, SyncPolicy};
 use crate::migrate::now_ms;
-use crate::skills::{SkillsError, cluster, fmt_time};
+use crate::skills::{cluster, fmt_time, SkillsError};
 
 const API: &str = "https://api.github.com";
 const RAW: &str = "https://raw.githubusercontent.com";
@@ -134,7 +134,11 @@ fn parent_dir(path: &str) -> String {
 }
 
 fn non_empty(value: String) -> Option<String> {
-    if value.is_empty() { None } else { Some(value) }
+    if value.is_empty() {
+        None
+    } else {
+        Some(value)
+    }
 }
 
 fn encode_path(path: &str) -> String {
@@ -154,6 +158,9 @@ pub struct GitHubSource {
     http: Http,
     pool: SqlitePool,
     limit: usize,
+    /// When set, only the skill whose directory is `<slug>` is kept. The skills.sh import
+    /// uses it so one page costs one body rather than a whole repository.
+    slug: Option<String>,
     api: String,
     raw: String,
 }
@@ -168,6 +175,7 @@ impl GitHubSource {
             http: Http::new(pool.clone(), blobs, ttl)?,
             pool,
             limit: DEFAULT_REPO_LIMIT,
+            slug: None,
             api: API.to_string(),
             raw: RAW.to_string(),
         })
@@ -175,6 +183,12 @@ impl GitHubSource {
 
     pub fn with_limit(mut self, limit: usize) -> Self {
         self.limit = limit.max(1);
+        self
+    }
+
+    /// Keep only the skill at `<slug>/SKILL.md` or `…/<slug>/SKILL.md`.
+    pub fn with_slug(mut self, slug: &str) -> Self {
+        self.slug = Some(slug.to_string());
         self
     }
 
@@ -248,6 +262,18 @@ impl GitHubSource {
                 .collect();
             if !scoped.is_empty() {
                 candidates = scoped;
+            }
+        }
+
+        if let Some(slug) = &self.slug {
+            candidates.retain(|(path, _)| {
+                path == &format!("{slug}/SKILL.md") || path.ends_with(&format!("/{slug}/SKILL.md"))
+            });
+            if candidates.is_empty() {
+                return Err(SkillsError::NoSkillsFound(format!(
+                    "no SKILL.md under {slug}/ in {}/{} ({branch})",
+                    reference.owner, reference.repo
+                )));
             }
         }
 
@@ -359,7 +385,11 @@ fn build_skill(
         .or_else(|| {
             let dir = parent_dir(path);
             let last = dir.rsplit('/').next().unwrap_or_default().to_string();
-            if last.is_empty() { None } else { Some(last) }
+            if last.is_empty() {
+                None
+            } else {
+                Some(last)
+            }
         })
         .unwrap_or_else(|| repo.to_string());
 
@@ -507,14 +537,12 @@ mod tests {
             Some(cluster::simhash(&frontmatter::parse(raw).body) as i64)
         );
         assert!(skill.record.body_sha.is_some());
-        assert!(
-            skill
-                .record
-                .url
-                .as_deref()
-                .unwrap()
-                .ends_with("/pdf/SKILL.md")
-        );
+        assert!(skill
+            .record
+            .url
+            .as_deref()
+            .unwrap()
+            .ends_with("/pdf/SKILL.md"));
         assert_eq!(skill.record.capabilities.len(), 1, "network access only");
     }
 }

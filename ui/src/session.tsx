@@ -19,6 +19,8 @@ import {
   type SwarmTarget,
   type TurnQuote,
   type TeamAgent,
+  type RolePreset,
+  type PlanState,
   type TurnTranscript,
 } from "./api";
 import { ModelControls } from "./modelpicker";
@@ -87,6 +89,8 @@ export default function SessionView({
   const [session, setSession] = useState<Session | null>(() => (tauri ? null : previewSession));
   const [agents, setAgents] = useState<Agent[]>(() => (tauri ? [] : previewAgents));
   const [team, setTeam] = useState<TeamAgent[]>([]);
+  const [rolePresets, setRolePresets] = useState<RolePreset[]>([]);
+  const [plan, setPlan] = useState<PlanState | null>(null);
   const [turns, setTurns] = useState<TurnTranscript[]>(() => (tauri ? [] : previewTranscript));
   const [budget, setBudget] = useState<BudgetSnapshot | null>(() => (tauri ? null : previewBudget));
   const [patches, setPatches] = useState<Patch[]>(() => (tauri ? [] : previewPatches));
@@ -126,6 +130,32 @@ export default function SessionView({
   useEffect(() => {
     defaultsRef.current = defaults;
   }, [defaults]);
+
+  useEffect(() => {
+    let live = true;
+    api
+      .rolePresets()
+      .then((next) => live && setRolePresets(next))
+      .catch(() => live && setRolePresets([]));
+    return () => {
+      live = false;
+    };
+  }, []);
+
+  useEffect(() => {
+    let live = true;
+    if (!tauri || !project || !session) {
+      setPlan(null);
+      return;
+    }
+    api
+      .planGet(project, session.id)
+      .then((next) => live && setPlan(next))
+      .catch(() => live && setPlan(null));
+    return () => {
+      live = false;
+    };
+  }, [tauri, project, session?.id]);
 
   const spendMicros = budget?.session_micros ?? (session ? session.spend_cents * 10_000 : 0);
   const capMicros = budget?.cap_micros ?? (session?.budget_cents ? session.budget_cents * 10_000 : null);
@@ -181,12 +211,16 @@ export default function SessionView({
     if (tauri && session) void api.watchProject(project);
   }, [tauri, project, session?.id]);
 
-  const answer = async (pending: PendingApproval, scope: ApprovalAnswer) => {
+  const answer = async (
+    pending: PendingApproval,
+    scope: ApprovalAnswer,
+    options?: { skip?: boolean; note?: string },
+  ) => {
     // The row disappears as soon as it is answered, whatever the answer: a question that has
     // been decided must never look open.
     setApprovals((open) => open.filter((row) => row.id !== pending.id));
     try {
-      await api.approvals.answer(pending.id, scope);
+      await api.approvals.answer(pending.id, scope, options);
     } catch (problem) {
       setError(problem instanceof Error ? problem.message : String(problem));
     }
@@ -420,6 +454,27 @@ export default function SessionView({
             setWarning(true);
             setError(
               `Budget exceeded: ${money(payload.spend_micros)} spent of ${money(payload.cap_micros)}. Every running agent was interrupted.`,
+            );
+            break;
+          }
+          case "task_budget_exceeded": {
+            // D92: only the task's agent stopped; the session cap is untouched.
+            setError(
+              `Task cap reached for ${payload.agent_id}: ${money(payload.spend_micros)} spent of ${money(payload.cap_micros)}. Other agents continue.`,
+            );
+            break;
+          }
+          case "daily_budget_warning": {
+            // D116: the day's 80% is a warning, not a stop. The raise lives in Settings.
+            setError(
+              `Daily spend is ${money(payload.spend_micros)} of ${money(payload.cap_micros)}. The cap applies across every session in this project; raise it in Settings → Safety.`,
+            );
+            break;
+          }
+          case "daily_budget_exceeded": {
+            setWarning(true);
+            setError(
+              `Daily cap reached: ${money(payload.spend_micros)} spent of ${money(payload.cap_micros)} on ${payload.day}. Every running agent was interrupted; raise the cap in Settings → Safety.`,
             );
             break;
           }
@@ -812,6 +867,33 @@ export default function SessionView({
     );
   }
 
+  const togglePlan = async () => {
+    if (!session) return;
+    const enable = !(plan?.mode ?? false);
+    try {
+      const next = await api.planSet(project, session.id, enable);
+      setPlan(next);
+      onNotice(
+        enable
+          ? "Plan mode on: reads only, no edits or commands until you approve."
+          : "Plan approved; the next turn may edit.",
+      );
+    } catch (failure) {
+      setError(failure instanceof Error ? failure.message : String(failure));
+    }
+  };
+
+  const applyRole = async (agent: Agent, preset: string) => {
+    if (!session || !preset) return;
+    try {
+      const next = await api.roleApply(project, session.id, agent.id, preset);
+      setAgents((rows) => rows.map((row) => (row.id === next.id ? next : row)));
+      onNotice(`${next.role ?? "agent"} preset applied; the next turn reads it.`);
+    } catch (failure) {
+      setError(failure instanceof Error ? failure.message : String(failure));
+    }
+  };
+
   return (
     <>
       <aside className="list-pane roster">
@@ -830,6 +912,26 @@ export default function SessionView({
                 all agents
               </button>
               {shown.length === 2 ? <span className="fine">two transcripts side by side</span> : null}
+              {shown.length === 1 && rolePresets.length ? (
+                <select
+                  className="chip"
+                  aria-label="Apply a role preset to the selected agent"
+                  value={
+                    agents.find((agent) => agent.id === shown[0])?.role ?? ""
+                  }
+                  onChange={(event) => {
+                    const agent = agents.find((row) => row.id === shown[0]);
+                    if (agent) void applyRole(agent, event.target.value);
+                  }}
+                >
+                  <option value="">role preset…</option>
+                  {rolePresets.map((preset) => (
+                    <option key={preset.id} value={preset.id}>
+                      {preset.title} · {preset.effort}
+                    </option>
+                  ))}
+                </select>
+              ) : null}
               {session.status === "interrupted" ? (
                 <>
                   <button className="chip warn" onClick={() => void resume(false)} disabled={busy}>
@@ -935,6 +1037,15 @@ export default function SessionView({
                 Add key
               </button>
             ) : null}
+            {plan?.mode ? (
+              <button className="chip on" onClick={() => void togglePlan()}>
+                approve plan
+              </button>
+            ) : (
+              <button className="chip" onClick={() => void togglePlan()} disabled={!session}>
+                plan
+              </button>
+            )}
             <label className="toggle">
               <input type="checkbox" checked={raw} onChange={(event) => setRaw(event.target.checked)} />
               raw
@@ -1299,9 +1410,15 @@ function ApprovalCard({
   onAnswer,
 }: {
   pending: PendingApproval;
-  onAnswer: (pending: PendingApproval, scope: ApprovalAnswer) => void;
+  onAnswer: (
+    pending: PendingApproval,
+    scope: ApprovalAnswer,
+    options?: { skip?: boolean; note?: string },
+  ) => void;
 }) {
   const detail = pending.detail ?? {};
+  const [skippingPlan, setSkippingPlan] = useState(false);
+  const [skipReason, setSkipReason] = useState("");
   const cwd = typeof detail.cwd === "string" ? detail.cwd : null;
   const timeout = typeof detail.timeout_secs === "number" ? detail.timeout_secs : null;
   const destructive = Array.isArray(detail.destructive)
@@ -1311,6 +1428,71 @@ function ApprovalCard({
     detail.deliberation && typeof detail.deliberation === "object"
       ? (detail.deliberation as { note?: string })
       : null;
+  // D114: a writable fan-out is its own question. It shows each child's plan before its
+  // first edit, and the skip path asks for the reason the ledger will keep.
+  const planned =
+    pending.kind === "plan" && Array.isArray(detail.agents)
+      ? (detail.agents as { role?: string; files?: string[]; task?: string; plan?: string }[])
+      : [];
+  if (pending.kind === "plan") {
+    return (
+      <section className="approval-card" aria-label="Writable agents awaiting approval">
+        <header>
+          <span className="pill running">plan</span>
+          <span className="approval-title mono">{pending.title}</span>
+          <span className="grow" />
+          <span className="approval-wait">waiting for you</span>
+        </header>
+        <p className="approval-meta mono">
+          each child works in its own worktree; its changes land only after a review
+        </p>
+        <ul className="approval-rows plan-rows">
+          {planned.map((agent, index) => (
+            <li key={`${agent.role ?? "agent"}-${index}`}>
+              <span className="pill running">{agent.role ?? "agent"}</span>
+              <span className="mono plan-files">{(agent.files ?? []).join(", ")}</span>
+              {agent.task ? <p className="fine">{agent.task}</p> : null}
+              <pre className="plan-body">{agent.plan ?? ""}</pre>
+            </li>
+          ))}
+        </ul>
+        {skippingPlan ? (
+          <div className="plan-skip">
+            <p className="fine">
+              Skipping records a waiver instead of an approval. What is the reason?
+            </p>
+            <div className="cap-form">
+              <input
+                value={skipReason}
+                onChange={(event) => setSkipReason(event.target.value)}
+                placeholder="why this fan-out does not need a plan check"
+                aria-label="Reason for skipping the plan check"
+              />
+              <button
+                className="chip warn"
+                onClick={() =>
+                  onAnswer(pending, "deny", { skip: true, note: skipReason })
+                }
+              >
+                Record skip
+              </button>
+            </div>
+          </div>
+        ) : null}
+        <div className="approval-actions">
+          <button className="chip" onClick={() => onAnswer(pending, "once")}>
+            Approve plan
+          </button>
+          <button className="chip warn" onClick={() => setSkippingPlan(true)}>
+            Skip check, with a reason
+          </button>
+          <button className="chip danger" onClick={() => onAnswer(pending, "deny")}>
+            Reject
+          </button>
+        </div>
+      </section>
+    );
+  }
   return (
     <section className="approval-card" aria-label="Approval required">
       <header>
@@ -1599,6 +1781,15 @@ function ItemRow({ item, raw }: { item: Item; raw: boolean }) {
     return (
       <>
         <p className="error-line">error · {bodyText(item, "message")}</p>
+        {rawBlock}
+      </>
+    );
+  }
+
+  if (item.kind === "note") {
+    return (
+      <>
+        <p className="note-line">you · {bodyText(item, "text")}</p>
         {rawBlock}
       </>
     );

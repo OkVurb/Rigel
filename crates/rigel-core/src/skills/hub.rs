@@ -17,12 +17,12 @@ use regex::Regex;
 use serde_json::Value;
 use sqlx::SqlitePool;
 
-use super::blob::{BlobStore, sha256_hex};
+use super::blob::{sha256_hex, BlobStore};
 use super::frontmatter;
 use super::http::Http;
 use super::scan;
 use super::source::{FetchedSkill, SkillRecord, Source, SourceStatus};
-use crate::skills::{SkillsError, cluster};
+use crate::skills::{cluster, SkillsError};
 
 const SKILLSMP_BASE: &str = "https://skillsmp.com";
 const SKILLHUB_BASE: &str = "https://skills.browseract.com";
