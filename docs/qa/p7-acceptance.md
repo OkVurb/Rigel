@@ -92,7 +92,7 @@ behind a dead proxy. It also failed the Node and signature rows, as it should.
 
 | # | Item | Closes it |
 |---|---|---|
-| 1 | A **signed** MSI reporting `ok trusted` | a CA-issued or EV certificate thumbprint in `RIGEL_CERT_THUMBPRINT`, then `scripts/sign-installers.ps1` |
+| 1 | A **signed** MSI reporting `ok trusted` | a CA-issued or EV certificate thumbprint in `RIGEL_CERT_THUMBPRINT`, then `scripts/sign-installers.ps1 -Build` |
 | 2 | First install on a machine with **no WebView2** | any fresh image without the runtime; watch `the WebView2 bootstrapper ran` |
 | 3 | The **1809** floor | a Windows 10 1809 image (build 17763) |
 | 4 | **SmartScreen** | download the signed MSI through a browser on a fresh machine; a person reads the prompt |
@@ -106,7 +106,7 @@ From an elevated PowerShell in the repository, after the bundles are built (see
 [docs/PLATFORMS.md](../PLATFORMS.md)):
 
 ```powershell
-.\scripts\sign-installers.ps1 -Thumbprint $env:RIGEL_CERT_THUMBPRINT
+.\scripts\sign-installers.ps1 -Build -Thumbprint $env:RIGEL_CERT_THUMBPRINT
 .\scripts\p7-vm-check.ps1 `
   -Msi .\target\release\bundle\msi\Rigel_0.1.0_x64_en-US.msi `
   -Rigel C:\tools\rigel.exe

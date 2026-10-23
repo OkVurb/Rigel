@@ -73,7 +73,9 @@ it cannot grant itself permission, because the gate is code and the answer comes
 
 ## Unsigned builds
 
-Release installers are Authenticode-signed when a certificate is configured; see
-[docs/PLATFORMS.md](docs/PLATFORMS.md). A build without a signature is named as such in the release
-notes. Rigel never disables a Windows security feature to make an install succeed, and it never
+Release installers are Authenticode-signed when a certificate is configured, and so is the payload
+inside them; see [docs/PLATFORMS.md](docs/PLATFORMS.md). The Authenticode certificate and the
+Ed25519 key that signs the update manifest are different keypairs with different jobs: Windows
+checks the first, `rigel update verify` checks the second, and neither authorises the other. A build
+without a signature is named as such in the release notes. Rigel never disables a Windows security feature to make an install succeed, and it never
 runs `sudo`, `doas` or `pkexec` — an install that needs elevation prints the command and stops.

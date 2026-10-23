@@ -119,10 +119,14 @@ if command -v powershell >/dev/null 2>&1; then
   absent=$?
   RIGEL_CERT_THUMBPRINT= powershell -NoProfile -ExecutionPolicy Bypass -File "$sign"     -BundleDir "$(cygpath -w "$tmp/bundle")" >/dev/null 2>&1
   nocert=$?
+  # A build is a long way to go before discovering there is nothing to sign with.
+  RIGEL_CERT_THUMBPRINT= powershell -NoProfile -ExecutionPolicy Bypass -File "$sign" -Build -BundleDir "$(cygpath -w "$tmp/bundle")" >/dev/null 2>&1
+  buildnocert=$?
   set -e
   check "an unsigned artifact is a failure, not a note" "$unsigned" "1"
   check "a missing bundle directory is a usage error" "$absent" "2"
   check "signing without a certificate refuses" "$nocert" "2"
+  check "a signed build refuses before compiling without a certificate" "$buildnocert" "2"
 else
   note "powershell is not on this machine; the signing script's checks were skipped"
 fi

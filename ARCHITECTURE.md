@@ -87,7 +87,9 @@ runs an elevation tool.
 
 `update.rs` is the only update code. The switch defaults to off. A manifest is Ed25519-verified over
 `version\nurl\nsha256` against a key in `update-pubkey.txt` or `RIGEL_UPDATE_PUBKEY`, and the
-artifact's SHA-256 must match before it is offered. Nothing installs itself.
+artifact's SHA-256 must match before it is offered. Nothing installs itself. That Ed25519 key is
+not the Authenticode certificate: Windows checks the installer and the PE files inside it, while
+`rigel update verify` checks the manifest, and the two keys never stand in for each other.
 
 ## Testing
 

@@ -118,6 +118,18 @@ if ($Msi) {
     Check "msiexec finished" ($process.ExitCode -in 0, 3010) ("exit " + $process.ExitCode)
     $installed = InstalledAppExe
     Check "the app is installed" ($null -ne $installed) $installed
+    if ($installed) {
+      # The MSI's own signature only covers the wrapper; this is the copy Windows runs.
+      $installedSignature = Get-AuthenticodeSignature $installed
+      $installedSigned = $null -ne $installedSignature.SignerCertificate
+      Check "the installed executable carries an Authenticode signature" $installedSigned `
+        $(if ($installedSigned) { $installedSignature.SignerCertificate.Subject } else { "unsigned" })
+      if ($signed -and $installedSigned) {
+        Check "the installed executable is signed by the installer's certificate" \
+          ($installedSignature.SignerCertificate.Thumbprint -eq $signature.SignerCertificate.Thumbprint) \
+          $installedSignature.SignerCertificate.Thumbprint
+      }
+    }
     $webviewAfter = WebView2Version
     Check "the WebView2 bootstrapper ran" ($null -ne $webviewAfter) $(if ($webviewAfter) { $webviewAfter } else { "still absent" })
 

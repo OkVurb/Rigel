@@ -35,37 +35,81 @@ targets, `webviewInstallMode: downloadBootstrapper` (silent), downgrades refused
 ### Signing
 
 Signing happens on the build machine, never in this repository: the certificate and the update key
-belong to the release operator.
+belong to the release operator. Two signatures travel with a release, and they use different keys:
+
+| signature | key | checked by |
+| --- | --- | --- |
+| the MSI and NSIS wrappers **and every PE file inside them** | Authenticode code-signing certificate (`RIGEL_CERT_THUMBPRINT`) | Windows, SmartScreen |
+| the update manifest (`version\nurl\nsha256`) | Ed25519 publisher key (`update-pubkey.txt` or `RIGEL_UPDATE_PUBKEY`) | `rigel update verify` |
+
+They never substitute for each other. Tauri's updater key (`TAURI_SIGNING_PRIVATE_KEY`) is not
+used here at all: Rigel's updater is its own manifest format, not `tauri-plugin-updater`'s.
+
+An MSI is a container. Signing the MSI alone signs the wrapper; the copy of `rigel-app.exe` inside
+stays unsigned, so the file installed in Program Files fails verification. Signing the executable
+*before* `cargo tauri build` does not fix it either: Tauri patches the app with bundle-type
+information while it packages (once for MSI, once for NSIS), and that patch makes the earlier
+signature stale. The only order that works is the one Tauri's own signing hook provides — patch,
+then sign, then package.
+
+`sign-installers.ps1` writes a temporary config carrying the operator's thumbprint and passes it to
+`cargo tauri build`, so Tauri signs the patched executable for each package type, the WiX helper
+DLLs embedded in the MSI, and then the MSI and NSIS wrappers. The script then unpacks the MSI
+(`msiexec /a`) and checks that every PE file it installs is validly signed by the same certificate
+as the wrapper. The helper DLLs are not installed; the MSI's own signature covers those.
 
 ```powershell
-cargo tauri build
-
-# Authenticode over MSI and NSIS output, then verification of every file
 $env:RIGEL_CERT_THUMBPRINT = "…"        # thumbprint of a code-signing certificate in this store
+.\scripts\sign-installers.ps1 -Build    # build → Tauri signs payload and wrappers → verify both
+
+# an already-built bundle: sign its wrappers, then verify both layers (a bundle packaged without
+# signing fails the nested check on purpose; rerun with -Build to fix it)
 .\scripts\sign-installers.ps1
 
 # or, for a PFX you import first, and without a timestamp when offline
-.\scripts\sign-installers.ps1 -Thumbprint A1B2… -NoTimestamp
+.\scripts\sign-installers.ps1 -Build -Thumbprint A1B2… -NoTimestamp
 
 # no certificate at hand? still prove the build produced installers
 .\scripts\sign-installers.ps1 -VerifyOnly
 ```
 
 `sign-installers.ps1` finds `signtool.exe` in the installed Windows SDK, signs with SHA-256 and a
-timestamp, and then verifies each artifact. It reports `ok trusted` for a CA-issued certificate and
-`note signed but chain untrusted` for a self-signed test one — a release must show `ok trusted` for
-every file, and the script exits non-zero when a file has no signature at all.
+RFC 3161 timestamp, and then verifies each artifact and the MSI payload. A signature whose bytes no
+longer match is a failure, not a note: the script exits non-zero when a file has no signature, when
+its signature is invalid, or when a PE the MSI installs is unsigned, invalidly signed or signed by a
+different certificate. It reports `ok trusted` for a CA-issued certificate and `note signed but
+chain untrusted` for a self-signed test one — a release must show `ok trusted` for every file.
 
-Tauri's own `bundle.windows.certificateThumbprint` and `signCommand` do the same thing inside
-`cargo tauri build`; they are deliberately absent from the committed config because a thumbprint is
-machine-specific and a clone must not sign with someone else's identity. A build with no
-certificate produces an **unsigned** installer, and the release notes say so. `rigel update verify`
-checks the artifact hash and the manifest signature; Windows SmartScreen checks the Authenticode
-signature separately.
+Tauri's `bundle.windows.certificateThumbprint` is deliberately absent from the committed config: a
+thumbprint is machine-specific, and a clone must not sign with someone else's identity. The release
+script passes it as a temporary `--config` instead. A build with no certificate produces an
+**unsigned** installer, and the release notes say so. `rigel update verify` checks the artifact hash
+and the Ed25519 manifest signature; Windows SmartScreen checks the Authenticode signature
+separately.
 
 The certificate is a Windows code-signing certificate with its private key in
-`Cert:\CurrentUser\My` (or `Cert:\LocalMachine\My`). An organization-issued or EV certificate is
-required for SmartScreen reputation; a self-signed one only proves the pipeline, not the trust.
+`Cert:\CurrentUser\My` (or `Cert:\LocalMachine\My`). A self-signed certificate proves the pipeline
+and produces valid inner and outer signatures, but SmartScreen still warns because the chain is not
+trusted. An organization-issued or EV certificate is required for `ok trusted` and SmartScreen
+reputation.
+
+To make a self-signed certificate for local builds (it stays in this user's store; delete it when
+it is no longer wanted):
+
+```powershell
+$cert = New-SelfSignedCertificate -Type CodeSigningCert -Subject "CN=Rigel contributors" `
+  -CertStoreLocation Cert:\CurrentUser\My -KeyUsage DigitalSignature -KeyExportPolicy Exportable
+$env:RIGEL_CERT_THUMBPRINT = $cert.Thumbprint
+.\scripts\sign-installers.ps1 -Build
+```
+
+### The Store MSIX route (a side quest)
+
+An MSIX submitted to the Microsoft Store is re-signed by Microsoft: no certificate purchase and no
+SmartScreen prompt. Tauri has no first-class MSIX bundler, so this means wrapping the build with
+MakeAppx or the MSIX Packaging Tool. It does **not** replace signing the MSI: the Store does not
+re-sign MSI/EXE submissions, and a sideloaded MSI still needs a trusted certificate. Treat it as an
+alternative distribution path, not as a way to ship an unsigned installer.
 
 ### Exit test on a clean machine (P7.9)
 
@@ -79,8 +123,9 @@ Windows VM, from an elevated prompt:
 ```
 
 It checks the Windows build (17763+), that Node is absent, the MSI's signature, a silent install,
-that the WebView2 bootstrapper ran, that the window starts, `doctor`'s rows and exit code, one
-native turn offline, the offline shelf, and then uninstalls. Two lines stay `manual`: SmartScreen
+that the installed executable carries the installer's certificate (the MSI's signature covers only
+the wrapper), that the WebView2 bootstrapper ran, that the window starts, `doctor`'s rows and exit
+code, one native turn offline, the offline shelf, and then uninstalls. Two lines stay `manual`: SmartScreen
 (only a browser-downloaded file is judged) and the look of the window on a fresh display.
 
 If no VM is at hand, Windows Sandbox is a real clean machine for the install itself: enable it once
