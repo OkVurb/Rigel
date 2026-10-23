@@ -31,12 +31,13 @@ pub const CACHE_FILE: &str = "adapters.json";
 const CACHE_VERSION: u32 = 1;
 const PROBE_TIMEOUT: Duration = Duration::from_secs(10);
 
-/// The four external harnesses, in the order Settings lists them.
-pub const HARNESSES: [Harness; 4] = [
+/// The five external harnesses, in the order Settings lists them.
+pub const HARNESSES: [Harness; 5] = [
     Harness::Codex,
     Harness::Claude,
     Harness::Cursor,
     Harness::Cline,
+    Harness::Gemini,
 ];
 
 pub fn display_name(harness: Harness) -> &'static str {
@@ -46,6 +47,7 @@ pub fn display_name(harness: Harness) -> &'static str {
         Harness::Claude => "Claude Code",
         Harness::Cursor => "Cursor",
         Harness::Cline => "Cline",
+        Harness::Gemini => "Gemini CLI",
     }
 }
 
@@ -56,6 +58,7 @@ pub fn binary_names(harness: Harness) -> &'static [&'static str] {
         Harness::Claude => &["claude"],
         Harness::Cursor => &["agent", "cursor-agent"],
         Harness::Cline => &["cline"],
+        Harness::Gemini => &["gemini"],
         Harness::Native => &[],
     }
 }
@@ -72,6 +75,7 @@ pub fn install_hint(harness: Harness) -> String {
         }
         Harness::Cursor => "curl https://cursor.com/install -fsS | bash".to_string(),
         Harness::Cline => "npm install -g cline".to_string(),
+        Harness::Gemini => "npm install -g @google/gemini-cli".to_string(),
         Harness::Native => String::new(),
     }
 }
@@ -88,6 +92,10 @@ pub fn vendor_login(harness: Harness) -> Option<PathBuf> {
         // Cursor keeps the CLI's login in its own config directory. A machine without it simply
         // reports `None`; the probe never guesses a subscription from the app's presence.
         Harness::Cursor => Some(home.join(".cursor").join("cli-config.json")),
+        // Gemini CLI's Google-account login. Current builds migrate this file into a hybrid token
+        // store and remove it, so a signed-in CLI can still report `None` here; it is only used to
+        // classify an auth mode, and the key path is what Rigel actually spawns with (D21).
+        Harness::Gemini => Some(home.join(".gemini").join("oauth_creds.json")),
         Harness::Cline | Harness::Native => None,
     }
 }
@@ -137,6 +145,14 @@ pub fn capabilities(harness: Harness, version: Option<&str>) -> Capabilities {
             worktree: true,
             nested_agents: false,
         },
+        Harness::Gemini => Capabilities {
+            acp: true,
+            json_stream: true,
+            programmatic_approval: true,
+            // Gemini CLI documents no worktree flag of its own, so Rigel does not promise one.
+            worktree: false,
+            nested_agents: false,
+        },
         Harness::Native => Capabilities::default(),
     }
 }
@@ -164,7 +180,7 @@ pub fn parse_version(text: &str) -> Option<String> {
 }
 
 /// Probe every harness. Codex and Claude report through their adapter's configured credentials;
-/// the ACP harnesses (Cursor, Cline) report version plus auth classification. Their turn adapter
+/// the ACP harnesses (Cursor, Cline, Gemini) report version plus auth classification. Their turn adapter
 /// is the shared `AcpClient`, which refuses to start without the matching key.
 pub async fn probe_all(store: &dyn CredentialStore) -> Vec<HarnessInfo> {
     let mut infos = Vec::with_capacity(HARNESSES.len());
@@ -399,7 +415,7 @@ pub struct AdapterCache {
 }
 
 impl AdapterCache {
-    /// Probe all four and stamp the binary mtimes that make the cache invalidatable.
+    /// Probe every harness and stamp the binary mtimes that make the cache invalidatable.
     pub async fn probe(store: &dyn CredentialStore) -> Self {
         let mut harnesses = Vec::with_capacity(HARNESSES.len());
         for info in probe_all(store).await {
@@ -575,6 +591,22 @@ exit 0
         assert_eq!(spec.env_var, "CLINE_API_KEY");
         assert_eq!(vendor_login(Harness::Cline), None);
         assert!(capabilities(Harness::Cline, None).acp);
+    }
+
+    #[test]
+    fn gemini_has_its_own_key_and_login_rule() {
+        let spec = credential_spec(Harness::Gemini, None).expect("Gemini has a key path");
+        assert_eq!(spec.provider, rigel_core::credentials::GEMINI);
+        assert_eq!(spec.env_var, "GEMINI_API_KEY");
+        let login = vendor_login(Harness::Gemini).expect("a login artefact path");
+        assert_eq!(
+            login.file_name().and_then(|name| name.to_str()),
+            Some("oauth_creds.json")
+        );
+        let flags = capabilities(Harness::Gemini, None);
+        assert!(flags.acp);
+        assert!(flags.programmatic_approval);
+        assert!(!flags.worktree, "no vendor worktree flag exists to promise");
     }
 
     #[tokio::test]

@@ -1,7 +1,9 @@
 //! Harness adapters.
 //!
 //! Each external harness gets one module behind the `Adapter` trait. Phase 4 builds them in
-//! order: Codex app-server/exec, Claude stream-json, then the ACP clients (Cursor, Cline).
+//! order: Codex app-server/exec, Claude stream-json, then the ACP clients (Cursor, Cline and
+//! Gemini). Gemini is also a model provider for the native agent; the two are separate paths and
+//! share only the `gemini` keychain entry.
 
 use std::path::PathBuf;
 
@@ -38,6 +40,7 @@ pub enum Harness {
     Claude,
     Cursor,
     Cline,
+    Gemini,
 }
 
 impl Harness {
@@ -49,6 +52,7 @@ impl Harness {
             Self::Claude => "claude",
             Self::Cursor => "cursor",
             Self::Cline => "cline",
+            Self::Gemini => "gemini",
         }
     }
 }
@@ -132,6 +136,12 @@ pub fn credential_spec(harness: Harness, base_url: Option<&str>) -> Option<Crede
             provider: rigel_core::credentials::CLINE,
             env_var: "CLINE_API_KEY",
         }),
+        // Gemini CLI takes a Google AI Studio key as `GEMINI_API_KEY`; the native agent's Gemini
+        // provider resolves the same keychain entry, so one stored key serves both paths.
+        Harness::Gemini => Some(CredentialSpec {
+            provider: rigel_core::credentials::GEMINI,
+            env_var: "GEMINI_API_KEY",
+        }),
         Harness::Native => None,
     }
 }
@@ -201,6 +211,9 @@ mod tests {
         let cline = credential_spec(Harness::Cline, None).expect("Cline has a key path");
         assert_eq!(cline.provider, rigel_core::credentials::CLINE);
         assert_eq!(cline.env_var, "CLINE_API_KEY");
+        let gemini = credential_spec(Harness::Gemini, None).expect("Gemini has a key path");
+        assert_eq!(gemini.provider, rigel_core::credentials::GEMINI);
+        assert_eq!(gemini.env_var, "GEMINI_API_KEY");
         assert_eq!(credential_spec(Harness::Native, None), None);
     }
 }

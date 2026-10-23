@@ -1,4 +1,4 @@
-//! `rigel agent acp` — one Cursor (or Cline) turn through the shared ACP client (P4.3).
+//! `rigel agent acp` — one Cursor, Cline or Gemini turn through the shared ACP client (P4.3).
 //!
 //! The ACP client already speaks the protocol and routes `session/request_permission`. This module
 //! is the other half: it puts the turn in a session, gives the request somewhere to go, and records
@@ -35,11 +35,13 @@ use serde_json::{Value, json};
 use tokio::sync::mpsc;
 
 /// Which ACP harness this turn drives. Each has its own key variable — Cursor reads
-/// `CURSOR_API_KEY`, Cline reads `CLINE_API_KEY` — and the spawn refuses without one.
+/// `CURSOR_API_KEY`, Cline reads `CLINE_API_KEY`, Gemini reads `GEMINI_API_KEY` — and the spawn
+/// refuses without one.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 pub enum HarnessChoice {
     Cursor,
     Cline,
+    Gemini,
 }
 
 impl HarnessChoice {
@@ -47,6 +49,7 @@ impl HarnessChoice {
         match self {
             Self::Cursor => Harness::Cursor,
             Self::Cline => Harness::Cline,
+            Self::Gemini => Harness::Gemini,
         }
     }
 
@@ -54,6 +57,7 @@ impl HarnessChoice {
         match self {
             Self::Cursor => AcpConfig::cursor(cwd),
             Self::Cline => AcpConfig::cline(cwd),
+            Self::Gemini => AcpConfig::gemini(cwd),
         }
     }
 }
@@ -607,6 +611,7 @@ fn report_missing_key(harness: Harness, json: bool) {
     let provider = match harness {
         Harness::Cursor => rigel_core::credentials::CURSOR,
         Harness::Cline => rigel_core::credentials::CLINE,
+        Harness::Gemini => rigel_core::credentials::GEMINI,
         _ => "provider",
     };
     let variable = rigel_core::credentials::provider_environment_variable(provider)

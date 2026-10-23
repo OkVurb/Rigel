@@ -7,7 +7,7 @@
 
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use sqlx::SqlitePool;
+use sqlx::{Connection, SqliteConnection, SqlitePool};
 
 /// One numbered migration. `sql` may contain multiple statements.
 #[derive(Debug, Clone, Copy)]
@@ -21,7 +21,8 @@ pub struct Migration {
 ///
 /// 0002 is Phase 3's: micro-dollar accounting, session skill pins and the turn's stop
 /// reason. 0003 adds the parent link that makes subagent turns attributable without
-/// polluting the top-level transcript. Both say why in their headers.
+/// polluting the top-level transcript. 0005 rebuilds `agents` to admit `gemini`, which
+/// SQLite can only do with a table rebuild; each file says why in its header.
 pub const PROJECT_MIGRATIONS: &[Migration] = &[
     Migration {
         version: 1,
@@ -42,6 +43,11 @@ pub const PROJECT_MIGRATIONS: &[Migration] = &[
         version: 4,
         name: "0004_patch_hunks",
         sql: include_str!("../../../migrations/project/0004_patch_hunks.sql"),
+    },
+    Migration {
+        version: 5,
+        name: "0005_gemini_harness",
+        sql: include_str!("../../../migrations/project/0005_gemini_harness.sql"),
     },
 ];
 
@@ -81,6 +87,9 @@ pub enum MigrateError {
         applied: String,
         expected: &'static str,
     },
+
+    #[error("a migration left {0} foreign-key violation(s); the transaction was rolled back")]
+    ForeignKey(usize),
 }
 
 /// Apply every migration not yet recorded, in order.
@@ -93,7 +102,36 @@ pub enum MigrateError {
 /// lock error or an existing table. Taking the write lock first makes the second opener
 /// wait, then read the winner's result and do nothing.
 pub async fn apply(pool: &SqlitePool, migrations: &[Migration]) -> Result<Vec<i64>, MigrateError> {
-    let mut tx = pool.begin_with("BEGIN IMMEDIATE").await?;
+    // Foreign-key enforcement is per connection, and SQLite only honours a change to it outside
+    // a transaction. A schema rebuild (0005) drops a table that children reference with
+    // `ON DELETE CASCADE`, so the migration connection runs with enforcement off — otherwise
+    // the drop would empty `turns` and `claims`. Other pooled connections keep enforcing, the
+    // check before commit catches anything the run broke, and the setting is restored before
+    // the connection goes back to the pool.
+    let mut conn = pool.acquire().await?;
+    sqlx::query("PRAGMA foreign_keys = OFF")
+        .execute(&mut *conn)
+        .await?;
+    let outcome = apply_in_transaction(&mut conn, migrations).await;
+    let restored = sqlx::query("PRAGMA foreign_keys = ON")
+        .execute(&mut *conn)
+        .await;
+    match (outcome, restored) {
+        (Err(error), _) => Err(error),
+        (Ok(applied), Ok(_)) => Ok(applied),
+        (Ok(_), Err(error)) => {
+            // Never hand a connection with enforcement off back to the pool.
+            let _ = conn.close().await;
+            Err(error.into())
+        }
+    }
+}
+
+async fn apply_in_transaction(
+    conn: &mut SqliteConnection,
+    migrations: &[Migration],
+) -> Result<Vec<i64>, MigrateError> {
+    let mut tx = conn.begin_with("BEGIN IMMEDIATE").await?;
 
     sqlx::raw_sql(
         "CREATE TABLE IF NOT EXISTS schema_migrations (
@@ -160,6 +198,15 @@ pub async fn apply(pool: &SqlitePool, migrations: &[Migration]) -> Result<Vec<i6
             .await?;
 
         applied_now.push(migration.version);
+    }
+
+    // With enforcement off for the run, the commit is the only place a broken rebuild can be
+    // caught; a violation rolls the whole thing back rather than shipping a half-moved table.
+    let violations: Vec<(String, i64, String, i64)> = sqlx::query_as("PRAGMA foreign_key_check")
+        .fetch_all(&mut *tx)
+        .await?;
+    if !violations.is_empty() {
+        return Err(MigrateError::ForeignKey(violations.len()));
     }
 
     tx.commit().await?;

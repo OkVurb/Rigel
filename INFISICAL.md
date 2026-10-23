@@ -38,7 +38,7 @@ written by `rigel keys set`, so `infisical run` overrides a stored key for one p
 
 - `OMNIROUTE_API_KEY` — the `omniroute` provider, the key the local router itself checks.
 - `OPENROUTER_API_KEY` — the `openrouter` provider.
-- `GEMINI_API_KEY` — the `gemini` provider (Google AI Studio), used as `Authorization: Bearer`.
+- `GEMINI_API_KEY` — the `gemini` provider (Google AI Studio) and the Gemini CLI harness, which receives it as `GEMINI_API_KEY` at spawn.
 - `OPENAI_API_KEY` — the `openai` provider, and the key Codex receives.
 - `ANTHROPIC_API_KEY` — the `anthropic` provider, and the key Claude Code receives.
 - `CURSOR_API_KEY` — Cursor's own key, injected into the ACP child process.

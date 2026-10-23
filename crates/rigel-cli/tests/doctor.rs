@@ -67,7 +67,11 @@ async fn a_clean_machine_has_no_failures_and_one_row_per_harness() {
                 .is_some_and(|id| id.starts_with("harness:"))
         })
         .collect();
-    assert_eq!(harnesses.len(), 4, "{json}");
+    assert_eq!(
+        harnesses.len(),
+        rigel_adapters::registry::HARNESSES.len(),
+        "one row per registered harness: {json}"
+    );
     assert!(harnesses.iter().all(|row| row["detail"].is_string()));
 
     assert_eq!(

@@ -1,4 +1,5 @@
-//! A scripted stand-in for an ACP agent (`agent acp` / `cline --acp`), used by `tests/acp.rs`.
+//! A scripted stand-in for an ACP agent (`agent acp` / `cline --acp` / `gemini --acp`), used by
+//! `tests/acp.rs`.
 //!
 //! Modes, chosen by `FAKE_ACP_MODE`:
 //! - unset / `ok`: initialize, create a session, stream two message chunks, ask permission for a
@@ -57,6 +58,17 @@ fn main() {
         &format!(
             "cline_key={}",
             if std::env::var("CLINE_API_KEY").is_ok() {
+                "set"
+            } else {
+                "unset"
+            }
+        ),
+    );
+    record(
+        &record_path,
+        &format!(
+            "gemini_key={}",
+            if std::env::var("GEMINI_API_KEY").is_ok() {
                 "set"
             } else {
                 "unset"

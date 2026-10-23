@@ -60,7 +60,7 @@ pub enum AgentCommand {
         json: bool,
     },
 
-    /// One Cursor (or Cline) turn through the Agent Client Protocol.
+    /// One Cursor, Cline or Gemini turn through the Agent Client Protocol.
     Acp {
         #[arg(long, value_name = "PATH", default_value = ".")]
         project: PathBuf,
@@ -70,7 +70,8 @@ pub enum AgentCommand {
         /// Role for the harness agent. One is created on first use.
         #[arg(long, default_value = "acp")]
         agent: String,
-        /// Which ACP harness to drive; each reads its own API-key variable.
+        /// Which ACP harness to drive (`cursor`, `cline`, `gemini`); each reads its own API-key
+        /// variable.
         #[arg(long, value_enum, default_value = "cursor")]
         harness: acp::HarnessChoice,
         #[arg(long)]

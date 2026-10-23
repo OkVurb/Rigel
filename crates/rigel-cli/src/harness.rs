@@ -76,7 +76,7 @@ pub enum CodexCommand {
 
 #[derive(Subcommand)]
 pub enum HarnessCommand {
-    /// Probe all four harnesses, refresh `adapters.json`, and print what was found.
+    /// Probe every harness, refresh `adapters.json`, and print what was found.
     Probe {
         #[arg(long)]
         json: bool,

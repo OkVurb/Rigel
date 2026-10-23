@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
-# Phase 4 exit test (P4.12): three harnesses, three real turns, one killed.
+# Phase 4 exit test (P4.12): four harnesses, four real turns, one killed.
 #
 #   1. doctor sees all four harnesses in JSON
 #   2. Codex runs a turn that records a command item with its exit code and input tokens
-#   3. Cursor and Cline run ACP turns through the same client, with their own keys
+#   3. Cursor, Cline and Gemini run ACP turns through the same client, with their own keys
 #   4. killing one agent mid-turn leaves the others running; resume marks only that turn
 #   5. every turn left a command item, and Claude keeps the CLI's own cost
 #
@@ -38,7 +38,7 @@ python - "$logs/doctor.json" <<'PY'
 import json, sys
 doc = json.load(open(sys.argv[1], encoding="utf-8"))
 names = {row["harness"] for row in doc["harnesses"]}
-missing = {"codex", "cursor", "cline"} - names
+missing = {"codex", "cursor", "cline", "gemini"} - names
 assert not missing, f"doctor did not report {missing}: {names}"
 assert all(row.get("path") or row.get("install_hint") for row in doc["harnesses"])
 print(f"   {len(doc['harnesses'])} harness rows; {sorted(names)}")
@@ -71,9 +71,10 @@ assert run["recorded_usage"]["input_tokens"] == 420, run["recorded_usage"]
 print("   command exit 0; recorded 420 input tokens; estimate printed before send")
 PY
 
-echo "== 3: Cursor and Cline run through the same client, each with its own key =="
+echo "== 3: Cursor, Cline and Gemini run through the same client, each with its own key =="
 export CURSOR_API_KEY="ck-rigel-exit-test-not-real"
 export CLINE_API_KEY="sk-rigel-exit-test-not-real"
+export GEMINI_API_KEY="AIza-rigel-exit-test-not-real"
 FAKE_ACP_MODE=doctor "$cli" agent acp --project "$project" --session "$session" --harness cursor \
   --exe "$acp_fake" --prompt "run rigel doctor --json" --approval allow --json \
   > "$logs/cursor.json" 2> "$logs/cursor.err" &
@@ -82,8 +83,12 @@ FAKE_ACP_MODE=doctor "$cli" agent acp --project "$project" --session "$session" 
   --exe "$acp_fake" --prompt "run rigel doctor --json" --approval allow --json \
   > "$logs/cline.json" 2> "$logs/cline.err" &
 cline_pid=$!
+FAKE_ACP_MODE=doctor "$cli" agent acp --project "$project" --session "$session" --harness gemini \
+  --exe "$acp_fake" --prompt "run rigel doctor --json" --approval allow --json \
+  > "$logs/gemini.json" 2> "$logs/gemini.err" &
+gemini_pid=$!
 
-echo "== 4: a fourth turn is killed mid-flight =="
+echo "== 4: a fifth turn is killed mid-flight =="
 FAKE_ACP_MODE=wait-cancel "$cli" agent acp --project "$project" --session "$session" \
   --harness cursor --agent hung --exe "$acp_fake" --prompt "hang" \
   --approval allow --timeout-secs 60 --json \
@@ -113,7 +118,8 @@ set -e
 
 wait "$cursor_pid" || true
 wait "$cline_pid" || true
-for name in cursor cline; do
+wait "$gemini_pid" || true
+for name in cursor cline gemini; do
   python - "$logs/$name.json" "$logs/$name.err" <<'PY'
 import json, sys
 run = json.load(open(sys.argv[1], encoding="utf-8"))
@@ -156,7 +162,7 @@ rows = sqlite3.connect(db).execute(
 by_harness: dict[str, list[tuple[str, int, int]]] = {}
 for harness, status, count, doctor in rows:
     by_harness.setdefault(harness, []).append((status, count, doctor))
-for harness in ("codex", "cursor", "cline"):
+for harness in ("codex", "cursor", "cline", "gemini"):
     assert harness in by_harness, f"{harness} ran no turn: {by_harness}"
     turns = by_harness[harness]
     # Cursor ran twice in this session: the completed turn and the one killed on purpose.

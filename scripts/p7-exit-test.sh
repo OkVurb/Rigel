@@ -52,7 +52,7 @@ check "no failures on a fresh data directory" "$fails" "0"
 check "the reported exit code is the failure state" "$code" "$([ "$fails" = "0" ] && echo 1 || echo 2)"
 check "there are checks, not an empty list" "$([ "$rows" -ge 10 ] && echo yes || echo no)" "yes"
 check "every harness has a row" \
-  "$(printf '%s' "$doc" | python -c 'import sys,json; print(sum(1 for c in json.load(sys.stdin)["checks"] if c["id"].startswith("harness:")))')" "4"
+  "$(printf '%s' "$doc" | python -c 'import sys,json; print(sum(1 for c in json.load(sys.stdin)["checks"] if c["id"].startswith("harness:")))')" "5"
 "$exe" doctor --project "$tmp/project" --json >/dev/null 2>&1 || true
 set +e
 "$exe" doctor --project "$tmp/project" >/dev/null 2>&1

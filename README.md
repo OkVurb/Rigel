@@ -69,8 +69,9 @@ cargo run -q -p rigel-cli -- agent run --project . --prompt "run the tests" --ap
 # Google's models through the Gemini API (a key from AI Studio; default gemini-4-argon)
 printf '%s' "$GEMINI_API_KEY" | cargo run -q -p rigel-cli -- keys set gemini
 cargo run -q -p rigel-cli -- agent run --provider gemini --prompt "say pong"
-# one ACP turn against Cursor or Cline; approvals prompt on stdin
-# (needs its CLI and its own key: CURSOR_API_KEY or CLINE_API_KEY)
+# one ACP turn against Cursor, Cline or Gemini; approvals prompt on stdin
+# (needs its CLI and its own key: CURSOR_API_KEY, CLINE_API_KEY or GEMINI_API_KEY)
+cargo run -q -p rigel-cli -- agent acp --harness gemini --project . --prompt "say pong"
 cargo run -q -p rigel-cli -- agent acp --project . --prompt "say pong"
 cargo run -q -p rigel-cli -- agent acp --harness cline --project . --prompt "say pong"
 # trust this project's .mcp.json servers for Claude Code's interactive session
@@ -156,6 +157,7 @@ The prototype's Discover view talks to two marketplaces that send no CORS header
 | MCP | **real**: stdio server scoped to `--session` and `--agent`, sharing the same tools |
 | Codex harness | **real**: `rigel codex probe` and one turn through `codex app-server`, with `codex exec --json` as the tested fallback; Rigel writes the router `-c` overrides itself (verified against Codex 0.162.1) |
 | Claude harness | **real**: `rigel claude probe` and one turn, recorded as a session turn and billed with the CLI's own `total_cost_usd`; the turn passes `--mcp-config` and `--permission-prompt-tool mcp__rigel__rigel_approve`, and the CLI answers each question on stdin with the same four scopes as the native agent. Protocol verified against a scripted 2.1.251 stream; a live subscription turn has not been run. The window sends Claude a turn as well: pick `claude` in the composer and `turn_send` runs the harness, with the approval card answering `rigel_approve` through the app's own `mcp` mode |
+| Gemini CLI harness | **real protocol**: `rigel agent acp --harness gemini` drives one ACP turn through `gemini --acp` (the flag replaced `--experimental-acp` in 0.33), records session updates and both sides of every permission request, and takes `GEMINI_API_KEY` — the same keychain entry as the native `gemini` provider. Probed as its own row with the install hint `npm install -g @google/gemini-cli`; verified against the scripted ACP agent, because the CLI is not installed on this machine |
 | Cursor/Cline harness | **real protocol**: `rigel agent acp --harness cursor|cline` drives one ACP turn, records session updates and both sides of every permission request, and refuses a subscription-only identity; each harness takes its own key (`CURSOR_API_KEY`, `CLINE_API_KEY`) and is probed separately. An ACP run asks on the CLI's stdin, and the window card is the native agent's surface. Verified against a scripted ACP agent — neither CLI is installed on this machine |
 | Claims | **real**: `acquire` / `heartbeat` / `release`, a tombstone on release, staleness reported and never auto-released, 24 h expiry; `rigel claim list\|release`, MCP `rigel_claim` / `rigel_release` / `rigel_who` |
 | Attribution | **real**: a 250 ms watcher that hashes changed files, names the writer or marks `ambiguous`, and records a conflict when a claimed path moves under someone else |

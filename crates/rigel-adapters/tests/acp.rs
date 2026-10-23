@@ -328,6 +328,51 @@ async fn cline_takes_its_own_key_and_speaks_the_same_protocol() {
 }
 
 #[tokio::test]
+async fn gemini_takes_its_own_key_and_speaks_the_same_protocol() {
+    let dir = tempfile::tempdir().unwrap();
+    let approver = Arc::new(Recorded {
+        decision: ApprovalDecision::AllowOnce,
+        seen: Mutex::new(Vec::new()),
+    });
+    let mut config = AcpConfig::gemini(dir.path());
+    config.exe = fake_path();
+    config.timeout = Duration::from_secs(10);
+    config.vendor_login = None;
+    config.env.insert(
+        "GEMINI_API_KEY".to_string(),
+        Secret::new("AIza-test-must-not-print"),
+    );
+    config.env.insert(
+        "FAKE_ACP_RECORD".to_string(),
+        Secret::new(dir.path().join("record.txt").display().to_string()),
+    );
+    assert_eq!(config.args, vec!["--acp".to_string()]);
+    assert_eq!(config.harness, Harness::Gemini);
+
+    let mut client = AcpClient::spawn(config, approver.clone())
+        .await
+        .expect("Gemini should initialize with its own key");
+    client.new_session().await.expect("session/new");
+    let turn = client
+        .prompt("say pong", |_| {})
+        .await
+        .expect("the turn should finish");
+
+    assert_eq!(turn.text, "pong");
+    assert_eq!(approver.seen.lock().unwrap().len(), 1);
+    let record = recorded(dir.path());
+    assert!(record.contains("argv=--acp"), "{record}");
+    assert!(
+        record.contains("gemini_key=set"),
+        "the Gemini key must reach the child: {record}"
+    );
+    assert!(
+        record.contains("cline_key=unset") && record.contains("key=unset"),
+        "other harnesses' keys must not leak into Gemini: {record}"
+    );
+}
+
+#[tokio::test]
 async fn the_probe_reports_the_agents_version_and_auth() {
     let dir = tempfile::tempdir().unwrap();
     let config = config(dir.path(), None);

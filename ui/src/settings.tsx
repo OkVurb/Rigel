@@ -57,6 +57,14 @@ const HARNESS_KEYS = [
     placeholder: "key-…",
     note: "The Cursor CLI receives this key at spawn.",
   },
+  {
+    id: "gemini",
+    harness: "Gemini CLI",
+    name: "Google AI Studio",
+    env: "GEMINI_API_KEY",
+    placeholder: "AIza…",
+    note: "One key serves the Gemini ACP harness and the native agent's gemini provider.",
+  },
 ] as const;
 
 type HarnessKey = (typeof HARNESS_KEYS)[number];
@@ -67,6 +75,7 @@ const HARNESS_LABELS: Record<HarnessInfo["harness"], string> = {
   claude: "Claude Code",
   cursor: "Cursor",
   cline: "Cline",
+  gemini: "Gemini CLI",
 };
 
 /**

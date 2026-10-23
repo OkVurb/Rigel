@@ -326,3 +326,62 @@ async fn refuses_to_run_when_a_migration_was_renamed() {
         Ok(_) => panic!("renamed migrations must not be ignored"),
     }
 }
+
+/// 0005 rebuilds `agents` to admit Gemini. SQLite can only widen a CHECK by replacing the
+/// table, and that drop would cascade through `turns` and `claims` if the runner left foreign
+/// keys on — so this seeds a v4 database, migrates it, and asserts the transcript survived.
+#[tokio::test]
+async fn widening_the_harness_check_keeps_existing_rows() {
+    let tmp = TempDir::new().unwrap();
+    let path = tmp.path().join(".rigel").join("rigel.db");
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+
+    let before = &PROJECT_MIGRATIONS[..PROJECT_MIGRATIONS.len() - 1];
+    let store = Store::open(&path, before).await.unwrap();
+    for statement in [
+        "INSERT INTO sessions (id, project_root, status, created_at) VALUES ('s1', '.', 'active', 0)",
+        "INSERT INTO agents (id, session_id, harness, status, started_at) VALUES ('a1', 's1', 'native', 'idle', 0)",
+        "INSERT INTO turns (id, agent_id, seq, status, started_at) VALUES ('t1', 'a1', 1, 'completed', 0)",
+        "INSERT INTO claims (id, path, agent_id, acquired_at, heartbeat_at) VALUES ('c1', 'src/lib.rs', 'a1', 0, 0)",
+    ] {
+        sqlx::query(statement).execute(store.pool()).await.unwrap();
+    }
+    store.pool().close().await;
+
+    let store = Store::open(&path, PROJECT_MIGRATIONS).await.unwrap();
+    let count = |table: &'static str| {
+        let pool = store.pool().clone();
+        async move {
+            sqlx::query_scalar::<_, i64>(&format!("SELECT COUNT(*) FROM {table}"))
+                .fetch_one(&pool)
+                .await
+                .unwrap()
+        }
+    };
+    assert_eq!(
+        (
+            count("agents").await,
+            count("turns").await,
+            count("claims").await
+        ),
+        (1, 1, 1),
+        "the rebuild must not cascade into the transcript"
+    );
+
+    sqlx::query(
+        "INSERT INTO agents (id, session_id, harness, status, started_at) VALUES ('a2', 's1', 'gemini', 'idle', 0)",
+    )
+    .execute(store.pool())
+    .await
+    .expect("a gemini agent is accepted after 0005");
+
+    let refused = sqlx::query(
+        "INSERT INTO agents (id, session_id, harness, status, started_at) VALUES ('a3', 's1', 'bogus', 'idle', 0)",
+    )
+    .execute(store.pool())
+    .await;
+    assert!(
+        refused.is_err(),
+        "the rebuilt CHECK still guards the harness column"
+    );
+}

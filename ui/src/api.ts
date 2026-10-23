@@ -285,7 +285,7 @@ const PREVIEW_CHAT_MESSAGES: AgentChatMessage[] = [
 
 /** One row of `adapters.json` (P4.1). */
 export interface HarnessInfo {
-  harness: "native" | "codex" | "claude" | "cursor" | "cline";
+  harness: "native" | "codex" | "claude" | "cursor" | "cline" | "gemini";
   installed: boolean;
   version: string | null;
   path: string | null;
@@ -342,6 +342,16 @@ const PREVIEW_HARNESSES: HarnessInfo[] = [
     capabilities: { acp: true, json_stream: true, programmatic_approval: true, worktree: true, nested_agents: false },
     provider: null,
     install_hint: "npm install -g cline",
+  },
+  {
+    harness: "gemini",
+    installed: false,
+    version: null,
+    path: null,
+    auth_mode: "none",
+    capabilities: { acp: true, json_stream: true, programmatic_approval: true, worktree: false, nested_agents: false },
+    provider: "gemini",
+    install_hint: "npm install -g @google/gemini-cli",
   },
 ];
 

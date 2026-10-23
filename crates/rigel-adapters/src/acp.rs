@@ -1,4 +1,4 @@
-//! The Agent Client Protocol client shared by Cursor and Cline (P4.3).
+//! The Agent Client Protocol client shared by Cursor, Cline and Gemini (P4.3).
 //!
 //! ACP is JSON-RPC 2.0 over the child's stdio: the client calls `initialize`, `session/new` and
 //! `session/prompt`, the agent answers `session/update` notifications, and either side may make a
@@ -49,7 +49,8 @@ pub const PROTOCOL_VERSION: u64 = 1;
 pub struct AcpConfig {
     pub harness: Harness,
     pub exe: PathBuf,
-    /// The agent's ACP invocation: `agent acp` for Cursor, `cline --acp` for Cline.
+    /// The agent's ACP invocation: `agent acp` for Cursor, `cline --acp` for Cline and
+    /// `gemini --acp` for Gemini.
     pub args: Vec<String>,
     pub cwd: PathBuf,
     pub timeout: Duration,
@@ -81,6 +82,16 @@ impl AcpConfig {
                 PathBuf::from(if cfg!(windows) { "cline.cmd" } else { "cline" }),
                 vec!["--acp".to_string()],
             ),
+            // The flag was `--experimental-acp` until Gemini CLI 0.33; `--acp` is the current
+            // spelling and the old one is kept only as its deprecated alias.
+            Harness::Gemini => (
+                PathBuf::from(if cfg!(windows) {
+                    "gemini.cmd"
+                } else {
+                    "gemini"
+                }),
+                vec!["--acp".to_string()],
+            ),
             // `agent acp`. The probe also accepts the older `cursor-agent` name.
             _ => (
                 PathBuf::from(if cfg!(windows) { "agent.exe" } else { "agent" }),
@@ -106,8 +117,13 @@ impl AcpConfig {
         Self::new(Harness::Cline, cwd)
     }
 
+    pub fn gemini(cwd: impl Into<PathBuf>) -> Self {
+        Self::new(Harness::Gemini, cwd)
+    }
+
     /// Resolve this harness's key into the child's environment. Cursor reads `CURSOR_API_KEY`;
-    /// Cline reads `CLINE_API_KEY`, the key its own ACP child authenticates with.
+    /// Cline reads `CLINE_API_KEY`, the key its own ACP child authenticates with; Gemini reads
+    /// `GEMINI_API_KEY`, the Google AI Studio key the same provider entry stores.
     pub fn inject_credential(&mut self, store: &dyn CredentialStore) -> bool {
         let Some(spec) = credential_spec(self.harness, None) else {
             return false;
@@ -342,6 +358,7 @@ impl AcpClient {
             .env_remove("OPENAI_API_KEY")
             .env_remove("CURSOR_API_KEY")
             .env_remove("CLINE_API_KEY")
+            .env_remove("GEMINI_API_KEY")
             .envs(
                 config
                     .env
@@ -743,8 +760,8 @@ impl Drop for AcpClient {
 }
 
 /// How an ACP harness authenticates. Each ACP harness has an explicit key path: Cursor reads
-/// `CURSOR_API_KEY`, Cline reads `CLINE_API_KEY`. A vendor login with no key is a subscription,
-/// which Rigel will not spawn (D21).
+/// `CURSOR_API_KEY`, Cline reads `CLINE_API_KEY`, Gemini reads `GEMINI_API_KEY`. A vendor login
+/// with no key is a subscription, which Rigel will not spawn (D21).
 pub(crate) fn acp_auth_mode(config: &AcpConfig) -> AuthMode {
     let Some(spec) = credential_spec(config.harness, None) else {
         return AuthMode::None;
