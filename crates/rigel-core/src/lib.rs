@@ -47,7 +47,7 @@ pub use patches::{
 };
 pub use resume::{ResumeError, ResumeOutcome};
 pub use session::{
-    Agent, Checkpoint, Item, Session, SessionError, SessionService, SessionStatus, Turn,
+    Agent, Checkpoint, Item, Session, SessionError, SessionService, SessionStatus, TeamAgent, Turn,
     TurnTranscript,
 };
 pub use skills::{

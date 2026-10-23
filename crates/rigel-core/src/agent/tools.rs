@@ -10,7 +10,7 @@
 
 use std::collections::HashMap;
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -57,6 +57,10 @@ pub struct Tools {
     /// restriction is enforced here as well as hidden from the schema: a model that calls a
     /// tool it was not offered still gets an error, not a write.
     read_only: bool,
+    /// The project-relative files a subagent was assigned. `None` means unrestricted (the
+    /// coordinator); `Some` means `read_file` refuses anything not on the list. The work board
+    /// states the same list in the prompt, but the tool enforces it.
+    scope: Option<Vec<String>>,
     /// Who answers a `run_command` request. Defaults to refusing everything.
     commands: Arc<dyn CommandApprover>,
     /// Network consent, its session/always cache, and the bounded fetcher behind it.
@@ -126,6 +130,7 @@ impl Tools {
             stop_at,
             reads: Mutex::new(HashMap::new()),
             read_only: false,
+            scope: None,
             commands: Arc::new(DenyCommands),
             egress: Egress::new(Arc::new(DenyOrigins), index_dir.clone()),
             deliberator: Arc::new(NoDeliberation),
@@ -170,6 +175,7 @@ impl Tools {
             stop_at: StopAt::Never,
             reads: Mutex::new(HashMap::new()),
             read_only: true,
+            scope: None,
             commands: self.commands.clone(),
             egress: self.egress.clone(),
             deliberator: self.deliberator.clone(),
@@ -177,8 +183,31 @@ impl Tools {
         }
     }
 
+    /// Limit a read-only child to the files the coordinator assigned it.
+    pub fn with_scope(mut self, files: Vec<String>) -> Self {
+        self.scope = Some(files);
+        self
+    }
+
     pub fn is_read_only(&self) -> bool {
         self.read_only
+    }
+
+    /// Whether `path` is inside the project and, for a scoped child, on its assignment.
+    fn in_scope(&self, path: &Path) -> bool {
+        let Some(files) = &self.scope else {
+            return true;
+        };
+        let (Ok(root), Ok(canonical)) = (self.root.canonicalize(), path.canonicalize()) else {
+            return false;
+        };
+        canonical
+            .strip_prefix(&root)
+            .map(|relative| {
+                let relative = relative.to_string_lossy().replace('\\', "/");
+                files.iter().any(|file| file == &relative)
+            })
+            .unwrap_or(false)
     }
 
     pub fn pipeline(&self) -> &PatchPipeline {
@@ -200,7 +229,12 @@ impl Tools {
                 !(self.read_only
                     && matches!(
                         spec.name.as_str(),
-                        "edit_file" | "write_file" | "spawn_agents" | "run_command" | "fetch_url"
+                        "edit_file"
+                            | "write_file"
+                            | "spawn_agents"
+                            | "assign_agents"
+                            | "run_command"
+                            | "fetch_url"
                     ))
             })
             .collect()
@@ -309,7 +343,7 @@ impl Tools {
             },
             ToolSpec {
                 name: "spawn_agents".to_string(),
-                description: "Run up to 4 focused subagents on a cheap model. Each returns only its final answer; subagents cannot write files or spawn further agents. Use for read-only investigation and summarising, not for edits; pick the cheapest model that fits.".to_string(),
+                description: "Split read-only work across up to 4 cheap subagents. You are the coordinator: give each helper a role, the exact project files it may read, and the task. Assignments go on the session work board so every agent and subagent sees who owns which files; a helper may read only its own files and starts its answer with them. Subagents cannot write or spawn further agents; pick the cheapest model that fits.".to_string(),
                 parameters: json!({
                     "type": "object",
                     "required": ["agents"],
@@ -320,11 +354,38 @@ impl Tools {
                             "maxItems": 4,
                             "items": {
                                 "type": "object",
-                                "required": ["prompt"],
+                                "required": ["role", "files", "prompt"],
                                 "properties": {
-                                    "role": { "type": "string", "maxLength": 40 },
-                                    "prompt": { "type": "string", "minLength": 1, "maxLength": 2000 },
+                                    "role": { "type": "string", "minLength": 1, "maxLength": 40, "description": "Short name for the helper, e.g. reader or verifier" },
+                                    "files": { "type": "array", "minItems": 1, "maxItems": 8, "items": { "type": "string" }, "description": "Project-relative files this helper may read; no two helpers may share a file" },
+                                    "prompt": { "type": "string", "minLength": 1, "maxLength": 2000, "description": "Exactly what this helper should produce" },
+                                    "task": { "type": "string", "maxLength": 400, "description": "One-line task for the work board; defaults to the prompt" },
                                     "model": { "type": "string", "enum": super::coordinator::SUBAGENT_MODELS, "description": "Defaults to the cheapest nano model; name a larger one only when the reading is subtle." }
+                                }
+                            }
+                        }
+                    }
+                }),
+            },
+            ToolSpec {
+                name: "assign_agents".to_string(),
+                description: "Give file-scoped work to agents already in the session chat room. Each assignment names the agent, role, exact files and task, is written to the session work board, and is posted into the room; that agent must start its reply with the files it worked on. Use this when the room already has the right agents; use spawn_agents for new read-only native children.".to_string(),
+                parameters: json!({
+                    "type": "object",
+                    "required": ["assignments"],
+                    "properties": {
+                        "assignments": {
+                            "type": "array",
+                            "minItems": 1,
+                            "maxItems": 4,
+                            "items": {
+                                "type": "object",
+                                "required": ["agent", "role", "files", "task"],
+                                "properties": {
+                                    "agent": { "type": "string", "minLength": 1, "maxLength": 40, "description": "Room agent name, e.g. claude or codex" },
+                                    "role": { "type": "string", "minLength": 1, "maxLength": 40 },
+                                    "files": { "type": "array", "minItems": 1, "maxItems": 8, "items": { "type": "string" }, "description": "Project-relative files this agent may read; no two agents may share a file" },
+                                    "task": { "type": "string", "minLength": 1, "maxLength": 400 }
                                 }
                             }
                         }
@@ -344,7 +405,12 @@ impl Tools {
         if self.read_only
             && matches!(
                 name,
-                "edit_file" | "write_file" | "spawn_agents" | "run_command" | "fetch_url"
+                "edit_file"
+                    | "write_file"
+                    | "spawn_agents"
+                    | "assign_agents"
+                    | "run_command"
+                    | "fetch_url"
             )
         {
             return ToolOutcome::error("READ_ONLY", format!("subagents cannot call {name}"));
@@ -377,6 +443,14 @@ impl Tools {
             Ok(path) => path,
             Err(error) => return path_error(error),
         };
+        if !self.in_scope(&path) {
+            return ToolOutcome::error(
+                "OUT_OF_SCOPE",
+                format!(
+                    "{rel} is not in this subagent's assignment; name it in your answer instead of reading it"
+                ),
+            );
+        }
         let bytes = match fs::read(&path) {
             Ok(bytes) => bytes,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {

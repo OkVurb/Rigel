@@ -22,7 +22,9 @@ pub struct Migration {
 /// 0002 is Phase 3's: micro-dollar accounting, session skill pins and the turn's stop
 /// reason. 0003 adds the parent link that makes subagent turns attributable without
 /// polluting the top-level transcript. 0005 rebuilds `agents` to admit `gemini`, which
-/// SQLite can only do with a table rebuild; each file says why in its header.
+/// SQLite can only do with a table rebuild. 0006 adds the team board: the file-scoped
+/// assignments the coordinator hands to native children and chat-room agents; each file
+/// says why in its header.
 pub const PROJECT_MIGRATIONS: &[Migration] = &[
     Migration {
         version: 1,
@@ -48,6 +50,11 @@ pub const PROJECT_MIGRATIONS: &[Migration] = &[
         version: 5,
         name: "0005_gemini_harness",
         sql: include_str!("../../../migrations/project/0005_gemini_harness.sql"),
+    },
+    Migration {
+        version: 6,
+        name: "0006_team",
+        sql: include_str!("../../../migrations/project/0006_team.sql"),
     },
 ];
 

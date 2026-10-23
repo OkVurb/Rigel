@@ -81,6 +81,19 @@ pub struct Agent {
 }
 
 #[derive(Debug, Clone, Serialize)]
+pub struct TeamAgent {
+    /// Native children use their agent id; chat-room agents use their room name.
+    pub agent_key: String,
+    pub role: Option<String>,
+    /// `native` or `room`: where the assignment was delivered.
+    pub kind: String,
+    /// Project-relative paths this agent was told it may read.
+    pub files: Vec<String>,
+    pub task: String,
+    pub status: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
 pub struct Turn {
     pub id: String,
     pub agent_id: String,
@@ -328,6 +341,91 @@ impl SessionService {
         .fetch_all(&self.pool)
         .await?;
         Ok(rows.into_iter().map(agent_from_row).collect())
+    }
+
+    /// Record one file-scoped assignment on the session's work board. Re-assigning the same
+    /// agent replaces its previous row, which is what a retry or a re-split should do.
+    pub async fn assign_team(
+        &self,
+        session_id: &str,
+        agent_key: &str,
+        role: Option<&str>,
+        kind: &str,
+        files: &[String],
+        task: &str,
+    ) -> Result<(), SessionError> {
+        if !matches!(kind, "native" | "room") {
+            return Err(SessionError::InvalidStatus(kind.to_string()));
+        }
+        self.get(session_id).await?;
+        let files_json = serde_json::to_string(files)?;
+        sqlx::query(
+            "INSERT INTO team_agents
+                 (session_id, agent_key, role, kind, files_json, task, status, updated_at)
+             VALUES (?, ?, ?, ?, ?, ?, 'assigned', ?)
+             ON CONFLICT(session_id, agent_key) DO UPDATE SET
+                 role = excluded.role,
+                 kind = excluded.kind,
+                 files_json = excluded.files_json,
+                 task = excluded.task,
+                 status = 'assigned',
+                 updated_at = excluded.updated_at",
+        )
+        .bind(session_id)
+        .bind(agent_key)
+        .bind(role)
+        .bind(kind)
+        .bind(files_json)
+        .bind(task)
+        .bind(now_ms())
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    pub async fn set_team_status(
+        &self,
+        session_id: &str,
+        agent_key: &str,
+        status: &str,
+    ) -> Result<(), SessionError> {
+        if !matches!(status, "assigned" | "working" | "done" | "failed") {
+            return Err(SessionError::InvalidStatus(status.to_string()));
+        }
+        sqlx::query(
+            "UPDATE team_agents SET status = ?, updated_at = ? WHERE session_id = ? AND agent_key = ?",
+        )
+        .bind(status)
+        .bind(now_ms())
+        .bind(session_id)
+        .bind(agent_key)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    /// The work board, in the order assignments were first made.
+    pub async fn team(&self, session_id: &str) -> Result<Vec<TeamAgent>, SessionError> {
+        let rows: Vec<(String, Option<String>, String, String, String, String)> = sqlx::query_as(
+            "SELECT agent_key, role, kind, files_json, task, status
+             FROM team_agents WHERE session_id = ? ORDER BY rowid",
+        )
+        .bind(session_id)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows
+            .into_iter()
+            .map(
+                |(agent_key, role, kind, files_json, task, status)| TeamAgent {
+                    files: serde_json::from_str(&files_json).unwrap_or_default(),
+                    agent_key,
+                    role,
+                    kind,
+                    task,
+                    status,
+                },
+            )
+            .collect())
     }
 
     pub async fn agent(&self, id: &str) -> Result<Agent, SessionError> {

@@ -228,8 +228,8 @@ async fn subagents_are_read_only_billed_separately_and_nested_under_the_parent()
           "tool_calls": [{
             "name": "spawn_agents",
             "arguments": { "agents": [
-              { "role": "looker", "prompt": "Read README.md and summarise it." },
-              { "role": "looker-2", "prompt": "Read src/lib.rs and summarise it.", "model": "openai/gpt-5.4-nano" }
+              { "role": "looker", "files": ["README.md"], "prompt": "Read README.md and summarise it." },
+              { "role": "looker-2", "files": ["src/lib.rs"], "prompt": "Read src/lib.rs and summarise it.", "model": "openai/gpt-5.4-nano" }
             ] }
           }],
           "usage": { "input_tokens": 100, "output_tokens": 20, "cost_usd": 0.0004 }
@@ -303,6 +303,22 @@ async fn subagents_are_read_only_billed_separately_and_nested_under_the_parent()
     );
     assert_eq!(spawn.body["result"]["spent_micros"], 600);
 
+    let board = service.team(&session.id).await.unwrap();
+    assert_eq!(board.len(), 2, "both children are on the work board");
+    let first = board
+        .iter()
+        .find(|row| row.role.as_deref() == Some("looker"))
+        .expect("the first assignment is on the board");
+    assert_eq!(first.kind, "native");
+    assert_eq!(first.files, vec!["README.md".to_string()]);
+    assert_eq!(first.status, "done");
+    let second = board
+        .iter()
+        .find(|row| row.role.as_deref() == Some("looker-2"))
+        .expect("the second assignment is on the board");
+    assert_eq!(second.files, vec!["src/lib.rs".to_string()]);
+    assert_eq!(second.status, "done");
+
     let stored = service.get(&session.id).await.unwrap();
     assert_eq!(stored.spend_micros, 1_100, "parent 500 + children 600");
     assert_eq!(stored.tasks_done, 1, "a child turn is not a task");
@@ -329,7 +345,7 @@ async fn a_parent_cannot_point_a_subagent_at_an_expensive_model() {
           "tool_calls": [{
             "name": "spawn_agents",
             "arguments": { "agents": [
-              { "role": "expensive", "prompt": "Read README.md.", "model": "openai/gpt-5.4-pro" }
+              { "role": "expensive", "files": ["README.md"], "prompt": "Read README.md.", "model": "openai/gpt-5.4-pro" }
             ] }
           }],
           "usage": { "input_tokens": 100, "output_tokens": 20, "cost_usd": 0.0004 }
@@ -389,11 +405,18 @@ async fn a_subagent_cannot_write_even_if_it_asks() {
     assert!(!names.contains(&"edit_file".to_string()));
     assert!(!names.contains(&"write_file".to_string()));
     assert!(!names.contains(&"spawn_agents".to_string()));
+    assert!(!names.contains(&"assign_agents".to_string()));
     assert!(
         Tools::specs_all()
             .iter()
             .any(|spec| spec.name == "spawn_agents"),
         "a top-level agent is offered the tool"
+    );
+    assert!(
+        Tools::specs_all()
+            .iter()
+            .any(|spec| spec.name == "assign_agents"),
+        "a top-level agent can hand work to the chat room"
     );
 
     let outcome = child
@@ -411,6 +434,103 @@ async fn a_subagent_cannot_write_even_if_it_asks() {
         "# Demo\nThree files.\n",
         "the refusal happened before the pipeline"
     );
+}
+
+#[tokio::test]
+async fn a_scoped_subagent_reads_only_its_assigned_files() {
+    let tmp = repo();
+    let service = SessionService::open(tmp.path()).await.unwrap();
+    let session = service.start(Some("scope"), Some(25)).await.unwrap();
+    let agent = service
+        .register_agent(&session.id, "native", Some("worker"))
+        .await
+        .unwrap();
+    let budget = Arc::new(BudgetService::with_null_interrupt(service.pool().clone()));
+    let tools = Tools::new(
+        tmp.path().to_path_buf(),
+        service.clone(),
+        budget,
+        tmp.path().join("index"),
+        StopAt::Never,
+    );
+    let child = tools.subagent().with_scope(vec!["README.md".to_string()]);
+
+    let allowed = child
+        .execute(
+            &session.id,
+            &agent.id,
+            "read_file",
+            serde_json::json!({ "path": "README.md" }),
+        )
+        .await;
+    assert!(
+        allowed.ok,
+        "the assigned file is readable: {:?}",
+        allowed.body
+    );
+
+    let denied = child
+        .execute(
+            &session.id,
+            &agent.id,
+            "read_file",
+            serde_json::json!({ "path": "src/lib.rs" }),
+        )
+        .await;
+    assert!(!denied.ok, "an unassigned file must not be read");
+    assert_eq!(denied.body["error"]["code"], "OUT_OF_SCOPE");
+}
+
+#[tokio::test]
+async fn the_coordinator_cannot_give_one_file_to_two_helpers() {
+    let tmp = repo();
+    let service = SessionService::open(tmp.path()).await.unwrap();
+    let session = service.start(Some("duplicate"), Some(25)).await.unwrap();
+    let agent = service
+        .register_agent(&session.id, "native", Some("worker"))
+        .await
+        .unwrap();
+
+    let script = r#"{
+      "steps": [
+        {
+          "text": "Spawning two readers on the same file.\n",
+          "tool_calls": [{
+            "name": "spawn_agents",
+            "arguments": { "agents": [
+              { "role": "one", "files": ["README.md"], "prompt": "Read README.md." },
+              { "role": "two", "files": ["README.md"], "prompt": "Read README.md again." }
+            ] }
+          }],
+          "usage": { "input_tokens": 100, "output_tokens": 20, "cost_usd": 0.0004 }
+        },
+        { "text": "I will split the files differently.\n", "usage": { "input_tokens": 50, "output_tokens": 10, "cost_usd": 0.0002 } }
+      ]
+    }"#;
+    let run = coordinator(tmp.path(), &service, script, StopAt::Never, 10)
+        .run(&session.id, &agent.id, "read the repo")
+        .await
+        .unwrap();
+
+    assert_eq!(run.stop, StopReason::Completed);
+    assert_eq!(
+        service.agents(&session.id).await.unwrap().len(),
+        1,
+        "a refused split registers no child"
+    );
+    let entry = service
+        .transcript(&session.id)
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|entry| entry.turn.id == run.turn.id)
+        .unwrap();
+    let spawn = entry
+        .items
+        .iter()
+        .find(|item| item.body.get("tool").and_then(|tool| tool.as_str()) == Some("spawn_agents"))
+        .expect("the refused call is in the transcript");
+    assert_eq!(spawn.body["result"]["error"]["code"], "DUPLICATE_FILE");
 }
 
 #[tokio::test]
@@ -571,8 +691,8 @@ impl Model for OverlapModel {
                 on_delta(Delta::Text("Spawning two readers.\n".to_string()));
                 let arguments = serde_json::json!({
                     "agents": [
-                        { "role": "a", "prompt": "child-a" },
-                        { "role": "b", "prompt": "child-b" }
+                        { "role": "a", "files": ["README.md"], "prompt": "child-a" },
+                        { "role": "b", "files": ["src/lib.rs"], "prompt": "child-b" }
                     ]
                 })
                 .to_string();
@@ -671,6 +791,147 @@ async fn sibling_subagents_overlap_their_model_calls() {
     );
     assert_eq!(agents[1]["text"], "child-b done.\n", "result: {agents:?}");
     assert!(agents.iter().all(|agent| agent["ok"] == true));
+}
+
+#[derive(Default)]
+struct RecordingModel {
+    parent_calls: AtomicUsize,
+    systems: Mutex<Vec<String>>,
+}
+
+#[async_trait]
+impl Model for RecordingModel {
+    fn id(&self) -> String {
+        "recording".to_string()
+    }
+
+    async fn chat(
+        &self,
+        request: ChatRequest,
+        _cancel: &CancellationToken,
+        on_delta: &mut DeltaSink<'_>,
+    ) -> Result<(), ModelError> {
+        let system: String = request
+            .messages
+            .iter()
+            .filter(|message| message.role == "system")
+            .filter_map(|message| message.content.clone())
+            .collect::<Vec<_>>()
+            .join(
+                "
+",
+            );
+        self.systems.lock().unwrap().push(system.clone());
+
+        if system.contains("You are Rigel's native agent") {
+            if self.parent_calls.fetch_add(1, Ordering::SeqCst) == 0 {
+                on_delta(Delta::Text(
+                    "Spawning two readers.
+"
+                    .to_string(),
+                ));
+                let arguments = serde_json::json!({
+                    "agents": [
+                        { "role": "a", "files": ["README.md"], "prompt": "child-a", "task": "read the readme" },
+                        { "role": "b", "files": ["src/lib.rs"], "prompt": "child-b", "task": "read the library" }
+                    ]
+                })
+                .to_string();
+                on_delta(Delta::ToolCall {
+                    index: 0,
+                    id: Some("call_0".to_string()),
+                    name: Some("spawn_agents".to_string()),
+                    arguments,
+                });
+            } else {
+                on_delta(Delta::Text(
+                    "Both readers answered.
+"
+                    .to_string(),
+                ));
+            }
+        } else {
+            on_delta(Delta::Text(
+                "Working on the assigned file.
+"
+                .to_string(),
+            ));
+        }
+        on_delta(Delta::Finish("stop".to_string()));
+        Ok(())
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn children_see_their_files_and_the_shared_board() {
+    let tmp = repo();
+    let service = SessionService::open(tmp.path()).await.unwrap();
+    let session = service.start(Some("board"), Some(25)).await.unwrap();
+    let agent = service
+        .register_agent(&session.id, "native", Some("worker"))
+        .await
+        .unwrap();
+
+    let model = Arc::new(RecordingModel::default());
+    let cancels = Arc::new(Cancels::new());
+    let budget = Arc::new(BudgetService::new(
+        service.pool().clone(),
+        cancels.clone() as Arc<dyn rigel_core::InterruptSink>,
+    ));
+    let tools = Tools::new(
+        tmp.path().to_path_buf(),
+        service.clone(),
+        budget.clone(),
+        tmp.path().join("index"),
+        StopAt::Never,
+    );
+    let run = Coordinator {
+        session: service.clone(),
+        budget,
+        tools,
+        model: model.clone(),
+        sink: Arc::new(rigel_core::NullSink),
+        cancels,
+        project_root: tmp.path().to_path_buf(),
+        model_name: "recording".to_string(),
+        effort: None,
+        max_steps: 10,
+        subagents: rigel_core::agent::SubagentPolicy::default(),
+        depth: 0,
+        parent_cancel: None,
+    }
+    .run(&session.id, &agent.id, "work")
+    .await
+    .unwrap();
+
+    assert_eq!(run.stop, StopReason::Completed);
+    let systems = model.systems.lock().unwrap();
+    let children: Vec<&String> = systems
+        .iter()
+        .filter(|system| system.contains("You are a read-only subagent"))
+        .collect();
+    assert_eq!(children.len(), 2, "both children were prompted");
+    for child in &children {
+        assert!(
+            child.contains("Your assignment from the coordinator:"),
+            "a child is told what it owns: {child}"
+        );
+        assert!(child.contains("Working on:"), "the answer format is stated");
+        assert!(
+            child.contains("README.md") && child.contains("src/lib.rs"),
+            "a child sees its own files and its sibling's: {child}"
+        );
+    }
+    assert!(
+        children.iter().any(|child| child.contains("[a]")),
+        "the board labels each helper by its role"
+    );
+    assert!(
+        systems
+            .iter()
+            .any(|system| system.contains("Work board for this session")),
+        "the coordinator restates the board after the split"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

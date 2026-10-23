@@ -11,6 +11,7 @@
 //! | [`pricing`] | the local price fallback, marked `estimated` |
 //! | [`tools`] | read/list/edit/write, skills, budget — all path-checked |
 //! | [`coordinator`] | the turn loop, cancellation, checkpointing |
+//! | [`team`] | the work board and file-scoped assignments |
 //!
 //! No adapter will speak this trait. Phase 4's harnesses have their own protocols and are
 //! normalised into the same `AgentEvent`s; the coordinator is for the agent Rigel runs
@@ -28,6 +29,7 @@ pub mod omniroute;
 pub mod openrouter;
 pub mod pricing;
 pub mod scripted;
+pub mod team;
 pub mod tools;
 
 pub use approval::{
