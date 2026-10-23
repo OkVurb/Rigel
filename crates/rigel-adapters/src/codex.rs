@@ -260,28 +260,52 @@ impl CodexAdapter {
             });
         }
         let secrets = self.config.env.values().cloned().collect::<Vec<_>>();
-        let mut emit = |event| on_event(redact_event(event, &secrets));
+        let mut stream = crate::StreamRedactor::new(&secrets);
         let started = Instant::now();
-        let outcome = match self.config.transport {
-            Transport::AppServer => self.app_server_turn(prompt, &mut emit).await,
-            Transport::Exec => self.exec_turn(prompt, &mut emit).await,
-            Transport::Auto => match self.app_server_turn(prompt, &mut emit).await {
-                Ok(result) => Ok(result),
-                Err(Failure::BeforeTurn(reason)) => {
-                    emit(CodexEvent::Notice {
-                        message: format!(
-                            "app-server failed ({}); falling back to exec",
-                            redact_text(&reason, &secrets)
-                        ),
-                    });
-                    self.exec_turn(prompt, &mut emit).await.map(|mut result| {
-                        result.fell_back = true;
-                        result
-                    })
+        let outcome = {
+            let mut emit = |event| match event {
+                CodexEvent::Delta { text } => {
+                    let safe = stream.push(&text);
+                    if !safe.is_empty() {
+                        on_event(CodexEvent::Delta { text: safe });
+                    }
                 }
-                Err(error) => Err(error),
-            },
+                CodexEvent::Message { text } => {
+                    let tail = stream.finish();
+                    if !tail.is_empty() {
+                        on_event(CodexEvent::Delta { text: tail });
+                    }
+                    on_event(CodexEvent::Message {
+                        text: redact_text(&text, &secrets),
+                    });
+                }
+                other => on_event(redact_event(other, &secrets)),
+            };
+            match self.config.transport {
+                Transport::AppServer => self.app_server_turn(prompt, &mut emit).await,
+                Transport::Exec => self.exec_turn(prompt, &mut emit).await,
+                Transport::Auto => match self.app_server_turn(prompt, &mut emit).await {
+                    Ok(result) => Ok(result),
+                    Err(Failure::BeforeTurn(reason)) => {
+                        emit(CodexEvent::Notice {
+                            message: format!(
+                                "app-server failed ({}); falling back to exec",
+                                redact_text(&reason, &secrets)
+                            ),
+                        });
+                        self.exec_turn(prompt, &mut emit).await.map(|mut result| {
+                            result.fell_back = true;
+                            result
+                        })
+                    }
+                    Err(error) => Err(error),
+                },
+            }
         };
+        let tail = stream.finish();
+        if !tail.is_empty() {
+            on_event(CodexEvent::Delta { text: tail });
+        }
 
         outcome
             .map(|mut result| {

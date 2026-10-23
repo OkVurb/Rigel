@@ -26,7 +26,7 @@ use rigel_core::{
     MemoryFile, MemoryService, Model, OpenRouterModel, POLL_INTERVAL, Patch, PatchPipeline,
     ResumeOutcome, Scopes, Session, SessionService, SkillDetail, SkillIndex, SkillsError, StopAt,
     Store, SubagentPolicy, SyncPolicy, TeamAgent, Tools, Turn, TurnQuote, TurnTranscript,
-    UnverifiedChange, Usage, WriteMode, credentials, skills::search::SearchHit,
+    UnverifiedChange, Usage, WriteMode, credentials, diagnostics, skills::search::SearchHit,
 };
 use serde::{Deserialize, Serialize};
 use tauri::{Emitter, State};
@@ -366,6 +366,93 @@ fn session_transcript(project: String, id: String) -> Result<Vec<TurnTranscript>
 }
 
 /// Reconcile a session with the tree and the patch journal (P3.11).
+#[derive(Debug, Clone, Serialize)]
+pub struct DiagnosticsBundle {
+    pub path: String,
+    pub body: String,
+}
+
+/// D82: assemble a diagnostics bundle only when the user clicks the action. It gathers the
+/// doctor-shaped facts this window can check, the newest turn and the local logs; every string
+/// is redacted with the provider keys before it is written, and nothing is sent anywhere.
+#[tauri::command]
+fn diagnostics_export(
+    project: String,
+    session: Option<String>,
+) -> Result<DiagnosticsBundle, String> {
+    tauri::async_runtime::block_on(async move {
+        let root = std::fs::canonicalize(&project).map_err(message)?;
+        let service = SessionService::open(&root).await.map_err(message)?;
+        let (integrity, schema) = diagnostics::database_health(service.pool()).await;
+
+        let mut chosen = match session {
+            Some(id) => service.get(&id).await.ok(),
+            None => None,
+        };
+        if chosen.is_none() {
+            chosen = service.list().await.ok().and_then(|mut all| {
+                all.sort_by_key(|session| std::cmp::Reverse(session.created_at));
+                all.into_iter().next()
+            });
+        }
+        let last_turn: Option<TurnTranscript> = match &chosen {
+            Some(session) => service
+                .transcript(&session.id)
+                .await
+                .ok()
+                .and_then(|mut turns| turns.pop()),
+            None => None,
+        };
+
+        let data_dir = index_dir();
+        let keys: serde_json::Map<String, serde_json::Value> = credentials::PROVIDERS
+            .iter()
+            .map(|provider| {
+                (
+                    (*provider).to_string(),
+                    serde_json::json!(credentials::present(provider)),
+                )
+            })
+            .collect();
+        let doctor = serde_json::json!({
+            "app": {
+                "version": env!("CARGO_PKG_VERSION"),
+                "os": std::env::consts::OS,
+                "arch": std::env::consts::ARCH,
+            },
+            "project": root.display().to_string(),
+            "database": {
+                "integrity": integrity,
+                "schema": schema.iter().map(|(version, name)| serde_json::json!({
+                    "version": version, "name": name
+                })).collect::<Vec<_>>(),
+            },
+            "keychain": credentials::available().is_ok(),
+            "keys_present": keys,
+            "crash_log": diagnostics::crash_log_path(&data_dir).display().to_string(),
+        });
+
+        let mut log = diagnostics::recent_crash(&data_dir);
+        if let Some(tail) = diagnostics::log_tail(&data_dir.join("logs/rigel.log"), 64 * 1024) {
+            if !log.is_empty() {
+                log.push('\n');
+            }
+            log.push_str(&tail);
+        }
+        if log.is_empty() {
+            log.push_str("No local log or crash record has been written yet.");
+        }
+
+        let secrets = diagnostics::secrets();
+        let body = diagnostics::assemble(&doctor, last_turn.as_ref(), &log, &secrets);
+        let path = diagnostics::write_bundle(&data_dir, &body).map_err(message)?;
+        Ok(DiagnosticsBundle {
+            path: path.display().to_string(),
+            body,
+        })
+    })
+}
+
 #[tauri::command]
 fn session_resume(project: String, id: String, force: bool) -> Result<ResumeOutcome, String> {
     tauri::async_runtime::block_on(async move {
@@ -1309,6 +1396,8 @@ fn servers_start(project: Option<String>) {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // D82: a panic writes a redacted record beside the app data before the window disappears.
+    diagnostics::install_crash_hook(index_dir());
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
@@ -1330,6 +1419,7 @@ pub fn run() {
             session_get,
             session_transcript,
             session_resume,
+            diagnostics_export,
             agent_list,
             agent_team,
             agent_spawn,

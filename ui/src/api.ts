@@ -42,6 +42,12 @@ export interface Settings {
   effort: string;
 }
 
+/** D82: an opt-in, local-only diagnostics bundle. Nothing leaves the machine. */
+export interface DiagnosticsBundle {
+  path: string;
+  body: string;
+}
+
 /** Live state of the local OmniRoute router. `origin` is where it listens. */
 export interface OmnirouteStatus {
   running: boolean;
@@ -830,6 +836,15 @@ export const api = {
   async saveSettings(settings: Settings): Promise<Settings> {
     if (!isTauri()) return settings;
     return call<Settings>("settings_set", { settings });
+  },
+
+  /** Assemble the diagnostics bundle on demand; it is written locally and returned for copying. */
+  async exportDiagnostics(project: string, session: string | null): Promise<DiagnosticsBundle> {
+    if (!isTauri()) {
+      const body = "# Rigel diagnostics\n\nThe browser preview has no database or logs.";
+      return { path: "(browser preview)", body };
+    }
+    return call<DiagnosticsBundle>("diagnostics_export", { project, session });
   },
 
   /** The provider's live model catalogue for the picker. */

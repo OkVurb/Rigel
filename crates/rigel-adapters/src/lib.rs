@@ -80,6 +80,75 @@ pub fn redact(value: &str, secrets: &[Secret]) -> String {
     })
 }
 
+/// A streaming redactor with a bounded hold-back window (D78).
+///
+/// Redacting each chunk independently leaks a credential split across two deltas: the first
+/// chunk carries a prefix that matches nothing, and the completed string only exists after the
+/// second. This holds back the longest suffix that could still become a secret (at most the
+/// longest secret's length) and flushes it once the next chunk proves it is safe, or at end of
+/// stream. Nothing that is part of a secret reaches a rendered event.
+pub struct StreamRedactor<'a> {
+    secrets: &'a [Secret],
+    pending: String,
+    longest: usize,
+}
+
+impl<'a> StreamRedactor<'a> {
+    pub fn new(secrets: &'a [Secret]) -> Self {
+        let longest = secrets
+            .iter()
+            .map(|secret| secret.expose().chars().count())
+            .max()
+            .unwrap_or(0);
+        Self {
+            secrets,
+            pending: String::new(),
+            longest,
+        }
+    }
+
+    /// Append one chunk and return the part that is now safe to render, already redacted.
+    pub fn push(&mut self, chunk: &str) -> String {
+        self.pending.push_str(chunk);
+        let cut = self.safe_prefix_len();
+        if cut == 0 {
+            return String::new();
+        }
+        let safe: String = self.pending.drain(..cut).collect();
+        redact(&safe, self.secrets)
+    }
+
+    /// Flush the held tail at end of stream.
+    pub fn finish(&mut self) -> String {
+        let tail = std::mem::take(&mut self.pending);
+        redact(&tail, self.secrets)
+    }
+
+    /// The byte index before the longest suffix that is a prefix of some secret.
+    fn safe_prefix_len(&self) -> usize {
+        let text = &self.pending;
+        if self.longest == 0 {
+            return text.len();
+        }
+        let max = self.longest.min(text.len());
+        for hold in (1..=max).rev() {
+            let cut = text.len() - hold;
+            if !text.is_char_boundary(cut) {
+                continue;
+            }
+            let suffix = &text[cut..];
+            if self
+                .secrets
+                .iter()
+                .any(|secret| secret.expose().starts_with(suffix))
+            {
+                return cut;
+            }
+        }
+        text.len()
+    }
+}
+
 /// [`redact`] over every string inside a JSON value. Item bodies carry raw tool input from the
 /// harness, so the same rule that protects event text has to apply before one is emitted.
 pub fn redact_json(value: &Value, secrets: &[Secret]) -> Value {
@@ -281,4 +350,61 @@ pub trait Adapter: Send + Sync {
     /// Version, path, auth mode and capabilities. Cached in `adapters.json`, re-probed
     /// when the binary's mtime changes.
     async fn probe(&self) -> Result<HarnessInfo, AdapterError>;
+}
+
+#[cfg(test)]
+mod stream_tests {
+    use super::*;
+
+    fn secret(value: &str) -> Secret {
+        Secret::new(value)
+    }
+
+    #[test]
+    fn a_secret_split_across_chunks_never_reaches_an_event() {
+        let secrets = vec![secret("sk-very-secret-value")];
+        let mut stream = StreamRedactor::new(&secrets);
+        let mut rendered = String::new();
+        for chunk in ["before sk-very-", "secret-", "value after"] {
+            rendered.push_str(&stream.push(chunk));
+        }
+        rendered.push_str(&stream.finish());
+        assert_eq!(rendered, "before <redacted> after");
+        assert!(!rendered.contains("sk-"));
+    }
+
+    #[test]
+    fn a_non_secret_prefix_is_released_without_waiting_for_the_end() {
+        let secrets = vec![secret("sk-aaaaaaaa")];
+        let mut stream = StreamRedactor::new(&secrets);
+        assert_eq!(stream.push("hello "), "hello ");
+        assert_eq!(stream.push("sk-"), "");
+        assert_eq!(stream.push("world"), "sk-world");
+        assert_eq!(stream.finish(), "");
+    }
+
+    #[test]
+    fn a_whole_secret_ending_a_chunk_is_held_until_the_next_one() {
+        let secrets = vec![secret("abcd")];
+        let mut stream = StreamRedactor::new(&secrets);
+        assert_eq!(stream.push("xxabcd"), "xx");
+        assert_eq!(stream.finish(), "<redacted>");
+    }
+
+    #[test]
+    fn multibyte_text_keeps_its_boundaries() {
+        let secrets = vec![secret("sk-ééé")];
+        let mut stream = StreamRedactor::new(&secrets);
+        let mut rendered = stream.push("héllo wörld");
+        rendered.push_str(&stream.finish());
+        assert_eq!(rendered, "héllo wörld");
+    }
+
+    #[test]
+    fn empty_secret_list_passes_everything_through() {
+        let secrets: Vec<Secret> = Vec::new();
+        let mut stream = StreamRedactor::new(&secrets);
+        assert_eq!(stream.push("plain"), "plain");
+        assert_eq!(stream.finish(), "");
+    }
 }

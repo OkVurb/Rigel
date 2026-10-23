@@ -11,6 +11,8 @@ import { ModelControls } from "./modelpicker";
 
 interface Props {
   keys: KeyStatus | null;
+  project: string | null;
+  session: string | null;
   onKeys: (status: KeyStatus) => void;
   onNotice: (notice: string) => void;
 }
@@ -232,7 +234,7 @@ function HarnessKeyRow({
  * OmniRoute has a second axis OpenRouter does not: the router is a process on this machine,
  * so this screen reports whether it is answering and can start it.
  */
-export default function SettingsView({ keys, onKeys, onNotice }: Props) {
+export default function SettingsView({ keys, project, session, onKeys, onNotice }: Props) {
   const [value, setValue] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -242,6 +244,8 @@ export default function SettingsView({ keys, onKeys, onNotice }: Props) {
   const [serverBusy, setServerBusy] = useState(false);
   const [harnesses, setHarnesses] = useState<HarnessInfo[] | null>(null);
   const [probing, setProbing] = useState(false);
+  const [diagnostics, setDiagnostics] = useState<{ path: string; body: string } | null>(null);
+  const [exporting, setExporting] = useState(false);
 
   const provider = settings?.provider ?? "omniroute";
   const providerInfo = PROVIDERS.find((item) => item.id === provider) ?? PROVIDERS[0];
@@ -282,6 +286,24 @@ export default function SettingsView({ keys, onKeys, onNotice }: Props) {
   const applyKeys = (status: KeyStatus) => {
     onKeys(status);
     void refreshHarnesses();
+  };
+
+  const exportDiagnostics = async () => {
+    if (!project) {
+      onNotice("Open a project first — diagnostics include its database check and last turn.");
+      return;
+    }
+    setExporting(true);
+    try {
+      const bundle = await api.exportDiagnostics(project, session);
+      setDiagnostics(bundle);
+      await navigator.clipboard?.writeText(bundle.body).catch(() => undefined);
+      onNotice(`Diagnostics written to ${bundle.path}`);
+    } catch (failure) {
+      onNotice(failure instanceof Error ? failure.message : "Could not assemble diagnostics.");
+    } finally {
+      setExporting(false);
+    }
   };
 
   const choose = async (id: string) => {
@@ -579,6 +601,43 @@ export default function SettingsView({ keys, onKeys, onNotice }: Props) {
               />
             ))}
           </div>
+        </section>
+
+        <section className="settings-section">
+          <div className="settings-head">
+            <h3>Diagnostics</h3>
+            <span className="pill cancelled">never sent</span>
+          </div>
+          <p className="fine">
+            Gathers the database check, the newest turn and the local log into one redacted
+            bundle under the app data folder. The same text is copied to the clipboard. Nothing
+            is uploaded and no request is made to assemble it.
+          </p>
+          <div className="settings-actions">
+            <button
+              className="primary"
+              onClick={() => void exportDiagnostics()}
+              disabled={exporting || !project}
+            >
+              {exporting ? "Assembling…" : "Export diagnostics"}
+            </button>
+            {diagnostics ? (
+              <button
+                className="chip"
+                onClick={() => {
+                  void navigator.clipboard?.writeText(diagnostics.body);
+                  onNotice("Diagnostics bundle copied.");
+                }}
+              >
+                Copy again
+              </button>
+            ) : null}
+          </div>
+          {diagnostics ? (
+            <p className="fine mono">{diagnostics.path}</p>
+          ) : (
+            <p className="fine">Open a project to enable the export.</p>
+          )}
         </section>
 
         <section className="settings-section">

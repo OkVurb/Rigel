@@ -483,6 +483,8 @@ impl AcpClient {
         let started = Instant::now();
         let deadline = TokioInstant::now() + self.timeout;
         let mut text_out = String::new();
+        let mut message_stream = crate::StreamRedactor::new(&self.secrets);
+        let mut thought_stream = crate::StreamRedactor::new(&self.secrets);
         let mut usage = None;
         let stop_reason;
 
@@ -550,7 +552,12 @@ impl AcpClient {
                     if from.as_deref().is_some_and(|from| from != session_id) {
                         continue;
                     }
-                    if let Some(event) = self.normalise(update, &mut text_out) {
+                    if let Some(event) = self.normalise(
+                        update,
+                        &mut text_out,
+                        &mut message_stream,
+                        &mut thought_stream,
+                    ) {
                         if let AcpEvent::Usage {
                             used,
                             size,
@@ -567,6 +574,15 @@ impl AcpClient {
                     }
                 }
             }
+        }
+
+        let thought_tail = thought_stream.finish();
+        if !thought_tail.is_empty() {
+            on_event(AcpEvent::ThoughtDelta { text: thought_tail });
+        }
+        let message_tail = message_stream.finish();
+        if !message_tail.is_empty() {
+            on_event(AcpEvent::MessageDelta { text: message_tail });
         }
 
         Ok(AcpTurn {
@@ -653,7 +669,13 @@ impl AcpClient {
         crate::redact(value, &self.secrets)
     }
 
-    fn normalise(&self, update: Value, text: &mut String) -> Option<AcpEvent> {
+    fn normalise(
+        &self,
+        update: Value,
+        text: &mut String,
+        message_stream: &mut crate::StreamRedactor<'_>,
+        thought_stream: &mut crate::StreamRedactor<'_>,
+    ) -> Option<AcpEvent> {
         let kind = update
             .get("sessionUpdate")
             .and_then(Value::as_str)
@@ -662,13 +684,16 @@ impl AcpClient {
         let text_of = |value: &Value| value.as_str().map(|text| self.redact(text));
         match kind.as_str() {
             "agent_message_chunk" => {
-                let chunk = text_of(&update["content"]["text"])?;
-                text.push_str(&chunk);
-                Some(AcpEvent::MessageDelta { text: chunk })
+                let raw = update["content"]["text"].as_str()?;
+                text.push_str(raw);
+                let safe = message_stream.push(raw);
+                (!safe.is_empty()).then_some(AcpEvent::MessageDelta { text: safe })
             }
-            "agent_thought_chunk" => Some(AcpEvent::ThoughtDelta {
-                text: text_of(&update["content"]["text"]).unwrap_or_default(),
-            }),
+            "agent_thought_chunk" => {
+                let raw = update["content"]["text"].as_str()?;
+                let safe = thought_stream.push(raw);
+                (!safe.is_empty()).then_some(AcpEvent::ThoughtDelta { text: safe })
+            }
             "tool_call" => {
                 let kind = update
                     .get("kind")

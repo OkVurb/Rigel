@@ -507,6 +507,17 @@ Everything except the certificate is consistent; D109 blocks the rest.
   bodies are shown before first use, and scripts still ask.
 - **Verification gets its own harness** (D118), and support stays asynchronous (D119).
 
+**Round-6 safety pair (23 Oct 2026):** D78 and D82 are code, not notes. `StreamRedactor` in
+`crates/rigel-adapters/src/lib.rs` holds back the longest suffix that could still become a secret
+(at most a full secret's length, not length − 1: a chunk ending exactly on a secret must not leak
+its first byte), and Claude, Codex and ACP deltas all pass through it; tests cover a secret split
+across three chunks, a multibyte boundary and the flush at end of turn. D82 adds
+`rigel_core::diagnostics`: an opt-in Markdown bundle with the database integrity check, schema
+versions, the newest turn, key-presence only, and a redacted log tail, written under
+`<app data>/diagnostics/` and copied to the clipboard; a panic hook appends a redacted record to
+`<app data>/crash.log`. Settings gains the action, and nothing is sent anywhere. The two remaining
+open items are unchanged: P7.5 needs a trusted certificate and P7.9 needs a clean boot.
+
 **Environment facts a fresh agent will trip over:** the debug app loads `http://localhost:5173`, so
 `npm --prefix ui run dev` must be running before `cargo run -p rigel-app`; `vendor/agentchattr`
 and `.mcp.json` are local-only; never launch agents with `vendor/agentchattr/windows/*.bat`

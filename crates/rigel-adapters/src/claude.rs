@@ -220,6 +220,7 @@ impl ClaudeAdapter {
             });
         }
         let secrets = self.config.env.values().cloned().collect::<Vec<_>>();
+        let mut stream = crate::StreamRedactor::new(&secrets);
         let started = Instant::now();
 
         let mut command = self.command();
@@ -307,13 +308,18 @@ impl ClaudeAdapter {
                     Step::Delta(delta) => {
                         emitted = true;
                         text.push_str(&delta);
-                        on_event(ClaudeEvent::Delta {
-                            text: crate::redact(&delta, &secrets),
-                        });
+                        let safe = stream.push(&delta);
+                        if !safe.is_empty() {
+                            on_event(ClaudeEvent::Delta { text: safe });
+                        }
                     }
                     Step::Message(message) => {
                         emitted = true;
                         text = message.clone();
+                        let tail = stream.finish();
+                        if !tail.is_empty() {
+                            on_event(ClaudeEvent::Delta { text: tail });
+                        }
                         on_event(ClaudeEvent::Message {
                             text: crate::redact(&message, &secrets),
                         });

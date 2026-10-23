@@ -519,7 +519,13 @@ ${task}`,
           onChooseProject={() => void chooseFolder()}
         />
       ) : view === "settings" ? (
-        <SettingsView keys={keys} onKeys={setKeys} onNotice={setNotice} />
+        <SettingsView
+          keys={keys}
+          project={sessionProject}
+          session={activeSession?.id ?? null}
+          onKeys={setKeys}
+          onNotice={setNotice}
+        />
       ) : (
       <>
       <aside className="list-pane">

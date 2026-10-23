@@ -9,6 +9,7 @@ pub mod attribute;
 pub mod budget;
 pub mod claims;
 pub mod credentials;
+pub mod diagnostics;
 pub mod domain;
 pub mod memory;
 pub mod migrate;
