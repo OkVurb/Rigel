@@ -31,10 +31,10 @@
 </p>
 
 <p align="center">
-  <img src="screenshots/rigel-demo.gif" width="800" alt="A loop through the Rigel window: the session turn, the shell, the evidence table and targets" />
+  <img src="screenshots/rigel-demo.gif" width="800" alt="Screen recording of the Rigel window: the agent roster and a session turn waiting on approval, a typed prompt, the agents' chat room, the provider and harness settings, then the skill shelf" />
 </p>
 
-<p align="center"><sub>Session · the shell · evidence · targets</sub></p>
+<p align="center"><sub>Recorded from the running window: session · chat · settings · shelf</sub></p>
 
 ## 💡 Why Rigel
 
