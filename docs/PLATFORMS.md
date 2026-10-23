@@ -19,8 +19,14 @@ What a Windows build includes:
 
 ```powershell
 cargo install tauri-cli --version "^2" --locked
+cd crates/rigel-app
 cargo tauri build
 ```
+
+Run it from `crates/rigel-app`: Tauri executes `beforeBuildCommand` one level above the app
+directory (`crates/`), which is why the committed hook says `npm --prefix ../ui run build`. From
+the repository root the hook resolves the wrong directory and the build fails loudly rather than
+shipping a stale `ui/dist`.
 
 The output lands in `target/release/bundle/msi` and `target/release/bundle/nsis`. The bundle config
 lives in [crates/rigel-app/tauri.conf.json](../crates/rigel-app/tauri.conf.json): `msi` and `nsis`
@@ -28,21 +34,62 @@ targets, `webviewInstallMode: downloadBootstrapper` (silent), downgrades refused
 
 ### Signing
 
-Signing is configured on the build machine, never committed.
+Signing happens on the build machine, never in this repository: the certificate and the update key
+belong to the release operator.
 
 ```powershell
-$env:TAURI_SIGNING_PRIVATE_KEY = "…"          # release-manifest signing key (rigel update)
-$env:TAURI_SIGNING_PRIVATE_KEY_PASSWORD = "…"
-# Authenticode, through a certificate already in the user's store:
-$env:RIGEL_CERT_THUMBPRINT = "…"               # see the signCommand below
 cargo tauri build
+
+# Authenticode over MSI and NSIS output, then verification of every file
+$env:RIGEL_CERT_THUMBPRINT = "…"        # thumbprint of a code-signing certificate in this store
+.\scripts\sign-installers.ps1
+
+# or, for a PFX you import first, and without a timestamp when offline
+.\scripts\sign-installers.ps1 -Thumbprint A1B2… -NoTimestamp
+
+# no certificate at hand? still prove the build produced installers
+.\scripts\sign-installers.ps1 -VerifyOnly
 ```
 
-Tauri's `bundle.windows.certificateThumbprint`, `digestAlgorithm` and `timestampUrl` fields are the
-supported way to sign; they are deliberately absent from the committed config so a clone cannot
-sign with someone else's identity. A build without a certificate produces an **unsigned**
-installer, and the release notes say so. `rigel update verify` checks the artifact hash and the
-manifest signature; Windows SmartScreen checks the Authenticode signature separately.
+`sign-installers.ps1` finds `signtool.exe` in the installed Windows SDK, signs with SHA-256 and a
+timestamp, and then verifies each artifact. It reports `ok trusted` for a CA-issued certificate and
+`note signed but chain untrusted` for a self-signed test one — a release must show `ok trusted` for
+every file, and the script exits non-zero when a file has no signature at all.
+
+Tauri's own `bundle.windows.certificateThumbprint` and `signCommand` do the same thing inside
+`cargo tauri build`; they are deliberately absent from the committed config because a thumbprint is
+machine-specific and a clone must not sign with someone else's identity. A build with no
+certificate produces an **unsigned** installer, and the release notes say so. `rigel update verify`
+checks the artifact hash and the manifest signature; Windows SmartScreen checks the Authenticode
+signature separately.
+
+The certificate is a Windows code-signing certificate with its private key in
+`Cert:\CurrentUser\My` (or `Cert:\LocalMachine\My`). An organization-issued or EV certificate is
+required for SmartScreen reputation; a self-signed one only proves the pipeline, not the trust.
+
+### Exit test on a clean machine (P7.9)
+
+`scripts/p7-exit-test.sh` covers what a developer machine can prove. The rest runs on a clean
+Windows VM, from an elevated prompt:
+
+```powershell
+.\scripts\p7-vm-check.ps1 `
+  -Msi .	argeteleaseundle\msi\Rigel_0.1.0_x64_en-US.msi `
+  -Rigel C:	oolsigel.exe
+```
+
+It checks the Windows build (17763+), that Node is absent, the MSI's signature, a silent install,
+that the WebView2 bootstrapper ran, that the window starts, `doctor`'s rows and exit code, one
+native turn offline, the offline shelf, and then uninstalls. Two lines stay `manual`: SmartScreen
+(only a browser-downloaded file is judged) and the look of the window on a fresh display.
+
+If no VM is at hand, Windows Sandbox is a real clean machine for the install itself: enable it once
+(`Enable-WindowsOptionalFeature -Online -FeatureName Containers-DisposableClientVM -All`, then
+restart) and `scripts/p7-sandbox.ps1` writes a throwaway `.wsb` that maps this checkout read-only and
+runs the same script at first logon. It gives a fresh Windows with no Rigel and no Node, which is
+what the install checks need; it is the host's build, so the 1809 floor and SmartScreen still need
+an image, and a signed build needs a certificate. `docs/qa/p7-acceptance.md` records which attempt
+proved what.
 
 The update public key is `update-pubkey.txt` in the data directory, or `RIGEL_UPDATE_PUBKEY`.
 `rigel update status` prints which one is in use, never the key itself.

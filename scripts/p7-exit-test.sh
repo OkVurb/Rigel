@@ -97,13 +97,40 @@ assert bundle["windows"]["webviewInstallMode"]["type"] == "downloadBootstrapper"
 assert bundle["windows"]["webviewInstallMode"]["silent"] is True
 assert bundle["windows"]["allowDowngrades"] is False
 assert bundle["publisher"]
+# The hook runs in `crates/`, so the UI is `../ui` from there; without it the build ships a stale
+# ui/dist or fails (both seen during P7.5).
+assert config["build"]["beforeBuildCommand"] == "npm --prefix ../ui run build"
 print("configured")
 PY
 check "msi + nsis, silent WebView2 bootstrapper, no downgrades" "$?" "0"
-if [ -n "${TAURI_SIGNING_PRIVATE_KEY:-}" ] || [ -n "${RIGEL_CERT_THUMBPRINT:-}" ]; then
-  echo "  ok    a signing key is configured in this environment"
+
+echo "p7: the signing script"
+# The certificate is never here, but its absence must be a clean refusal, and a signature must be
+# checked rather than assumed: those two rules are what `sign-installers.ps1` has to get right.
+if command -v powershell >/dev/null 2>&1; then
+  sign="$root/scripts/sign-installers.ps1"
+  check "the signing script exists" "$([ -f "$sign" ] && echo yes || echo no)" "yes"
+  mkdir -p "$tmp/bundle/msi"
+  : > "$tmp/bundle/msi/dummy.msi"
+  set +e
+  powershell -NoProfile -ExecutionPolicy Bypass -File "$sign" -VerifyOnly     -BundleDir "$(cygpath -w "$tmp/bundle")" >/dev/null 2>&1
+  unsigned=$?
+  powershell -NoProfile -ExecutionPolicy Bypass -File "$sign" -VerifyOnly     -BundleDir "$(cygpath -w "$tmp/absent")" >/dev/null 2>&1
+  absent=$?
+  RIGEL_CERT_THUMBPRINT= powershell -NoProfile -ExecutionPolicy Bypass -File "$sign"     -BundleDir "$(cygpath -w "$tmp/bundle")" >/dev/null 2>&1
+  nocert=$?
+  set -e
+  check "an unsigned artifact is a failure, not a note" "$unsigned" "1"
+  check "a missing bundle directory is a usage error" "$absent" "2"
+  check "signing without a certificate refuses" "$nocert" "2"
 else
-  note "installer signing needs a certificate: TAURI_SIGNING_PRIVATE_KEY / RIGEL_CERT_THUMBPRINT"
+  note "powershell is not on this machine; the signing script's checks were skipped"
+fi
+
+if [ -n "${RIGEL_CERT_THUMBPRINT:-}" ]; then
+  echo "  ok    a signing certificate is configured in this environment"
+else
+  note "the release needs a code-signing certificate: RIGEL_CERT_THUMBPRINT"
 fi
 note "run the signed MSI on a clean Windows 10 1809 VM with no WebView2, then open a repo, the shelf and one task"
 
@@ -179,3 +206,6 @@ if [ "$fail" -ne 0 ]; then
   exit 1
 fi
 echo "p7 passed in this environment ($manual manual step(s) left: clean VM, signing, SmartScreen)"
+echo "the rest: scripts/p7-vm-check.ps1 on a Windows 10 1809 VM, or scripts/p7-sandbox.ps1"
+echo "for a fresh Windows Sandbox (one restart after enabling Containers-DisposableClientVM);"
+echo "docs/qa/p7-acceptance.md records which attempt proved what."

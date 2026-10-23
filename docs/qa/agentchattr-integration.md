@@ -223,6 +223,33 @@ because the app is native; note `chat_status` needs an open project (or
 
 ### Remaining
 
+#### A ten-minute check for whoever has a Claude subscription (Claude TUI)
+
+Both open checks in the handoff need a person and a machine this checkout is not. Neither takes
+long; the exact steps are here so the result can be recorded without re-deriving them.
+
+**Claude's own TUI shows the rigel tools.** Needs an `ANTHROPIC_API_KEY`, a project with
+`.mcp.json`, and a terminal.
+
+1. `rigel agent trust --project <project>` — writes `.claude/settings.local.json` and the
+   `~/.claude.json` entry; a second run must say `unchanged`.
+2. `claude` in that project (a *new* session: trust is read at startup, so a running TUI keeps its
+   old list), then `/mcp` and confirm the server is connected.
+3. Ask it to call `rigel_budget` and `rigel_who`.
+4. Record the outcome here: either "six tools, both calls answered" — which closes the handoff's
+   last QA line — or the list Claude actually shows, which is a Claude Code limitation to automate
+   around (`--allowedTools`, `--strict-mcp-config`), not a Rigel bug.
+
+**The live room check** needs a checkout that has `vendor/agentchattr` (absent here) or
+`RIGEL_AGENTCHAT_DIR` pointing at one.
+
+1. `rigel doctor --project <project>` and confirm the chat row reports the checkout it found.
+2. In the window: open the project, Chat tab, **Start the chat server**; status must read
+   `running: true, authed: true`.
+3. Mention two agents in the composer; each must answer in the stream, and the roster pills must
+   match what the server reports.
+4. Record it in this file with the date and the versions printed by the roster.
+
 - Claude TUI tool exposure (above): the trust files are automated (22 Oct); confirming the six tools
   inside a running TUI still needs one human look after a restart.
 - `.mcp.json` now carries one server (`rigel-claude`); if a future workflow wants per-agent

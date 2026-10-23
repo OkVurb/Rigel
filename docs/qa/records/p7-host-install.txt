@@ -1,0 +1,25 @@
+p7-vm: this machine
+  info  Windows 26H2 (build 26300), WebView2 155.0.4283.62
+  ok    Windows 10 1809 or newer (build 17763+) (build 26300)
+  FAIL  no Node.js on PATH (C:\Program Files\nodejs\node.exe)
+  ok    the check's own work dir needs no node_modules
+p7-vm: the installer
+  ok    the MSI exists (%REPO%\target\release\bundle\msi\Rigel_0.1.0_x64_en-US.msi)
+  FAIL  the MSI carries an Authenticode signature (unsigned)
+  ok    elevated prompt (msiexec installs for all users)
+  ok    msiexec finished (exit 0)
+  ok    the app is installed (C:\Program Files\Rigel\rigel-app.exe)
+  ok    the WebView2 bootstrapper ran (155.0.4283.62)
+  ok    the window starts on this machine (pid 49672)
+  manual look at the window: one project tab, the Shelf, and no missing-runtime error
+p7-vm: the CLI and one native task
+  ok    the CLI exists (%REPO%\target\release\rigel.exe)
+  ok    doctor made no failure row (failures 0)
+  ok    doctor's exit code matches its rows (status 1)
+  ok    one native turn completed offline (status 0)
+  ok    the turn is in the transcript
+  ok    the shelf answers offline (status 0)
+p7-vm: uninstall
+  ok    msiexec removed the app (exit 0)
+
+p7-vm: FAILED

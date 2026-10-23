@@ -161,7 +161,7 @@ replace the localStorage notes above.
 | **P4.2** Per-agent API keys | `crates/rigel-core/src/credentials.rs`, `crates/rigel-adapters/src/codex.rs`, `ui/src/settings.tsx` | env-first test store; per-spawn redacted env injection; honest `ApiKey` / `Subscription` / `None` probe; pre-spawn refusal and first-event child kill in `tests/codex.rs`. Direct Codex resolves `rigel/openai`; only the local OmniRoute endpoint on port 20128 resolves `rigel/omniroute`, still injected as `OPENAI_API_KEY` because that is the name Codex accepts. Review fix: the provider now names that variable with `env_key` and leaves `requires_openai_auth` off, so Codex cannot fall back to the ChatGPT login — `45ac7e7`, `27377b3` |
 | **P4.5** Codex adapter | `crates/rigel-adapters/src/codex.rs` | app-server primary, `exec --json` fallback that never re-runs a turn which already produced tokens, per-turn usage from `thread/tokenUsage/updated`; `tests/codex.rs` (4) against `tests/fixtures/fake_codex.rs`; real turn 21 Oct — 155,894 in / 5 out — `7b3c2fb` |
 | `rigel codex` CLI | `crates/rigel-cli/src/harness.rs` | `probe --json` reports 0.162.1 and an absolute path; `run --json` returns text, transport, fallback flag and usage |
-| **P4.6** Claude adapter | `crates/rigel-adapters/src/claude.rs`, `tests/claude.rs`, `tests/fixtures/fake_claude.rs` | NDJSON stream normalised into `Started` / `Delta` / `Message` / `Notice`; per-turn usage and `total_cost_usd`; argv, cwd and stream shapes pinned by 11 tests (prompt on argv, key never on argv, `--bare` present, subscription identity killed, key redacted out of every event, blocked turn surfaced, silent non-zero exit refused, a truncated stream without a `result` line rejected, an init line with no `apiKeySource` refused). Probe reports 2.1.251 against the real CLI. `rigel claude probe|run` is the turn loop (P4.6/P4.10): the MCP config is written per run, the approval is answered on stdin and the bill keeps the provider's own cost |
+| **P4.6** Claude adapter | `crates/rigel-adapters/src/claude.rs`, `tests/claude.rs`, `tests/fixtures/fake_claude.rs` | NDJSON stream normalised into `Started` / `Delta` / `Message` / `Notice`; per-turn usage and `total_cost_usd`; argv, cwd and stream shapes pinned by 11 tests (prompt on argv, key never on argv, `--bare` present, subscription identity killed, key redacted out of every event, blocked turn surfaced, silent non-zero exit refused, a truncated stream without a `result` line rejected, an init line with no `apiKeySource` refused). Probe reports 2.1.251 against the real CLI. `rigel claude probe|run` is the turn loop (P4.6/P4.10): the MCP config is written per run, the approval is answered on stdin and the bill keeps the provider's own cost. The window sends one too: `turn_send` creates the row, returns it, then adopts that same row, streams `Delta`s and closes on `TurnFinished`, and the packaged binary hosts `rigel-app mcp` itself so `rigel_approve` reaches the card instead of a terminal — `crates/rigel-app/src/claude.rs`, `crates/rigel-adapters/src/turn.rs`, `crates/rigel-app/tests/mcp_mode.rs` (a real child process, the question answered on the bus) |
 | **P4.3** ACP client | `crates/rigel-adapters/src/acp.rs`, `tests/acp.rs`, `tests/fixtures/fake_acp.rs` | JSON-RPC v1 client for `agent acp` / `cline --acp`; initialize → session/new → session/prompt; `session/update` normalised into message, thought, tool-call, plan, usage, notice and `unmapped` events; `session/request_permission` routed to an `Approver` and answered only with an option the agent offered, otherwise `cancelled`; 9 tests against a scripted agent (approval outcome on the wire, unoffered allow downgraded, protocol 99 refused, hung turn cancelled and acknowledged, a pending approval answered `cancelled`, relative cwd refused, no key no spawn) |
 
 ### 2.8 Multi-agent chat — the P6 probe, verified 21–22 Oct 2026
@@ -353,21 +353,76 @@ longer renders as `$ ?` with a failure style. `scripts/p4-exit-test.sh` (run twi
 
 What is still open, in the order it should be taken:
 
-1. **Claude runs from the CLI but not from the window.** `rigel claude probe|run` now drives a real
-   session turn, writes the MCP config naming this build, answers `rigel_approve` from stdin while
-   the turn runs, and records the prompt, items, provider cost and a priced `Usage` row. What is
-   still missing is the app path: no Tauri command spawns Claude, so the window can read a Claude
-   turn only after the CLI wrote one.
+1. ~~**Claude runs from the CLI but not from the window.**~~ **Closed 22 Oct.** `turn_send` now
+   adopts the row it returned to the renderer, runs the adapter on its own thread, streams `Delta`s
+   and closes on `TurnFinished`; the packaged binary hosts the stdio server itself
+   (`rigel-app mcp …`), so `rigel_approve` reaches the window's card rather than a terminal. The
+   recorder moved to `rigel-adapters` so the CLI and the window bill a turn the same way, and the
+   roster's `observed only` label now follows whether the window can actually send to that harness
+   (`native`, `claude`) — `crates/rigel-app/src/claude.rs`, `crates/rigel-adapters/src/turn.rs`,
+   `crates/rigel-app/tests/mcp_mode.rs`. **What that test does not prove:** nobody has watched a
+   live Claude turn arrive in the running window, which needs an Anthropic key and a person.
 2. **One human look at Claude's TUI.** The trust files are now written by a command, but the six
    tools inside a *running* interactive session have not been re-observed since; Claude reads trust
    at startup, so this needs a restart and a person. It is the last open line in the QA doc.
 3. **This checkout has no `vendor/agentchattr`**, so the live room check needs a machine that has the
    clone (or `RIGEL_AGENTCHAT_DIR`). The Chat tab now explains exactly that rather than failing at
    spawn time.
-4. **Phase 7's exit test needs a clean VM and a certificate** (P7.5, P7.9): a signed MSI installed on
-   10 1809 with no WebView2 present, a repo and one native task run there, and an Authenticode
-   signature SmartScreen accepts. `scripts/p7-exit-test.sh` prints those three as `manual` rather
-   than claiming them.
+4. **Phase 7's exit test needs a clean VM and a certificate** (P7.5, P7.9). The signing pipeline and
+   both installers exist; what is left is environmental: a certificate whose chain Windows trusts, a
+   Windows 10 1809 image, and a person for SmartScreen. **Run on 22 Oct, elevated:** the install path
+   is no longer unexecuted — `msiexec /i … /qn` exit 0, the payload at
+   `C:\Program Files\Rigel\rigel-app.exe`, the window alive after 20 s, one native turn and a shelf
+   search behind a dead proxy, `msiexec /x` exit 0 and the machine clean afterwards. The transcript
+   and the two fail-by-design rows are in `docs/qa/p7-acceptance.md`. Windows Sandbox is now enabled
+   (the restart after enabling it did not take; see the fifth-session note) and `scripts/p7-sandbox.ps1` runs the same acceptance inside it with the
+   checkout mapped read-only, which is the clean machine this host can provide; the 1809 floor and
+   SmartScreen still need an image, and `ok trusted` still needs a certificate — both certificate
+   stores were checked and are empty.
+
+**Review note (22 Oct 2026, third session):** the window can send a Claude turn (see item 1 above),
+so the roster's `observed only` label now follows sendability rather than "not native". P7.5 moved
+from "config only" to real artifacts: `cargo tauri build` produces the MSI (8.0 MiB) and the NSIS
+setup (5.4 MiB) from `crates/rigel-app`, and `scripts/sign-installers.ps1` signs and verifies them,
+exercised end to end with a throwaway self-signed certificate (unsigned → exit 1, signed → note
+about the untrusted chain, no certificate → exit 2). Two things were learned the hard way and are
+now pinned: Tauri runs `beforeBuildCommand` one level above the app directory, so building from the
+repository root resolved `../ui` to the wrong place — build from `crates/rigel-app`, as
+`docs/PLATFORMS.md` now says and `scripts/p7-exit-test.sh` asserts. P7.9's machine-checkable half is
+`scripts/p7-vm-check.ps1`: the build floor, Node's absence, the MSI signature, a silent install, the
+WebView2 bootstrapper, the window starting, `doctor`, one native turn offline, the shelf and an
+uninstall, with only SmartScreen and the look of the window left to a person.
+
+Gates after these changes, all green: `cargo test --workspace`, `cargo clippy --workspace
+--all-targets -- -D warnings`, `cargo fmt --all -- --check`, `npm --prefix ui run build`,
+`node scripts/handoff-status.mjs`, `scripts/p3..p7-exit-test.sh`, and `cargo tauri build`
+(MSI + NSIS). The MSI's payload was extracted with `msiexec /a` and contains `rigel-app.exe`
+(23 MB) — which is why `scripts/p7-vm-check.ps1` looks for any `*rigel*.exe` rather than `Rigel.exe`.
+
+**Review note (22 Oct 2026, fourth session):** the open items were narrowed to what is actually
+environmental. An elevated prompt made the install path runnable, so `scripts/p7-vm-check.ps1` ran
+with the MSI for the first time and passed every step a developer machine can pass — see
+`docs/qa/p7-acceptance.md`, which now separates what the host run proves, what a sandbox proves and
+what still needs an image. `Containers-DisposableClientVM` was enabled on this host (Hyper-V was
+already on), which needs one restart before `WindowsSandbox.exe` exists; `scripts/p7-sandbox.ps1`
+writes a `.wsb` with absolute paths at launch and `scripts/sandbox/p7-in-sandbox.ps1` runs the
+acceptance inside, so no machine-specific path is committed. The two rows that fail here fail by
+design: Node is installed, and the MSI is unsigned because neither certificate store holds a
+code-signing certificate after the throwaway one was removed. P7.5 and P7.9 stay open, with the
+reason recorded rather than a tick.
+
+**Review note (22 Oct 2026, fifth session):** the restart before this session did not happen.
+`LastBootUpTime` was still 17 Oct (five days of uptime), the most recent `Kernel-Boot` event 27 says
+boot type `0x1` (hiberboot) on 19 Oct, and CBS still reports `RebootPending`. `HiberbootEnabled=1`,
+so "shut down and start again" resumes a hibernated session and applies no servicing; only Restart
+does. The feature therefore reads `Enabled` while nothing is staged: no `WindowsSandbox.exe`, no
+provisioned or Store package (`winget search` finds none), so there is no no-reboot route and the
+run is one restart away. To make that restart enough on its own, `scripts/p7-sandbox.ps1 -DryRun` now
+prints the `.wsb` before the binary check (verified: two mounts, command line intact), and the
+one-shot `schtasks` task "Rigel P7.9 sandbox acceptance" runs the launcher 45 s after this user's
+next sign-in and deletes itself; exercised, it returns 2 plus `docs/qa/records/p7-sandbox-launch.log`
+while the sandbox is absent, and 0 once it launches. `docs/qa/p7-acceptance.md` holds the evidence
+and the command to arm it again after a failed boot.
 
 Environment facts a fresh agent will trip over: the debug app loads `http://localhost:5173`, so
 `npm --prefix ui run dev` must be running before `cargo run -p rigel-app`; `vendor/agentchattr`
@@ -1544,11 +1599,11 @@ egress outside an approved origin.
 - [x] **P7.2** Crash-recovery matrix: kill during patch apply, migration, install, checkpoint — each recovers cleanly — `crates/rigel-core/tests/recovery.rs` kills a migration (the version is unchanged), an install (the ledger keeps the decision and admits it never finished) and a checkpoint (resume closes the running turn); patch recovery is already driven through both `StopAt` windows in `guarantees.rs`, and the file says why a second copy would only test the copy
 - [x] **P7.3** Docs: README rewritten around the workspace, CONTRIBUTING, SECURITY (from §10), ARCHITECTURE — README leads with the five surfaces; `CONTRIBUTING.md` gives build, checks, layout and the rule for a schema change; `SECURITY.md` is the threat model with every network call and what is not defended; `ARCHITECTURE.md` describes the pieces, the two databases and a turn
 - [x] **P7.4** LICENSE chosen and applied — `MIT OR Apache-2.0`, in the workspace and every crate, with `LICENSE-MIT` and `LICENSE-APACHE` at the root; no contributor licence agreement and no telemetry to opt out of
-- [ ] **P7.5** Signed Windows installer; WebView2 bootstrapper; minimum Windows 10 1809 — **partly:** `crates/rigel-app/tauri.conf.json` builds MSI + NSIS with `downloadBootstrapper` (silent) and refuses downgrades, and `docs/PLATFORMS.md` states the 1809 floor with the environment-signing steps. No signed artifact exists: the Authenticode certificate and the manifest key live on the release machine, never in the repository
+- [ ] **P7.5** Signed Windows installer; WebView2 bootstrapper; minimum Windows 10 1809 — **partly:** `cargo tauri build` now produces both bundles on this machine (`Rigel_0.1.0_x64_en-US.msi`, 8.0 MiB; `Rigel_0.1.0_x64-setup.exe`, 5.4 MiB) from `crates/rigel-app/tauri.conf.json` (`msi` + `nsis`, `downloadBootstrapper` silent, downgrades refused). The build hook runs in `crates/`, not the config's directory, which is why it says `npm --prefix ../ui run build`; without that the UI never rebuilds. `scripts/sign-installers.ps1` signs both artifacts with `signtool` and then verifies them, and the pipeline was exercised end to end with a throwaway self-signed certificate: unsigned → `FAIL` (exit 1), signed → `note signed but chain untrusted (timestamped)` (exit 0), and signing with no certificate is a clean exit 2. `scripts/p7-exit-test.sh` pins those three behaviours. **Still open:** a CA-issued or EV certificate and the resulting `ok trusted` lines; the test-signed copies were deleted afterwards and the bundles rebuilt unsigned, so nothing misleading is installable. 22 Oct: both stores were enumerated (`Get-ChildItem Cert:\CurrentUser\My,Cert:\LocalMachine\My -CodeSigningCert`) and hold no code-signing certificate at all — the throwaway certificate from the exercise was removed again — so this machine cannot produce the `ok trusted` line whatever is run on it. `docs/PLATFORMS.md` has the operator steps
 - [x] **P7.6** macOS and Linux builds documented as unsupported-but-buildable, or marked `dropped` — `docs/PLATFORMS.md` records them as unsupported-but-buildable and names what is missing (no installer path, no keychain parity, no WebView2 equivalent)
 - [x] **P7.7** Update manifest with an opt-out switch and signature check (N5) — `crates/rigel-core/src/update.rs` verifies an Ed25519 manifest over `version / url / sha256` and then the artifact's hash; the switch defaults off, `rigel update enable` is the only thing that changes it, and nothing checks on a timer or at startup
 - [x] **P7.8** Migration note for anyone who used the prototype's localStorage index — `docs/migrating-prototype-index.md` plus `rigel skills import --from`; README's history note states that the `skilldb:` rows are historical and that nothing under `crates/` or `ui/` reads them
-- [ ] **P7.9** **Exit test:** clean Windows VM, signed build, open a repo, run the shelf, run one native task, `rigel doctor` green, no Node install, no unexpected network calls — **not done here:** `scripts/p7-exit-test.sh` proves what one machine can — doctor's exit code matches its own summary, the CLI's commands run on a PATH holding only the OS shell, doctor/tools/the shelf make no network call behind a dead proxy, the installer config and licence expression match, and a signed manifest verifies while a tampered one is refused. It then prints the three steps that need a clean VM and a certificate: the signed MSI on 1809 with no WebView2, a repo opened and a native task run there, and SmartScreen.
+- [ ] **P7.9** **Exit test:** clean Windows VM, signed build, open a repo, run the shelf, run one native task, `rigel doctor` green, no Node install, no unexpected network calls — **the runnable half is done, the clean-machine half is not.** `scripts/p7-exit-test.sh` proves what one machine can: doctor's exit code matches its own summary, the CLI's commands run on a PATH holding only the OS shell, doctor/tools/the shelf make no network call behind a dead proxy, the installer config and licence expression match, and a signed manifest verifies while a tampered one is refused. 22 Oct, from an elevated prompt, `scripts/p7-vm-check.ps1` then ran **with** the install: `msiexec /i … /qn` exit 0, the payload at `C:\Program Files\Rigel\rigel-app.exe`, the window still alive after 20 s, one native turn and a shelf search behind a dead proxy, `msiexec /x` exit 0, and no file or uninstall entry left behind. The transcript and the fail-by-design rows (Node present, unsigned MSI) are in `docs/qa/p7-acceptance.md` and `docs/qa/records/`. Windows Sandbox is enabled on this host, but the enable is still waiting for a real boot (Fast Startup hid the last one; see the fifth-session note), so `scripts/p7-sandbox.ps1` runs the same acceptance inside it with the checkout mapped read-only once `WindowsSandbox.exe` exists — and `scripts/p7-queue-sandbox.ps1` is armed to do exactly that at the next sign-in, which is the clean machine this host can actually provide. **Still open:** a signed build (P7.5), the 1809 build floor, a first install on an image with no WebView2, SmartScreen, and a person looking at the window — none of which this machine can produce.
 
 ### 11.1 Sequencing rationale
 
