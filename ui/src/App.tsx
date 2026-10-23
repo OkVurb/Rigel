@@ -430,7 +430,7 @@ ${task}`,
     <div
       className={`shell${view === "session" ? " session" : ""}${
         view === "settings" ? " settings" : ""
-      }`}
+      }${view === "diff" ? " diff" : ""}`}
     >
       <nav className="rail" aria-label="Primary">
         <div className="rail-brand" title="Rigel">

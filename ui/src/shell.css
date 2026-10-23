@@ -2293,6 +2293,13 @@ input {
 
 /* merged diff and conflicts (P5.6) */
 
+/* The merged diff is one page, not a list beside a detail: it renders only the
+   rail and its main. On the default 48px/320px/1fr tracks that main would be laid
+   into the 320px sidebar column, so give it the whole width. */
+.shell.diff {
+  grid-template-columns: 48px minmax(0, 1fr);
+}
+
 .diff-view {
   display: flex;
   flex-direction: column;
