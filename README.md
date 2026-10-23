@@ -329,6 +329,7 @@ A model turn needs a key; the deterministic scripted model drives the tests with
 - `node scripts/fix-cursor-hooks.mjs` — repair Cursor's project-relative hook paths
 - `node scripts/handoff-status.mjs` — checklist progress per phase; fails if the §11 summary table is stale
 - `node scripts/check-docs.mjs` — fails on a link or anchor in `README.md` or `docs/` that resolves nowhere, or an issue form GitHub would reject
+- `bash scripts/check-hygiene.sh` — fails if `ACTIVE-WORK.md` or a path under `tmp/` is committed; the pre-commit hook runs it too
 - `bash scripts/dev.sh` — local dev: the desktop shell under `infisical run --env=dev`, with the setup steps in [INFISICAL.md](INFISICAL.md)
 - `bash scripts/p3-exit-test.sh` — the Phase 3 exit test; needs a built `rigel` and `python`
 - `bash scripts/p5-exit-test.sh` — two agents on one file: conflict in two seconds, no "locked"
@@ -349,7 +350,8 @@ cargo test --workspace
 ```
 
 A schema change is a new numbered file in `migrations/` plus a `Migration` entry; an applied migration
-is never edited. Security reports go to `security@rigel.invalid`, as [SECURITY.md](SECURITY.md)
+is never edited. `git config core.hooksPath .githooks` enables the pre-commit hook, which runs the same
+hygiene check as CI. Security reports go to `security@rigel.invalid`, as [SECURITY.md](SECURITY.md)
 describes, and not to the issue tracker. A failing test is fixed by fixing the cause: no `#[ignore]`,
 no weakened assertion, no lint silenced with an `allow` attribute.
 
