@@ -1,10 +1,9 @@
 #!/usr/bin/env node
 // Fails when a document this repository publishes is no longer usable.
 //
-// GitHub renders the front door and the issue forms; nothing else tests them. A
-// relative link in README.md that names no file, an anchor that names no heading,
-// or an issue form with a field GitHub rejects fails here, offline, with no
-// dependencies.
+// GitHub renders the front door, the docs and the issue forms; nothing else tests
+// them. A relative link that names no file, an anchor that names no heading, or an
+// issue form with a field GitHub rejects fails here, offline, with no dependencies.
 //
 // The YAML reader below understands the subset issue forms are written in: block
 // mappings, block sequences, plain and quoted scalars, `|` and `>` blocks, and
@@ -182,9 +181,13 @@ function anchorOf(heading) {
     .replace(/ /g, "-");
 }
 
-function checkReadme() {
-  const file = "README.md";
-  const source = readFileSync(path.join(ROOT, file), "utf8");
+// Relative targets resolve against the file's own directory, which is what GitHub
+// does: two documents in different folders can both say `qa/p2.md` and mean
+// different things. An in-page anchor is checked against this file's headings; a
+// link that names another document is checked for existence, not for its anchor.
+function checkMarkdown(pathname) {
+  const file = path.relative(ROOT, pathname).split(path.sep).join("/");
+  const source = readFileSync(pathname, "utf8");
   const lines = source.replace(/\r\n?/g, "\n").split("\n");
   const anchors = new Map();
   let fence = null;
@@ -214,7 +217,7 @@ function checkReadme() {
       return;
     }
     const relative = decodeURIComponent(target.split("#")[0].split("?")[0]);
-    if (relative !== "" && !existsSync(path.join(ROOT, relative))) {
+    if (relative !== "" && !existsSync(path.join(path.dirname(pathname), relative))) {
       report(file, lineNumber, `link target ${target} does not exist`);
     }
   };
@@ -368,7 +371,7 @@ function parseTemplates() {
   for (const name of entries) {
     if (!/\.ya?ml$/.test(name)) continue;
     const file = path.join(TEMPLATES, name);
-    const shown = path.relative(ROOT, file);
+    const shown = path.relative(ROOT, file).split(path.sep).join("/");
     if (name !== "config.yml" && !name.endsWith(".yml")) {
       report(shown, null, "GitHub reads issue forms only from a .yml file");
       continue;
@@ -385,7 +388,20 @@ function parseTemplates() {
   }
 }
 
-checkReadme();
+function markdownFiles(directory) {
+  const found = [];
+  const entries = readdirSync(directory, { withFileTypes: true })
+    .sort((left, right) => left.name.localeCompare(right.name));
+  for (const entry of entries) {
+    const full = path.join(directory, entry.name);
+    if (entry.isDirectory()) found.push(...markdownFiles(full));
+    else if (entry.name.endsWith(".md")) found.push(full);
+  }
+  return found;
+}
+
+const documents = [path.join(ROOT, "README.md"), ...markdownFiles(path.join(ROOT, "docs"))];
+for (const document of documents) checkMarkdown(document);
 parseTemplates();
 
 if (problems.length > 0) {
@@ -393,5 +409,5 @@ if (problems.length > 0) {
   for (const problem of problems) console.error(`  ${problem}`);
   process.exitCode = 1;
 } else {
-  console.log("docs check: README links and anchors resolve, and every issue form is valid");
+  console.log(`docs check: ${documents.length} documents and every issue form are valid`);
 }

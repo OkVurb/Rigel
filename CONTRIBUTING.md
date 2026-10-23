@@ -29,8 +29,9 @@ cargo test --workspace
 node scripts/check-docs.mjs
 ```
 
-The last one is offline and needs no install: it reads `README.md` and the issue forms, and fails on a
-relative link or in-page anchor that names nothing, or a form GitHub would reject.
+The last one is offline and needs no install: it reads `README.md`, every Markdown file under `docs/`,
+and the issue forms. It fails on a relative link or in-page anchor that names nothing, or a form GitHub
+would reject.
 
 Run them before opening a pull request. A failing test is fixed by fixing the cause: no
 `#[ignore]`, no weakened assertion, no snapshot update without reading the diff, no `allow`

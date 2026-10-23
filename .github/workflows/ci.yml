@@ -69,6 +69,6 @@ jobs:
         with:
           node-version: 22
 
-      # Offline and dependency-free: reads README.md and the issue forms only.
-      - name: README links, anchors and issue forms
+      # Offline and dependency-free: reads README.md, docs/ and the issue forms only.
+      - name: Docs links, anchors and issue forms
         run: node scripts/check-docs.mjs
