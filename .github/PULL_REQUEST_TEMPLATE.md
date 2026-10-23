@@ -10,6 +10,7 @@
 - [ ] `cargo clippy --workspace --all-targets -- -D warnings`
 - [ ] `cargo test --workspace`
 - [ ] `(cd ui && npx tsc --noEmit && npm run build)`
+- [ ] `node scripts/check-docs.mjs`
 
 ## Checklist
 

@@ -60,3 +60,15 @@ jobs:
       - name: Handoff checklist
         run: node scripts/handoff-status.mjs
         working-directory: .
+
+  docs:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      # Offline and dependency-free: reads README.md and the issue forms only.
+      - name: README links, anchors and issue forms
+        run: node scripts/check-docs.mjs

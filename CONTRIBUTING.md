@@ -26,7 +26,11 @@ cargo fmt --check
 cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
 (cd ui && npx tsc --noEmit && npm run build)
+node scripts/check-docs.mjs
 ```
+
+The last one is offline and needs no install: it reads `README.md` and the issue forms, and fails on a
+relative link or in-page anchor that names nothing, or a form GitHub would reject.
 
 Run them before opening a pull request. A failing test is fixed by fixing the cause: no
 `#[ignore]`, no weakened assertion, no snapshot update without reading the diff, no `allow`
