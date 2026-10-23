@@ -1,0 +1,9 @@
+blank_issues_enabled: false
+
+contact_links:
+  - name: Security report
+    url: https://github.com/OkVurb/Rigel/blob/main/SECURITY.md
+    about: Do not open a public issue for a vulnerability. Email security@rigel.invalid with the version and a proof of concept.
+  - name: The build plan
+    url: https://github.com/OkVurb/Rigel/blob/main/docs/handoff.md
+    about: The architecture, the schemas, the non-negotiables and the phase checklist. Most "why is it like this?" answers are here.

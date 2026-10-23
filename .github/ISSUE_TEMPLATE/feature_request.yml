@@ -1,0 +1,70 @@
+name: Feature request
+description: Propose a capability, or a better way to do something that already exists.
+title: "[feat]: "
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        The plan and the reasons behind it live in
+        [handoff.md](https://github.com/OkVurb/Rigel/blob/main/docs/handoff.md). Read the
+        "Non-negotiables" table first: a proposal that contradicts one is a much harder sell than
+        one that fits.
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: The problem
+      description: What are you trying to do, and where does Rigel get in the way today? A workflow beats a feature name.
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: What you would like instead
+      description: The smallest change that would unblock you. A rough sketch of the interface is more useful than a spec.
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: What you tried or considered
+      description: Existing commands, another tool, or a workaround you are living with.
+
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      options:
+        - Session and the native agent
+        - Shelf and the index
+        - Diff, claims and attribution
+        - Tools and trust
+        - Doctor and diagnostics
+        - Harnesses (Claude, Codex, Cursor, Cline, Gemini CLI)
+        - MCP
+        - The CLI
+        - The window shell
+        - Documentation
+    validations:
+      required: true
+
+  - type: textarea
+    id: fit
+    attributes:
+      label: How it fits
+      description: |
+        Which non-negotiable does it lean on, and does it belong to a phase in the handoff checklist?
+        If it needs a new dependency, say what it buys.
+
+  - type: checkboxes
+    id: confirms
+    attributes:
+      label: Before posting
+      options:
+        - label: I read the non-negotiables in docs/handoff.md.
+          required: true
+        - label: I searched the existing issues and this is not a duplicate.
+          required: true

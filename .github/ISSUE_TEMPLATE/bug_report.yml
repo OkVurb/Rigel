@@ -1,0 +1,105 @@
+name: Bug report
+description: Something in the window, the CLI or the index does not do what the docs say.
+title: "[bug]: "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to report this.
+
+        A vulnerability is not a bug report: send it to `security@rigel.invalid` as
+        [SECURITY.md](https://github.com/OkVurb/Rigel/blob/main/SECURITY.md) describes, not here.
+
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+      description: The smallest thing that shows the problem. Paste the exact output, not a summary of it.
+      placeholder: I ran `rigel doctor --json` and it exited 2 with ...
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: What you expected instead
+      description: If the docs or a command's `--help` promised something different, quote the line.
+    validations:
+      required: true
+
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      description: Include the project shape if it matters (a git tree, a folder with no commit, a very large repo).
+      placeholder: |
+        1. cd into a project with a git tree
+        2. rigel session start --project .
+        3. ...
+    validations:
+      required: true
+
+  - type: dropdown
+    id: surface
+    attributes:
+      label: Where did it happen
+      options:
+        - Session
+        - Shelf
+        - Diff
+        - Tools
+        - Doctor
+        - The CLI (rigel ...)
+        - The window shell or settings
+        - The prototype (prototype/)
+        - Not sure
+    validations:
+      required: true
+
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      description: The output of `rigel --version`, or the commit you built from.
+      placeholder: rigel 0.1.0 (4eb33ba)
+    validations:
+      required: true
+
+  - type: dropdown
+    id: os
+    attributes:
+      label: Platform
+      options:
+        - Windows 11
+        - Windows 10
+        - macOS
+        - Linux
+        - Other (say which in the notes)
+    validations:
+      required: true
+
+  - type: textarea
+    id: doctor
+    attributes:
+      label: Doctor output
+      description: |
+        `rigel doctor --json` is the fastest way to rule out the environment. Remove keychain values
+        and any file path you would rather not publish; nothing else in the report needs redaction.
+      render: json
+
+  - type: textarea
+    id: notes
+    attributes:
+      label: Anything else
+      description: A recording, a stack trace, the provider you were using, or the last thing that worked.
+
+  - type: checkboxes
+    id: confirms
+    attributes:
+      label: Before posting
+      options:
+        - label: I searched the existing issues and this is not a duplicate.
+          required: true
+        - label: This is not a security report.
+          required: true
