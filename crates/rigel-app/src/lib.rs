@@ -2149,24 +2149,38 @@ fn warm_router() {
         .ok();
 }
 
-/// Hand the bundled chat sidecar to the core: `$RESOURCE/sidecar` in an install, the repository's
-/// `resources/sidecar` in a dev build. The source is copied into app data on first launch, so the
-/// room can write while `python.exe` stays in the read-only install directory.
-///
-/// Absent is not an error: a developer without the sidecar keeps the `vendor/agentchattr` fallback,
-/// and the Chat tab explains that case.
-fn install_chat_sidecar(app: &tauri::AppHandle) -> Result<String, String> {
+/// The bundled sidecar, when this build has one. An install reads `$RESOURCE/sidecar`; only a
+/// debug build may fall back to the repository copy. Baking the build machine's path into a
+/// release would let a packaged app read a sidecar from wherever it happened to be compiled.
+fn chat_sidecar_dir(app: &tauri::AppHandle) -> Option<PathBuf> {
     let packaged = app
         .path()
         .resource_dir()
         .ok()
         .map(|dir| dir.join("sidecar"))
         .filter(|dir| dir.join("agentchattr/run.py").is_file());
-    let source =
-        packaged.unwrap_or_else(|| Path::new(env!("CARGO_MANIFEST_DIR")).join("resources/sidecar"));
-    if !source.join("agentchattr/run.py").is_file() {
-        return Ok(String::new());
+    if packaged.is_some() {
+        return packaged;
     }
+    #[cfg(debug_assertions)]
+    {
+        let dev = Path::new(env!("CARGO_MANIFEST_DIR")).join("resources/sidecar");
+        if dev.join("agentchattr/run.py").is_file() {
+            return Some(dev);
+        }
+    }
+    None
+}
+
+/// Hand the bundled chat sidecar to the core. The source is copied into app data on first launch,
+/// so the room can write while `python.exe` stays in the read-only install directory.
+///
+/// Absent is not an error: a developer without the sidecar keeps the `vendor/agentchattr` fallback,
+/// and the Chat tab explains that case.
+fn install_chat_sidecar(app: &tauri::AppHandle) -> Result<String, String> {
+    let Some(source) = chat_sidecar_dir(app) else {
+        return Ok(String::new());
+    };
     rigel_core::agent::agentchat::install_sidecar(source, index_dir().join("agentchat"))
 }
 

@@ -7,8 +7,7 @@
 
 use std::collections::HashMap;
 use std::io::{Read, Write};
-use std::sync::Mutex;
-use std::sync::OnceLock;
+use std::sync::{Arc, Mutex, OnceLock};
 
 use base64::Engine;
 use portable_pty::{Child, CommandBuilder, MasterPty, PtySize, native_pty_system};
@@ -16,7 +15,9 @@ use serde::Serialize;
 use tauri::{AppHandle, Emitter};
 
 struct Terminal {
-    writer: Box<dyn Write + Send>,
+    /// Writes block until the shell drains them; keep that behind a per-terminal lock so a slow
+    /// shell never stops another terminal from resizing or closing while the table is held.
+    writer: Arc<Mutex<Box<dyn Write + Send>>>,
     master: Box<dyn MasterPty + Send>,
     child: Box<dyn Child + Send + Sync>,
 }
@@ -119,7 +120,7 @@ fn start_terminal(
     Ok((
         info,
         Terminal {
-            writer,
+            writer: Arc::new(Mutex::new(writer)),
             master: pair.master,
             child,
         },
@@ -135,16 +136,12 @@ pub(crate) fn terminal_open(
     cols: Option<u16>,
     rows: Option<u16>,
 ) -> Result<TerminalInfo, String> {
-    let (info, terminal, mut reader) =
+    let (info, mut terminal, mut reader) =
         start_terminal(project, cols.unwrap_or(100), rows.unwrap_or(30))?;
     let id = info.id.clone();
-    terminals()
-        .lock()
-        .map_err(|_| "the terminal table is poisoned".to_string())?
-        .insert(id.clone(), terminal);
 
     let event_id = id.clone();
-    std::thread::Builder::new()
+    if let Err(error) = std::thread::Builder::new()
         .name(format!("rigel-pty-{id}"))
         .spawn(move || {
             let mut buffer = [0u8; 8 * 1024];
@@ -170,23 +167,39 @@ pub(crate) fn terminal_open(
                 },
             );
         })
-        .map_err(|error| format!("could not start the terminal reader: {error}"))?;
+    {
+        let _ = terminal.child.kill();
+        return Err(format!("could not start the terminal reader: {error}"));
+    }
 
+    let mut guard = match terminals().lock() {
+        Ok(guard) => guard,
+        Err(_) => {
+            let _ = terminal.child.kill();
+            return Err("the terminal table is poisoned".to_string());
+        }
+    };
+    guard.insert(id, terminal);
     Ok(info)
 }
 
 #[tauri::command]
 pub(crate) fn terminal_write(id: String, data: String) -> Result<(), String> {
-    let mut guard = terminals()
+    let writer = {
+        let guard = terminals()
+            .lock()
+            .map_err(|_| "the terminal table is poisoned".to_string())?;
+        let terminal = guard
+            .get(&id)
+            .ok_or_else(|| "that terminal is closed".to_string())?;
+        Arc::clone(&terminal.writer)
+    };
+    let mut writer = writer
         .lock()
-        .map_err(|_| "the terminal table is poisoned".to_string())?;
-    let terminal = guard
-        .get_mut(&id)
-        .ok_or_else(|| "that terminal is closed".to_string())?;
-    terminal
-        .writer
+        .map_err(|_| "that terminal's writer is poisoned".to_string())?;
+    writer
         .write_all(data.as_bytes())
-        .and_then(|()| terminal.writer.flush())
+        .and_then(|()| writer.flush())
         .map_err(|error| format!("could not write to the terminal: {error}"))
 }
 
@@ -274,10 +287,10 @@ mod tests {
                 seen.contains("\u{1b}[6n"),
                 "the shell never asked for a cursor: {seen:?}"
             );
-            terminal
-                .writer
+            let mut writer = terminal.writer.lock().expect("the terminal writer");
+            writer
                 .write_all(b"\x1b[1;1R")
-                .and_then(|()| terminal.writer.flush())
+                .and_then(|()| writer.flush())
                 .expect("the shell accepts the cursor reply");
         }
         #[cfg(not(windows))]
@@ -287,10 +300,10 @@ mod tests {
         let create = b"Set-Content -Path rigel-pty.txt -Value ok\r\n" as &[u8];
         #[cfg(not(windows))]
         let create = b"touch rigel-pty.txt\n" as &[u8];
-        terminal
-            .writer
+        let mut writer = terminal.writer.lock().expect("the terminal writer");
+        writer
             .write_all(create)
-            .and_then(|()| terminal.writer.flush())
+            .and_then(|()| writer.flush())
             .expect("the shell accepts input");
 
         let marker = project.path().join("rigel-pty.txt");
