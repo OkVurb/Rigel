@@ -121,7 +121,8 @@ agentchattr is now a tab in Rigel's desktop UI, Rigel-style:
   chat_messages / chat_send` tauri commands, all synchronous `block_on` like their siblings.
 - `ui/src/agentchat.tsx` — roster (pills from `/api/status`), channel list, stream, composer.
   Polls `since_id` every 2s. Empty states: "room down → Start the chat server" button, and
-  "started outside Rigel → unauthenticated, restart from here".
+  "started outside Rigel → taken over from the landing-page token; if no token is exposed,
+  stop that server and start the room here".
 - Checkout discovery: `RIGEL_AGENTCHAT_DIR` env, else `vendor/agentchattr` or `agentchattr`
   under the open project root.
 - Verified: cargo builds (core + app), 3 agentchat unit tests, `tsc --noEmit` and `vite build`

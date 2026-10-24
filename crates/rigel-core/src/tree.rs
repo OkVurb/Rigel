@@ -67,17 +67,16 @@ fn tracked_files(root: &Path) -> Result<Vec<String>, TreeError> {
 }
 
 fn git_files(root: &Path) -> Result<Option<Vec<String>>, TreeError> {
-    let output = Command::new("git")
-        .arg("-C")
-        .arg(root)
-        .args([
-            "ls-files",
-            "-z",
-            "--cached",
-            "--others",
-            "--exclude-standard",
-        ])
-        .output();
+    let mut command = Command::new("git");
+    command.arg("-C").arg(root).args([
+        "ls-files",
+        "-z",
+        "--cached",
+        "--others",
+        "--exclude-standard",
+    ]);
+    crate::process::hide(&mut command);
+    let output = command.output();
 
     let output = match output {
         Ok(output) if output.status.success() => output,

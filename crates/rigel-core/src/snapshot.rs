@@ -387,12 +387,13 @@ struct GitRepo {
 
 impl GitRepo {
     fn detect(root: &Path) -> Option<Self> {
-        let output = Command::new("git")
+        let mut command = Command::new("git");
+        command
             .arg("-C")
             .arg(root)
-            .args(["rev-parse", "--is-inside-work-tree"])
-            .output()
-            .ok()?;
+            .args(["rev-parse", "--is-inside-work-tree"]);
+        crate::process::hide(&mut command);
+        let output = command.output().ok()?;
         let inside = String::from_utf8_lossy(&output.stdout);
         output
             .status
@@ -405,21 +406,22 @@ impl GitRepo {
     }
 
     fn run(&self, root: &Path, args: &[&str]) -> Result<std::process::Output, SnapshotError> {
-        Command::new(&self.executable)
-            .arg("-C")
-            .arg(root)
-            .args(args)
+        let mut command = Command::new(&self.executable);
+        command.arg("-C").arg(root).args(args);
+        crate::process::hide(&mut command);
+        command
             .output()
             .map_err(|error| SnapshotError::Git(format!("could not run git: {error}")))
     }
 
     fn head(root: &Path) -> Option<String> {
-        let output = Command::new("git")
+        let mut command = Command::new("git");
+        command
             .arg("-C")
             .arg(root)
-            .args(["rev-parse", "--verify", "HEAD"])
-            .output()
-            .ok()?;
+            .args(["rev-parse", "--verify", "HEAD"]);
+        crate::process::hide(&mut command);
+        let output = command.output().ok()?;
         output
             .status
             .success()

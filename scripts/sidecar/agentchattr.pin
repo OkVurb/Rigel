@@ -1,0 +1,6 @@
+# The vendor commit Rigel ships and the Python runtime it runs on.
+# Bump all four lines together; the build verifies the archive hash.
+repo=https://github.com/bcurts/agentchattr
+commit=d775776a30e8af4c85ea16b3caaf9c79d65cb239
+python=3.12.10
+python_sha256=4acbed6dd1c744b0376e3b1cf57ce906f9dc9e95e68824584c8099a63025a3c3

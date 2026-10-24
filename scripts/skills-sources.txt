@@ -1,0 +1,39 @@
+# Agent-skill repositories indexed by scripts/refresh-skills.sh.
+#
+# One `owner/repo`, GitHub URL, or `owner/repo/tree/<ref>/<path>` per line.
+# Blank lines and everything after `#` are ignored.
+#
+# A repository costs two GitHub API calls per run (metadata and one tree call);
+# bodies come from raw.githubusercontent.com and do not count. Without a token the
+# quota is 60 an hour, so keep the list around two dozen and set RIGEL_GITHUB_TOKEN
+# when you want to walk more.
+#
+# Add a repository by pasting its GitHub URL here. Re-running the script updates
+# skills that changed, adds new ones, and leaves removed ones in place (use
+# `rigel skills gc` to drop blobs nothing references).
+
+# Official Anthropic collections.
+anthropics/skills
+anthropics/knowledge-work-plugins
+anthropics/claude-plugins-official
+
+# Frameworks and broad community collections.
+obra/superpowers
+mattpocock/skills
+addyosmani/agent-skills
+wshobson/agents
+davila7/claude-code-templates
+antfu/skills
+humanlayer/skills
+vercel-labs/agent-skills
+vercel-labs/skills
+
+# Domain packs: marketing, science, .NET, video, security, ML, agents.
+coreyhaines31/marketingskills
+K-Dense-AI/scientific-agent-skills
+dotnet/skills
+remotion-dev/skills
+trailofbits/skills
+huggingface/skills
+google/agents-cli
+cloudflare/security-audit-skill

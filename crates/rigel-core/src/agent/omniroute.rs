@@ -203,12 +203,14 @@ fn server_command(port: &str) -> std::process::Command {
             "--daemon",
             "--no-open",
         ]);
+        crate::process::hide(&mut command);
         command
     }
     #[cfg(not(windows))]
     {
         let mut command = std::process::Command::new("omniroute");
         command.args(["serve", "--port", port, "--daemon", "--no-open"]);
+        crate::process::hide(&mut command);
         command
     }
 }

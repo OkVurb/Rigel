@@ -46,7 +46,7 @@
       "icons/icon.ico"
     ],
     "publisher": "Rigel contributors",
-    "copyright": "\u00a9 2026 Rigel contributors",
+    "copyright": "© 2026 Rigel contributors",
     "category": "DeveloperTool",
     "shortDescription": "One window for several coding agents on one project.",
     "longDescription": "Rigel runs Codex, Claude Code, Cursor, Cline and its own coordinator against one working tree, and keeps the transcript, the claims, the merged diff and the bill in one place. Session logs stay local. Installs show their exact command first. Updates are off until you turn them on.",
@@ -56,6 +56,9 @@
         "silent": true
       },
       "allowDowngrades": false
+    },
+    "resources": {
+      "resources/sidecar/": "sidecar/"
     }
   }
 }
