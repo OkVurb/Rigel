@@ -18,6 +18,7 @@ pub mod merge;
 pub mod migrate;
 pub mod patches;
 pub mod plan;
+pub mod process;
 pub mod resume;
 pub mod rules;
 pub mod safety;

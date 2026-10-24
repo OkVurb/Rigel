@@ -496,15 +496,13 @@ impl WorktreeService {
     }
 
     fn git_in(&self, cwd: &Path, args: &[&str]) -> Result<String, WorktreeError> {
-        let output = Command::new("git")
-            .arg("-C")
-            .arg(cwd)
-            .args(args)
-            .output()
-            .map_err(|error| match error.kind() {
-                std::io::ErrorKind::NotFound => WorktreeError::GitMissing,
-                _ => WorktreeError::Io(error),
-            })?;
+        let mut command = Command::new("git");
+        command.arg("-C").arg(cwd).args(args);
+        crate::process::hide(&mut command);
+        let output = command.output().map_err(|error| match error.kind() {
+            std::io::ErrorKind::NotFound => WorktreeError::GitMissing,
+            _ => WorktreeError::Io(error),
+        })?;
         if !output.status.success() {
             return Err(WorktreeError::Git {
                 command: args.join(" "),
@@ -515,15 +513,13 @@ impl WorktreeService {
     }
 
     fn git_bytes(&self, args: &[&str]) -> Result<Vec<u8>, WorktreeError> {
-        let output = Command::new("git")
-            .arg("-C")
-            .arg(&self.root)
-            .args(args)
-            .output()
-            .map_err(|error| match error.kind() {
-                std::io::ErrorKind::NotFound => WorktreeError::GitMissing,
-                _ => WorktreeError::Io(error),
-            })?;
+        let mut command = Command::new("git");
+        command.arg("-C").arg(&self.root).args(args);
+        crate::process::hide(&mut command);
+        let output = command.output().map_err(|error| match error.kind() {
+            std::io::ErrorKind::NotFound => WorktreeError::GitMissing,
+            _ => WorktreeError::Io(error),
+        })?;
         if !output.status.success() {
             return Err(WorktreeError::Git {
                 command: args.join(" "),

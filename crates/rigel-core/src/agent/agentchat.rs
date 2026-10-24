@@ -1,16 +1,19 @@
 //! agentchattr: the chat server behind the Chat tab (P6).
 //!
 //! After OmniRoute, this is the second local service Rigel starts itself and fronts through
-//! the core. The vendor checkout (gitignored `vendor/agentchattr`) is the subprocess; Rigel
-//! holds *one* relationship to it: it spawns `run.py`, reads the session token from its
-//! stdout, and forwards a narrow slice of its API to the window. The renderer never talks to
-//! the chat server directly and never sees the token — the same boundary that keeps the
-//! keychain out of the window (§3.2, S2).
+//! the core. The installer ships a sidecar (`$RESOURCE/sidecar`: the pinned agentchattr source
+//! and an embeddable Python runtime), so a clean machine needs no Python on PATH; a development
+//! checkout can still point at `vendor/agentchattr` (gitignored) instead. Rigel holds *one*
+//! relationship to the server: it spawns `run.py`, reads the session token from its stdout, and
+//! forwards a narrow slice of its API to the window. The renderer never talks to the chat server
+//! directly and never sees the token — the same boundary that keeps the keychain out of the
+//! window (§3.2, S2).
 //!
-//! `RIGEL_AGENTCHAT_URL` overrides the origin; `RIGEL_AGENTCHAT_DIR` points at the checkout
-//! when it does not sit next to the open project.
+//! `RIGEL_AGENTCHAT_URL` overrides the origin; `RIGEL_AGENTCHAT_DIR` points at a checkout when
+//! it does not sit next to the open project. `install_sidecar` is how the desktop shell hands
+//! the bundled copy over: the source is copied to app data, where the room may write.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::Mutex;
 use std::time::Duration;
@@ -34,7 +37,8 @@ static SESSION_TOKEN: Mutex<Option<String>> = Mutex::new(None);
 pub struct ChatStatus {
     pub running: bool,
     /// True when Rigel holds a working session token for the server. The tab needs it for
-    /// everything past the landing page; an externally started server reports `false`.
+    /// everything past the landing page; a server Rigel can neither spawn nor take over reports
+    /// `false`.
     pub authed: bool,
     pub origin: String,
     /// The checkout the server would be spawned from, when it is on this machine.
@@ -96,6 +100,60 @@ fn set_token(new_value: String) {
     }
 }
 
+fn clear_token() {
+    if let Ok(mut guard) = SESSION_TOKEN.lock() {
+        *guard = None;
+    }
+}
+
+/// The token `run.py` injects into the landing page for the browser tab, taken from that same
+/// response. Kept as a function so the shape is testable without a server.
+fn landing_token(html: &str) -> Option<String> {
+    static PATTERN: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    let pattern = PATTERN.get_or_init(|| {
+        regex::Regex::new(r#"__SESSION_TOKEN__\s*=\s*"([0-9a-fA-F]{32,128})""#)
+            .expect("the landing token pattern is valid")
+    });
+    pattern.captures(html).map(|capture| capture[1].to_string())
+}
+
+/// Take over a room this launch did not spawn: a chat server left behind by a previous window
+/// (its child survives the app on Windows) or one started by hand from the same checkout. Its
+/// landing page carries the token for the browser tab, so reading it keeps the token in Rust and
+/// makes the existing room usable instead of asking the user to kill a working server.
+///
+/// The token is only accepted when `/api/settings` answers through it, and the page must look
+/// like agentchattr; anything else leaves the room unauthenticated.
+async fn adopt_token(client: &reqwest::Client) -> bool {
+    if token().is_some() {
+        return true;
+    }
+    let Ok(response) = client.get(format!("{}/", origin())).send().await else {
+        return false;
+    };
+    if !response.status().is_success() {
+        return false;
+    }
+    let Ok(html) = response.text().await else {
+        return false;
+    };
+    if !html.contains("agentchattr") {
+        return false;
+    }
+    let Some(found) = landing_token(&html) else {
+        return false;
+    };
+    set_token(found);
+    if api_call(reqwest::Method::GET, "/api/settings", None)
+        .await
+        .is_ok()
+    {
+        return true;
+    }
+    clear_token();
+    false
+}
+
 fn http_client() -> reqwest::Client {
     reqwest::Client::builder()
         .timeout(Duration::from_millis(2_500))
@@ -122,7 +180,7 @@ async fn api_call(
 ) -> Result<Value, String> {
     let url = format!("{}{}", origin(), path);
     let token = token().ok_or({
-        "the chat server is up but Rigel has no session token for it — restart it from the Chat tab"
+        "the chat server is up but exposed no session token — stop it and start the room from the Chat tab"
     })?;
     let mut request = http_client()
         .request(method, &url)
@@ -175,13 +233,278 @@ fn parse_messages(value: Value) -> Vec<ChatMessage> {
     }
 }
 
-/// Where the vendor checkout sits. The project guess covers the one that has it vendored.
-pub fn dir_for(project_root: Option<&str>) -> Option<std::path::PathBuf> {
+/* -------------------------------- sidecar -------------------------------- */
+
+/// A built sidecar: the read-only install copy and the writable copy the room runs from.
+///
+/// `resources/sidecar/` ships in the installer and never changes on disk. agentchattr writes
+/// `data/`, `config.local.toml` and its JSONL beside its own source, so the shell copies the
+/// source into app data once and leaves `python/` where the installer put it.
+#[derive(Debug, Clone)]
+struct Sidecar {
+    /// `$RESOURCE/sidecar`: `agentchattr/` and `python/`.
+    source: PathBuf,
+    /// `<app data>/agentchat`: the copy `run.py`, the wrappers and the room read and write.
+    dir: PathBuf,
+}
+
+static SIDECAR: Mutex<Option<Sidecar>> = Mutex::new(None);
+/// The project root last written into the copied `config.toml`; a poll loop must not rewrite it.
+static SIDECAR_CWD: Mutex<Option<String>> = Mutex::new(None);
+
+fn sidecar() -> Option<Sidecar> {
+    SIDECAR.lock().ok().and_then(|guard| guard.clone())
+}
+
+/// The build marker the sidecar script writes, falling back to the vendor `VERSION`. A change
+/// here is what makes the app-data copy refresh.
+fn source_version(source: &Path) -> String {
+    ["agentchattr/.rigel-sidecar", "agentchattr/VERSION"]
+        .iter()
+        .find_map(|file| {
+            std::fs::read_to_string(source.join(file))
+                .ok()
+                .map(|text| text.trim().to_string())
+                .filter(|text| !text.is_empty())
+        })
+        .unwrap_or_else(|| "unversioned".to_string())
+}
+
+/// Copy a tree, leaving the room's own state alone, then remove files the source no longer has.
+fn copy_tree(source: &Path, target: &Path, keep: &[&str]) -> Result<(), String> {
+    std::fs::create_dir_all(target)
+        .map_err(|error| format!("could not create {}: {error}", target.display()))?;
+    let mut seen = Vec::new();
+    copy_dir(source, target, "", keep, &mut seen)?;
+    prune_dir(target, "", &seen, keep)?;
+    Ok(())
+}
+
+fn preserved(relative: &str, keep: &[&str]) -> bool {
+    relative == "data" || relative.starts_with("data/") || keep.contains(&relative)
+}
+
+fn copy_dir(
+    source: &Path,
+    target: &Path,
+    prefix: &str,
+    keep: &[&str],
+    seen: &mut Vec<String>,
+) -> Result<(), String> {
+    let entries = std::fs::read_dir(source)
+        .map_err(|error| format!("could not read {}: {error}", source.display()))?;
+    for entry in entries {
+        let entry =
+            entry.map_err(|error| format!("could not read {}: {error}", source.display()))?;
+        let name = entry.file_name().to_string_lossy().to_string();
+        let relative = if prefix.is_empty() {
+            name.clone()
+        } else {
+            format!("{prefix}/{name}")
+        };
+        if preserved(&relative, keep) {
+            continue;
+        }
+        let from = entry.path();
+        let to = target.join(&name);
+        if from.is_dir() {
+            std::fs::create_dir_all(&to)
+                .map_err(|error| format!("could not create {}: {error}", to.display()))?;
+            copy_dir(&from, &to, &relative, keep, seen)?;
+        } else {
+            std::fs::copy(&from, &to)
+                .map_err(|error| format!("could not copy {}: {error}", from.display()))?;
+            seen.push(relative);
+        }
+    }
+    Ok(())
+}
+
+fn prune_dir(target: &Path, prefix: &str, seen: &[String], keep: &[&str]) -> Result<(), String> {
+    let entries = match std::fs::read_dir(target) {
+        Ok(entries) => entries,
+        Err(_) => return Ok(()),
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name().to_string_lossy().to_string();
+        let relative = if prefix.is_empty() {
+            name.clone()
+        } else {
+            format!("{prefix}/{name}")
+        };
+        if preserved(&relative, keep) {
+            continue;
+        }
+        let path = entry.path();
+        if path.is_dir() {
+            prune_dir(&path, &relative, seen, keep)?;
+            let empty = std::fs::read_dir(&path)
+                .map(|mut rows| rows.next().is_none())
+                .unwrap_or(false);
+            if empty {
+                let _ = std::fs::remove_dir(&path);
+            }
+        } else if !seen.iter().any(|known| known == &relative) {
+            std::fs::remove_file(&path)
+                .map_err(|error| format!("could not remove stale {}: {error}", path.display()))?;
+        }
+    }
+    Ok(())
+}
+
+/// Copy the bundled sidecar into app data, refreshing it only when the pinned build changed.
+///
+/// Called once by the desktop shell at startup. `data/` and `config.local.toml` are the room's
+/// own files and survive an upgrade; everything else is source and is replaced.
+pub fn install_sidecar(
+    source: impl Into<PathBuf>,
+    data: impl Into<PathBuf>,
+) -> Result<String, String> {
+    let source = source.into();
+    let dir = data.into();
+    if !source.join("agentchattr/run.py").is_file() {
+        return Err(format!(
+            "the sidecar at {} is incomplete (no agentchattr/run.py); build it with \
+             `python scripts/sidecar/build-agentchat.py`",
+            source.display()
+        ));
+    }
+
+    let version = source_version(&source);
+    let marker = dir.join(".rigel-sidecar");
+    let installed = std::fs::read_to_string(&marker)
+        .unwrap_or_default()
+        .trim()
+        .to_string();
+    if installed != version {
+        copy_tree(
+            &source.join("agentchattr"),
+            &dir,
+            &["config.local.toml", ".rigel-sidecar"],
+        )?;
+        std::fs::create_dir_all(dir.join("data"))
+            .map_err(|error| format!("could not create {}: {error}", dir.join("data").display()))?;
+        std::fs::write(&marker, format!("{version}\n"))
+            .map_err(|error| format!("could not write {}: {error}", marker.display()))?;
+    }
+
+    if let Ok(mut guard) = SIDECAR.lock() {
+        *guard = Some(Sidecar {
+            source,
+            dir: dir.clone(),
+        });
+    }
+    if let Ok(mut guard) = SIDECAR_CWD.lock() {
+        *guard = None;
+    }
+    Ok(dir.display().to_string())
+}
+
+/// The crew inherits `cwd` from `config.toml`. The vendor checkout sits inside the project, so
+/// its `..` is the project root; the app-data copy is not, so Rigel writes the open project into
+/// the copied file. `config.local.toml` still adds agents; only `cwd` is managed here.
+fn point_agents_at(dir: &Path, project_root: Option<&str>) {
+    let Some(root) = project_root.map(str::trim).filter(|root| !root.is_empty()) else {
+        return;
+    };
+    if SIDECAR_CWD
+        .lock()
+        .map(|guard| guard.as_deref() == Some(root))
+        .unwrap_or(false)
+    {
+        return;
+    }
+    if rewrite_agent_cwd(&dir.join("config.toml"), Path::new(root)).is_ok() {
+        if let Ok(mut guard) = SIDECAR_CWD.lock() {
+            *guard = Some(root.to_string());
+        }
+    }
+}
+
+/// Rewrite every `[agents.*] cwd` to the project root, adding the key where the vendor table had
+/// none. Line-based like the reader: the file is a flat table list, and comments must survive.
+fn rewrite_agent_cwd(path: &Path, root: &Path) -> Result<bool, String> {
+    let text = std::fs::read_to_string(path)
+        .map_err(|error| format!("could not read {}: {error}", path.display()))?;
+    let value = format!(
+        "cwd = \"{}\"",
+        root.display()
+            .to_string()
+            .replace('\\', "/")
+            .replace('"', "\\\"")
+    );
+
+    let mut out = String::with_capacity(text.len() + 64);
+    let mut in_agents = false;
+    let mut has_cwd = true;
+    let mut changed = false;
+    for line in text.lines() {
+        let trimmed = line.trim();
+        let header = trimmed
+            .strip_prefix('[')
+            .and_then(|rest| rest.strip_suffix(']'))
+            .map(str::trim);
+        if header.is_some_and(|name| name.starts_with("agents.")) {
+            if in_agents && !has_cwd {
+                out.push_str(&value);
+                out.push('\n');
+                changed = true;
+            }
+            in_agents = true;
+            has_cwd = false;
+            out.push_str(line);
+            out.push('\n');
+            continue;
+        }
+        if header.is_some() {
+            if in_agents && !has_cwd {
+                out.push_str(&value);
+                out.push('\n');
+                changed = true;
+            }
+            in_agents = false;
+            out.push_str(line);
+            out.push('\n');
+            continue;
+        }
+        let is_cwd = trimmed
+            .strip_prefix("cwd")
+            .map(str::trim_start)
+            .is_some_and(|rest| rest.starts_with('='));
+        if in_agents && is_cwd {
+            out.push_str(&value);
+            out.push('\n');
+            has_cwd = true;
+            changed |= trimmed != value;
+            continue;
+        }
+        out.push_str(line);
+        out.push('\n');
+    }
+    if in_agents && !has_cwd {
+        out.push_str(&value);
+        out.push('\n');
+        changed = true;
+    }
+    if !changed {
+        return Ok(false);
+    }
+    std::fs::write(path, out)
+        .map_err(|error| format!("could not write {}: {error}", path.display()))?;
+    Ok(true)
+}
+
+/// Where the chat source sits. A built sidecar wins; the project guess covers a dev checkout.
+pub fn dir_for(project_root: Option<&str>) -> Option<PathBuf> {
     if let Ok(from_env) = std::env::var("RIGEL_AGENTCHAT_DIR") {
-        let candidate = std::path::PathBuf::from(from_env.trim());
+        let candidate = PathBuf::from(from_env.trim());
         if candidate.join("run.py").exists() {
             return Some(candidate);
         }
+    }
+    if let Some(sidecar) = sidecar() {
+        point_agents_at(&sidecar.dir, project_root);
+        return Some(sidecar.dir);
     }
     let project = project_root?;
     for candidate in ["vendor/agentchattr", "agentchattr"] {
@@ -198,10 +521,21 @@ pub async fn status(project_root: Option<&str>) -> ChatStatus {
     let client = http_client();
     let running = healthy(&client).await;
 
-    let authed = running
-        && api_call(reqwest::Method::GET, "/api/settings", None)
+    let mut authed = false;
+    if running {
+        if token().is_none() {
+            adopt_token(&client).await;
+        }
+        authed = api_call(reqwest::Method::GET, "/api/settings", None)
             .await
             .is_ok();
+        // A room restarted outside Rigel keeps its data but mints a new token; an old token that
+        // no longer answers is replaced by the one the new landing page carries.
+        if !authed {
+            clear_token();
+            authed = adopt_token(&client).await;
+        }
+    }
 
     let dir = dir_for(project_root);
     ChatStatus {
@@ -226,11 +560,11 @@ fn setup_help(project_root: Option<&str>) -> String {
         })
         .unwrap_or_else(|| "<project>/vendor/agentchattr".to_string());
     format!(
-        "agentchattr is not in this project yet. Rigel fronts it and keeps its session token,          but the checkout is not tracked here (vendor/ is gitignored).
-         1. git clone https://github.com/bcurts/agentchattr \"{checkout}\"
-         2. install its Python dependencies inside that folder (its README's setup step; Rigel          runs .venv/Scripts/python when it exists)
-         3. press Start the chat server — Rigel spawns run.py with no console window
-         4. to use a checkout elsewhere, set RIGEL_AGENTCHAT_DIR; it wins over the vendor/ lookup"
+        "no chat sidecar in this build and no agentchattr checkout found. Developers: run
+         `python scripts/sidecar/build-agentchat.py` once — it vendors the pinned source and an
+         embeddable Python runtime, and the app copies that to its data directory. Or clone
+         https://github.com/bcurts/agentchattr into \"{checkout}\" and set RIGEL_AGENTCHAT_DIR;
+         the env override wins over both."
     )
 }
 
@@ -242,7 +576,8 @@ fn start_lock() -> &'static tokio::sync::Mutex<()> {
 }
 
 /// Health first, launch second — the OmniRoute contract. Spawning is what earns Rigel the
-/// session token: `run.py` prints it, and an instance started outside Rigel stays unshared.
+/// session token; a room that is already up is taken over through its landing page, so a server
+/// orphaned by a previous window does not force the user to kill it by hand.
 pub async fn ensure_server(project_root: Option<&str>) -> Result<ChatStatus, String> {
     let _starting = start_lock().lock().await;
     let client = http_client();
@@ -263,22 +598,36 @@ pub async fn ensure_server(project_root: Option<&str>) -> Result<ChatStatus, Str
 
     Err(format!(
         "the chat server was spawned at {} but did not answer after boot. \
-         Run `.venv/Scripts/python run.py` there to see the failure.",
+         Run `python run.py` there to see the failure, and check that port 8300 is free.",
         dir.display()
     ))
 }
 
-fn chat_python(dir: &Path) -> Option<std::path::PathBuf> {
+fn bundled_python(source: &Path) -> Option<PathBuf> {
+    #[cfg(windows)]
+    let candidate = source.join("python/python.exe");
+    #[cfg(not(windows))]
+    let candidate = source.join("python/bin/python3");
+    candidate.is_file().then_some(candidate)
+}
+
+/// A developer checkout's `.venv` first, then the runtime that ships with the app, then PATH.
+/// The bundled interpreter only runs the bundled copy: a foreign checkout has its own pins.
+fn chat_python(dir: &Path) -> Option<PathBuf> {
     #[cfg(windows)]
     let venv_python = dir.join(".venv/Scripts/python.exe");
     #[cfg(not(windows))]
     let venv_python = dir.join(".venv/bin/python");
 
     if venv_python.exists() {
-        Some(venv_python)
-    } else {
-        which("python").or_else(|| which("python3"))
+        return Some(venv_python);
     }
+    if let Some(sidecar) = sidecar().filter(|sidecar| sidecar.dir == dir) {
+        if let Some(python) = bundled_python(&sidecar.source) {
+            return Some(python);
+        }
+    }
+    which("python").or_else(|| which("python3"))
 }
 
 /// PATH lookup that keeps the `.exe` detail out of the caller (Windows never bare-executes).
@@ -317,6 +666,7 @@ fn spawn_server(dir: &std::path::Path) -> Result<(), String> {
         .stdout(Stdio::piped())
         .stderr(Stdio::null());
 
+    crate::process::hide(&mut command);
     let mut child = command
         .spawn()
         .map_err(|error| format!("could not start the chat server ({error})"))?;
@@ -449,7 +799,7 @@ pub async fn send_as(text: &str, channel: &str, sender: &str) -> Result<(), Stri
         return Err("a chat sender name is limited to 40 characters".to_string());
     }
     let token = token().ok_or({
-        "the chat server is up but Rigel has no session token for it — restart it from the Chat tab"
+        "the chat server is up but exposed no session token — stop it and start the room from the Chat tab"
     })?;
     let url = origin().replacen("http", "ws", 1);
     let ws_url = format!("{url}/ws?token={token}");
@@ -720,8 +1070,10 @@ pub fn kill_tree(pid: u32) -> Result<(), String> {
     #[cfg(windows)]
     {
         // `/T` is the whole tree, `/F` is required for a console process that ignores WM_CLOSE.
-        let output = std::process::Command::new("taskkill")
-            .args(["/PID", &pid.to_string(), "/T", "/F"])
+        let mut command = std::process::Command::new("taskkill");
+        command.args(["/PID", &pid.to_string(), "/T", "/F"]);
+        crate::process::hide(&mut command);
+        let output = command
             .output()
             .map_err(|error| format!("could not run taskkill: {error}"))?;
         if output.status.success() {
@@ -737,8 +1089,10 @@ pub fn kill_tree(pid: u32) -> Result<(), String> {
     }
     #[cfg(not(windows))]
     {
-        let output = std::process::Command::new("kill")
-            .args(["-TERM", &pid.to_string()])
+        let mut command = std::process::Command::new("kill");
+        command.args(["-TERM", &pid.to_string()]);
+        crate::process::hide(&mut command);
+        let output = command
             .output()
             .map_err(|error| format!("could not run kill: {error}"))?;
         if output.status.success() {
@@ -766,8 +1120,10 @@ pub fn stop_all() -> usize {
 /// a live process, which keeps the liveness check locale-independent.
 #[cfg(windows)]
 fn pid_running(pid: u32) -> bool {
-    std::process::Command::new("tasklist")
-        .args(["/FI", &format!("PID eq {pid}"), "/NH"])
+    let mut command = std::process::Command::new("tasklist");
+    command.args(["/FI", &format!("PID eq {pid}"), "/NH"]);
+    crate::process::hide(&mut command);
+    command
         .output()
         .map(|output| String::from_utf8_lossy(&output.stdout).contains(&pid.to_string()))
         .unwrap_or(true)
@@ -911,7 +1267,7 @@ pub fn configured(project_root: Option<&str>) -> Vec<ChatHarness> {
 
 /// One message for both spawn paths, so the Chat tab can say the same thing everywhere.
 fn missing_checkout() -> String {
-    "no agentchattr checkout: clone https://github.com/bcurts/agentchattr into      vendor/agentchattr (a fresh clone has none — it is gitignored), or set      RIGEL_AGENTCHAT_DIR to an existing checkout"
+    "no chat sidecar and no agentchattr checkout: build the sidecar with      `python scripts/sidecar/build-agentchat.py`, clone https://github.com/bcurts/agentchattr      into vendor/agentchattr, or set RIGEL_AGENTCHAT_DIR to an existing checkout"
         .to_string()
 }
 
@@ -953,7 +1309,7 @@ label = "Phi4 (local)"
     }
 
     #[test]
-    fn the_vendored_config_offers_claude_codex_and_the_local_phi4() {
+    fn the_vendored_config_offers_the_agent_tables_rigel_starts() {
         let repo_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .parent()
             .and_then(Path::parent);
@@ -964,8 +1320,14 @@ label = "Phi4 (local)"
         let found = harnesses(&dir);
         assert!(found.iter().any(|harness| harness.name == "claude"));
         assert!(found.iter().any(|harness| harness.name == "codex"));
-        let phi4 = found.iter().find(|harness| harness.name == "phi4");
-        assert!(phi4.is_some_and(|harness| harness.api && harness.ready));
+        // The pinned config grows and shrinks with upstream; these two are what Rigel's own
+        // start flags are written for, and every table must parse into a usable harness.
+        assert!(found.len() >= 2);
+        assert!(
+            found
+                .iter()
+                .all(|harness| !harness.name.is_empty() && !harness.label.is_empty())
+        );
     }
 
     #[test]
@@ -1041,6 +1403,99 @@ label = "Phi4 (local)"
         assert!(note.contains("RIGEL_AGENTCHAT_DIR"));
         // No project: the copy must not pretend to know where it goes.
         assert!(setup_help(None).contains("<project>/vendor/agentchattr"));
+    }
+
+    #[test]
+    fn a_sidecar_copy_is_refreshed_without_touching_the_room() {
+        let root = std::env::temp_dir().join(format!(
+            "rigel-sidecar-copy-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let source = root.join("source/agentchattr");
+        let data = root.join("data");
+        std::fs::create_dir_all(source.join("static")).expect("source tree");
+        std::fs::write(source.join("run.py"), "v1").expect("run.py");
+        std::fs::write(source.join("stale.py"), "gone").expect("stale.py");
+        std::fs::write(source.join("static/index.html"), "one").expect("static");
+        std::fs::write(source.join(".rigel-sidecar"), "v1\n").expect("marker");
+
+        copy_tree(&source, &data, &["config.local.toml", ".rigel-sidecar"]).expect("first copy");
+        assert_eq!(std::fs::read_to_string(data.join("run.py")).unwrap(), "v1");
+
+        // The room writes these; a rebuild must not take them away.
+        std::fs::create_dir_all(data.join("data")).expect("data dir");
+        std::fs::write(data.join("data/chat.jsonl"), "a message").expect("history");
+        std::fs::write(data.join("config.local.toml"), "[agents.local]").expect("local config");
+
+        std::fs::write(source.join("run.py"), "v2").expect("new run.py");
+        std::fs::remove_file(source.join("stale.py")).expect("drop stale.py");
+        std::fs::write(source.join("static/index.html"), "two").expect("new static");
+        copy_tree(&source, &data, &["config.local.toml", ".rigel-sidecar"]).expect("refresh");
+
+        assert_eq!(std::fs::read_to_string(data.join("run.py")).unwrap(), "v2");
+        assert_eq!(
+            std::fs::read_to_string(data.join("static/index.html")).unwrap(),
+            "two"
+        );
+        assert!(!data.join("stale.py").exists(), "stale source is removed");
+        assert_eq!(
+            std::fs::read_to_string(data.join("data/chat.jsonl")).unwrap(),
+            "a message"
+        );
+        assert_eq!(
+            std::fs::read_to_string(data.join("config.local.toml")).unwrap(),
+            "[agents.local]"
+        );
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn the_copied_config_points_every_agent_at_the_open_project() {
+        let root = std::env::temp_dir().join(format!(
+            "rigel-sidecar-cwd-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        std::fs::create_dir_all(&root).expect("temp dir");
+        let config = root.join("config.toml");
+        std::fs::write(
+            &config,
+            "[server]\nport = 8300\n\n[agents.claude]\ncommand = \"claude\"\ncwd = \"..\"\n\
+             color = \"#da7756\"\n\n[agents.phi4]\ntype = \"api\"\n",
+        )
+        .expect("config");
+
+        let project = Path::new("C:/work/demo");
+        assert!(rewrite_agent_cwd(&config, project).expect("rewrite"));
+        let text = std::fs::read_to_string(&config).unwrap();
+        assert_eq!(text.matches("cwd = \"C:/work/demo\"").count(), 2, "{text}");
+        assert!(!text.contains("cwd = \"..\""), "{text}");
+        // Everything else survives, including the flat tables and colours.
+        assert!(text.contains("command = \"claude\""));
+        assert!(text.contains("color = \"#da7756\""));
+        assert!(text.contains("[server]\nport = 8300"));
+        // A second call is a no-op, so a poll loop does not touch the file.
+        assert!(!rewrite_agent_cwd(&config, project).expect("rewrite again"));
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn the_bundled_python_only_answers_for_the_bundled_copy() {
+        let root = std::env::temp_dir().join(format!(
+            "rigel-sidecar-python-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        std::fs::create_dir_all(root.join("python")).expect("python dir");
+        #[cfg(windows)]
+        std::fs::write(root.join("python/python.exe"), "").expect("python");
+        #[cfg(not(windows))]
+        std::fs::write(root.join("python/bin/python3"), "").expect("python");
+        assert!(bundled_python(&root).is_some());
+        assert!(bundled_python(&root.join("elsewhere")).is_none());
+        std::fs::remove_dir_all(&root).ok();
     }
 
     #[test]
@@ -1174,6 +1629,20 @@ time.sleep(30)
         assert_eq!(
             native_name_from(Some("a very long role name that should be cut"), "ffff"),
             "averylongrolenamethatsho-ffff"
+        );
+    }
+
+    #[test]
+    fn the_landing_page_token_is_read_only_from_the_script_it_injects() {
+        let html = r#"<html><head><script>window.__SESSION_TOKEN__="0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";</script></head></html>"#;
+        assert_eq!(
+            landing_token(html).as_deref(),
+            Some("0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef")
+        );
+        assert_eq!(landing_token("<html>no token here</html>"), None);
+        assert_eq!(
+            landing_token(r#"<script>window.__SESSION_TOKEN__="too-short";</script>"#),
+            None
         );
     }
 

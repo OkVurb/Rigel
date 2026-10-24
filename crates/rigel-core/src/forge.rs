@@ -35,12 +35,10 @@ pub enum ForgeError {
 }
 
 fn git_output(project: &Path, args: &[&str]) -> Option<String> {
-    let output = Command::new("git")
-        .arg("-C")
-        .arg(project)
-        .args(args)
-        .output()
-        .ok()?;
+    let mut command = Command::new("git");
+    command.arg("-C").arg(project).args(args);
+    crate::process::hide(&mut command);
+    let output = command.output().ok()?;
     if !output.status.success() {
         return None;
     }
@@ -49,16 +47,16 @@ fn git_output(project: &Path, args: &[&str]) -> Option<String> {
 
 /// Whether `gh` exists and reports an authenticated account. Never prints a token.
 pub fn gh_status() -> Result<String, ForgeError> {
-    let output = Command::new("gh")
-        .args(["auth", "status"])
-        .output()
-        .map_err(|error| {
-            if error.kind() == std::io::ErrorKind::NotFound {
-                ForgeError::GhMissing
-            } else {
-                ForgeError::Failed(error.to_string())
-            }
-        })?;
+    let mut command = Command::new("gh");
+    command.args(["auth", "status"]);
+    crate::process::hide(&mut command);
+    let output = command.output().map_err(|error| {
+        if error.kind() == std::io::ErrorKind::NotFound {
+            ForgeError::GhMissing
+        } else {
+            ForgeError::Failed(error.to_string())
+        }
+    })?;
     if output.status.success() {
         Ok("gh is signed in".to_string())
     } else {
@@ -134,18 +132,19 @@ this pull request by itself.\n",
 /// Run `gh pr create` with the reviewed title and body. The caller is the explicit click.
 pub fn create(project: &Path, plan: &PullRequestPlan) -> Result<String, ForgeError> {
     gh_status()?;
-    let output = Command::new("gh")
-        .current_dir(project)
-        .args([
-            "pr",
-            "create",
-            "--title",
-            &plan.title,
-            "--body",
-            &plan.body,
-            "--base",
-            &plan.base,
-        ])
+    let mut command = Command::new("gh");
+    command.current_dir(project).args([
+        "pr",
+        "create",
+        "--title",
+        &plan.title,
+        "--body",
+        &plan.body,
+        "--base",
+        &plan.base,
+    ]);
+    crate::process::hide(&mut command);
+    let output = command
         .output()
         .map_err(|error| ForgeError::Failed(error.to_string()))?;
     if !output.status.success() {
