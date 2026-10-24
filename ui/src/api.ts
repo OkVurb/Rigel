@@ -818,6 +818,12 @@ export const api = {
     return typeof picked === "string" ? picked : null;
   },
 
+  /** Copy files chosen in the native picker into `.rigel/attachments`, returning relative paths. */
+  async importAttachments(project: string, paths: string[]): Promise<string[]> {
+    if (!isTauri()) return [];
+    return call<string[]>("attachment_import", { project, paths });
+  },
+
   /** Create a folder under the workspace root and open it. */
   async createProject(name: string): Promise<ProjectInfo> {
     if (!isTauri()) throw new Error("Create a workspace from the desktop app, not the browser preview.");

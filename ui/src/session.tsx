@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import type { ReactNode } from "react";
 
 import {
   api,
@@ -41,7 +42,9 @@ interface Props {
   onActive: (session: Session | null) => void;
   onNotice: (notice: string) => void;
   onOpenSettings?: () => void;
-  onChooseProject?: () => void;
+  onBrowseSkills?: () => void;
+  /** Open/Switch folder, New workspace and the workspace form, owned by App. */
+  projectControls?: ReactNode;
   /** Swarm step one: who is online, or a refusal to show. Sends nothing. */
   onSwarmPrepare?: () => Promise<SwarmTarget[]>;
   /** Swarm step two: broadcast one task to the chosen agent names. */
@@ -82,7 +85,8 @@ export default function SessionView({
   onActive,
   onNotice,
   onOpenSettings,
-  onChooseProject,
+  onBrowseSkills,
+  projectControls,
   onSwarmPrepare,
   onSwarm,
 }: Props) {
@@ -102,6 +106,11 @@ export default function SessionView({
   const [shown, setShown] = useState<string[]>([]);
   const [raw, setRaw] = useState(false);
   const [text, setText] = useState("");
+  // Files for the next turn. The native picker copies them into .rigel/attachments; the
+  // composer appends their project-relative paths when the turn is delivered.
+  const [attachments, setAttachments] = useState<string[]>([]);
+  const [addOpen, setAddOpen] = useState(false);
+  const addRef = useRef<HTMLDivElement | null>(null);
   // The draft waiting in the review card. Non-null means Send paused before a turn.
   const [review, setReview] = useState<string | null>(null);
   const [quote, setQuote] = useState<TurnQuote | null>(null);
@@ -575,6 +584,32 @@ export default function SessionView({
     };
   }, [session, text, spendMicros, capMicros, model, effort]);
 
+  useEffect(() => {
+    if (!addOpen) return;
+    const closeOnPointer = (event: PointerEvent) => {
+      if (!addRef.current?.contains(event.target as Node)) setAddOpen(false);
+    };
+    const closeOnKey = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setAddOpen(false);
+    };
+    window.addEventListener("pointerdown", closeOnPointer);
+    window.addEventListener("keydown", closeOnKey);
+    return () => {
+      window.removeEventListener("pointerdown", closeOnPointer);
+      window.removeEventListener("keydown", closeOnKey);
+    };
+  }, [addOpen]);
+
+  const withAttachments = useCallback(
+    (prompt: string) => {
+      if (attachments.length === 0) return prompt;
+      return `${prompt}\n\nAttached files (copied into the project; read them if the task needs them):\n${attachments
+        .map((path) => `- ${path}`)
+        .join("\n")}`;
+    },
+    [attachments],
+  );
+
   /* ------------------------------- actions ------------------------------- */
 
   const startSession = useCallback(async () => {
@@ -623,6 +658,7 @@ export default function SessionView({
   /** The confirmed text starts the turn; a failure leaves it in the composer. */
   const deliver = useCallback(async (prompt: string) => {
     if (!prompt || !session || busy) return;
+    const turnPrompt = withAttachments(prompt);
     setText("");
     setError(null);
 
@@ -638,7 +674,7 @@ export default function SessionView({
             parent_turn_id: null,
             seq: previous.length + 1,
             status: "completed",
-            prompt,
+            prompt: turnPrompt,
             started_at: Date.now(),
             completed_at: Date.now(),
             usage: { input_tokens: 120, cached_input_tokens: 0, output_tokens: 30, reasoning_tokens: 0, cost_micros: 140, provider_micros: 140, source: "provider" },
@@ -660,6 +696,7 @@ export default function SessionView({
           ],
         },
       ]);
+      setAttachments([]);
       return;
     }
 
@@ -677,7 +714,8 @@ export default function SessionView({
         setAgents((previous) => [...previous, spawned]);
         worker = spawned;
       }
-      const reply = await api.sendTurn(project, session.id, worker.id, prompt, model, effort);
+      const reply = await api.sendTurn(project, session.id, worker.id, turnPrompt, model, effort);
+      setAttachments([]);
       setLiveTurn(reply.turn);
       setTurns((previous) => [
         ...previous,
@@ -692,14 +730,43 @@ export default function SessionView({
     } finally {
       setBusy(false);
     }
-  }, [session, busy, tauri, agents, project, model, effort, target]);
+  }, [session, busy, tauri, agents, project, model, effort, target, withAttachments]);
+
+  /** Copy files picked in the native dialog, then let the next turn name their paths. */
+  const attachFiles = useCallback(async () => {
+    setAddOpen(false);
+    if (!tauri) return;
+    try {
+      setError(null);
+      const { open } = await import("@tauri-apps/plugin-dialog");
+      const picked = await open({
+        multiple: true,
+        title: "Attach files",
+        defaultPath: project,
+      });
+      if (!picked) return;
+      const paths = Array.isArray(picked) ? picked : [picked];
+      if (paths.length === 0) return;
+      const imported = await api.importAttachments(project, paths);
+      if (imported.length === 0) return;
+      setAttachments((current) => [
+        ...current,
+        ...imported.filter((path) => !current.includes(path)),
+      ]);
+    } catch (problem) {
+      setError(problem instanceof Error ? problem.message : String(problem));
+    }
+  }, [tauri, project]);
 
   /** Send now reviews first: the agent receives only what the user confirmed in the card. */
   const send = useCallback(() => {
-    const prompt = text.trim();
+    const prompt =
+      text.trim() ||
+      (attachments.length > 0 ? "Read the attached files and tell me what matters." : "");
     if (!prompt || !session || busy || review) return;
+    setAddOpen(false);
     setReview(prompt);
-  }, [text, session, busy, review]);
+  }, [text, session, busy, review, attachments]);
 
   /** Swarm, first press: freeze the task and ask the room who can take it. */
   const prepareSwarm = useCallback(async () => {
@@ -710,10 +777,11 @@ export default function SessionView({
       return;
     }
     setPreparing(true);
+    setAddOpen(false);
     setError(null);
     try {
       const targets = await onSwarmPrepare();
-      setSwarmTask(task);
+      setSwarmTask(withAttachments(task));
       setSwarmTargets(targets);
       setSwarmPicked(targets.map((target) => target.name));
     } catch (problem) {
@@ -722,7 +790,7 @@ export default function SessionView({
     } finally {
       setPreparing(false);
     }
-  }, [onSwarmPrepare, text, onNotice]);
+  }, [onSwarmPrepare, text, onNotice, withAttachments]);
 
   const toggleSwarmTarget = useCallback((name: string) => {
     setSwarmPicked((picked) =>
@@ -743,6 +811,7 @@ export default function SessionView({
       await onSwarm(swarmTask, chosen);
       setSwarmTargets(null);
       setSwarmPicked([]);
+      setAttachments([]);
     } catch (problem) {
       setError(problem instanceof Error ? problem.message : String(problem));
     } finally {
@@ -863,14 +932,8 @@ export default function SessionView({
           <p className="empty">Open a project first — the session log lives in its .rigel folder.</p>
         </aside>
         <main className="detail session-main">
+          {projectControls}
           <p className="empty">No project open.</p>
-          {onChooseProject ? (
-            <div className="gate-actions">
-              <button className="primary" onClick={onChooseProject}>
-                Open a folder…
-              </button>
-            </div>
-          ) : null}
         </main>
         <aside className="inspector" />
       </>
@@ -1020,6 +1083,7 @@ export default function SessionView({
       </aside>
 
       <main className="detail session-main">
+        {projectControls}
         <header className="detail-head">
           <div>
             <p className="eyebrow">
@@ -1228,25 +1292,156 @@ export default function SessionView({
               />
             ) : null}
             <div className="composer">
-              <textarea
-                value={text}
-                onChange={(event) => setText(event.target.value)}
-                onKeyDown={(event) => {
-                  if (event.key === "Enter" && !event.shiftKey) {
-                    event.preventDefault();
-                    void send();
+              <div className="composer-field">
+                <textarea
+                  value={text}
+                  onChange={(event) => setText(event.target.value)}
+                  onKeyDown={(event) => {
+                    if (event.key === "Enter" && !event.shiftKey) {
+                      event.preventDefault();
+                      void send();
+                    }
+                  }}
+                  placeholder={
+                    review
+                      ? "Review the brief above before it sends…"
+                      : live
+                        ? "A turn is running…"
+                        : attachments.length > 0
+                          ? "Ask about the attached files…"
+                          : "Ask the agent; Enter sends, Shift+Enter adds a line"
                   }
-                }}
-                placeholder={
-                  review
-                    ? "Review the brief above before it sends…"
-                    : live
-                      ? "A turn is running…"
-                      : "Ask the agent; Enter sends, Shift+Enter adds a line"
-                }
-                rows={2}
-                disabled={live || review !== null}
-              />
+                  rows={2}
+                  disabled={live || review !== null}
+                />
+                <div className="composer-tray">
+                  <div className="composer-add" ref={addRef}>
+                    <button
+                      type="button"
+                      className="composer-plus"
+                      aria-label="Add context"
+                      aria-haspopup="menu"
+                      aria-expanded={addOpen}
+                      title="Add context"
+                      onClick={() => setAddOpen((open) => !open)}
+                      disabled={live || review !== null}
+                    >
+                      <svg width="14" height="14" viewBox="0 0 20 20" fill="none" aria-hidden>
+                        <path
+                          d="M10 4.5v11M4.5 10h11"
+                          stroke="currentColor"
+                          strokeWidth="1.5"
+                          strokeLinecap="round"
+                        />
+                      </svg>
+                    </button>
+                    {addOpen ? (
+                      <div className="composer-menu" role="menu" aria-label="Add context">
+                        <p className="composer-menu-label">Add context</p>
+                        <button
+                          type="button"
+                          role="menuitem"
+                          className="composer-menu-item"
+                          onClick={() => void attachFiles()}
+                          disabled={!tauri}
+                          title={
+                            tauri
+                              ? "Copy files into this project for the next turn"
+                              : "Available in the desktop app"
+                          }
+                        >
+                          <svg width="14" height="14" viewBox="0 0 20 20" fill="none" aria-hidden>
+                            <path
+                              d="M12.5 5.5 7 11a3 3 0 1 0 4.24 4.24l5.66-5.66a4 4 0 0 0-5.66-5.66L5.58 9.58a5 5 0 0 0 7.07 7.07l4.6-4.6"
+                              stroke="currentColor"
+                              strokeWidth="1.3"
+                              strokeLinecap="round"
+                              strokeLinejoin="round"
+                            />
+                          </svg>
+                          <span>Attach files…</span>
+                          {!tauri ? <small>desktop</small> : null}
+                        </button>
+                        <button
+                          type="button"
+                          role="menuitem"
+                          className="composer-menu-item"
+                          onClick={() => {
+                            setAddOpen(false);
+                            onBrowseSkills?.();
+                          }}
+                          disabled={!onBrowseSkills}
+                        >
+                          <svg width="14" height="14" viewBox="0 0 20 20" fill="none" aria-hidden>
+                            <path
+                              d="M10 2.5 11.3 7.2 16 8.5 11.3 9.8 10 14.5 8.7 9.8 4 8.5 8.7 7.2 10 2.5Z"
+                              stroke="currentColor"
+                              strokeWidth="1.2"
+                              strokeLinejoin="round"
+                            />
+                            <path
+                              d="M15.5 12.5 16 14.5 18 15 16 15.5 15.5 17.5 15 15.5 13 15 15 14.5 15.5 12.5Z"
+                              stroke="currentColor"
+                              strokeWidth="1.1"
+                              strokeLinejoin="round"
+                            />
+                          </svg>
+                          <span>Browse skills…</span>
+                          <small>local index</small>
+                        </button>
+                        <button
+                          type="button"
+                          role="menuitem"
+                          className="composer-menu-item"
+                          onClick={() => {
+                            setAddOpen(false);
+                            onOpenSettings?.();
+                          }}
+                          disabled={!onOpenSettings}
+                        >
+                          <svg width="14" height="14" viewBox="0 0 20 20" fill="none" aria-hidden>
+                            <circle cx="10" cy="10" r="2.3" stroke="currentColor" strokeWidth="1.3" />
+                            <path
+                              d="M10 3.2v1.6M10 15.2v1.6M3.2 10h1.6M15.2 10h1.6M5.2 5.2l1.1 1.1M13.7 13.7l1.1 1.1M14.8 5.2l-1.1 1.1M6.3 13.7l-1.1 1.1"
+                              stroke="currentColor"
+                              strokeWidth="1.2"
+                              strokeLinecap="round"
+                            />
+                          </svg>
+                          <span>Settings</span>
+                        </button>
+                        <p className="composer-menu-hint">
+                          Files are copied into .rigel/attachments; the next turn gets their paths.
+                        </p>
+                      </div>
+                    ) : null}
+                  </div>
+                  {attachments.length > 0 ? (
+                    <ul className="composer-attachments" aria-label="Attached files">
+                      {attachments.map((path) => {
+                        const name = path.split("/").pop() || path;
+                        return (
+                          <li key={path} className="composer-attachment">
+                            <span title={path}>{name}</span>
+                            <button
+                              type="button"
+                              aria-label={`Remove ${name}`}
+                              title={`Remove ${name}`}
+                              onClick={() =>
+                                setAttachments((current) =>
+                                  current.filter((item) => item !== path),
+                                )
+                              }
+                            >
+                              ×
+                            </button>
+                          </li>
+                        );
+                      })}
+                    </ul>
+                  ) : null}
+                </div>
+              </div>
               <div className="composer-actions">
                 <label className="harness-pick" title="Which agent answers the next turn">
                   <select
@@ -1274,7 +1469,7 @@ export default function SessionView({
                 <button
                   className="primary"
                   onClick={() => void send()}
-                  disabled={live || review !== null || !text.trim()}
+                  disabled={live || review !== null || (!text.trim() && attachments.length === 0)}
                 >
                   {live ? "Running…" : "Send"}
                 </button>
