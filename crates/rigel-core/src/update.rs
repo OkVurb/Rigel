@@ -3,29 +3,40 @@
 //! The rule N5 states is narrow on purpose: *no telemetry, no phone-home; updates are a signed
 //! manifest fetch you can disable.* This module is the whole of the network behaviour:
 //!
-//! * **Off until asked for.** The switch defaults to `false`. That is stricter than "opt-out"
-//!   and it is what makes the Phase 7 exit test ("no unexpected network calls") true by
-//!   construction rather than by inspection.
+//! * **On by default, and switchable.** A release build checks the latest GitHub release once at
+//!   launch and on demand; nothing checks on a timer. Settings → Updates turns both the check
+//!   and auto-install off in one place, and a disabled switch makes no request at all.
 //! * **Signed, and checked before parsed.** An Ed25519 signature over the canonical manifest
-//!   bytes (`version\nurl\nsha256`) means a mirror or a proxy cannot change the version, the
-//!   URL or the artifact hash. The public key is a local file (`update-pubkey.txt`) or
+//!   bytes (`version\nurl\nsha256`, plus the optional MSI URL and hash) means a mirror or a
+//!   proxy cannot change the version, an artifact URL or an artifact hash. The public key is a
+//!   bundled resource copied into the data directory (`update-pubkey.txt`), or
 //!   `RIGEL_UPDATE_PUBKEY`; there is no built-in key to leak.
 //! * **The artifact is checked too.** The manifest's `sha256` is compared with the downloaded
 //!   bytes before anything is executed. Signature without hash would let a stale artifact be
 //!   paired with a fresh signature.
-//!
-//! What this does *not* do: install anything. `UPDATE.md` and the release process run the
-//! installer the user downloaded; Rigel only tells them a new version exists and that the file
-//! is the one the publisher signed.
+//! * **Installing is a separate choice.** Auto-install defaults to `true` but is its own switch;
+//!   when it is on, a verified installer is started and the window exits so the installer can
+//!   replace it. The update is never run from a path the manifest did not name and the hash did
+//!   not match.
 
 use std::path::{Path, PathBuf};
 
 use ed25519_dalek::{Signature, VerifyingKey};
+use futures::StreamExt;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use tokio::io::AsyncWriteExt;
 
 pub const SETTINGS_FILE: &str = "update.json";
 pub const PUBKEY_FILE: &str = "update-pubkey.txt";
+/// The manifest the window checks when the switch is on. A GitHub release attaches this file,
+/// so `releases/latest` always resolves to the newest published manifest.
+pub const GITHUB_MANIFEST_URL: &str =
+    "https://github.com/OkVurb/Rigel/releases/latest/download/latest.json";
+/// Downloaded installers live here until the app exits to run them.
+pub const UPDATE_DIR: &str = "updates";
+/// A release installer is tens of megabytes; this is a ceiling, not an expectation.
+const MAX_ARTIFACT_BYTES: u64 = 300 * 1024 * 1024;
 
 #[derive(Debug, thiserror::Error)]
 pub enum UpdateError {
@@ -59,6 +70,21 @@ pub enum UpdateError {
     #[error("could not fetch the manifest: {0}")]
     Network(String),
 
+    #[error("no published release yet at {0}")]
+    NoRelease(String),
+
+    #[error("the update artifact is larger than 300 MB")]
+    TooLarge,
+
+    #[error("the update artifact has an unsupported type: {0}")]
+    UnsupportedArtifact(String),
+
+    #[error("could not start the installer: {0}")]
+    Install(String),
+
+    #[error("updates can only be installed on Windows")]
+    NotWindows,
+
     #[error("a manifest must come from https, not {0}")]
     NotHttps(String),
 }
@@ -70,30 +96,62 @@ pub struct UpdateManifest {
     pub url: String,
     /// Hex sha256 of the artifact.
     pub sha256: String,
-    /// Hex Ed25519 signature over `version\nurl\nsha256`.
+    /// Hex Ed25519 signature over `version\nurl\nsha256`, plus `msi_url\nmsi_sha256` when the
+    /// optional MSI asset is present.
     pub signature: String,
     #[serde(default)]
     pub notes: Option<String>,
     #[serde(default)]
     pub published_at: Option<i64>,
+    /// The MSI twin of `url`. The window picks it when this copy is installed under Program
+    /// Files; a per-user NSIS install keeps using `url`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub msi_url: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub msi_sha256: Option<String>,
 }
 
 impl UpdateManifest {
     /// The bytes the signature covers. Fixed order, no JSON formatting, so a re-serialised
-    /// manifest still verifies.
+    /// manifest still verifies. The optional MSI fields extend the payload only when both are
+    /// present, which keeps every three-line manifest already in the wild verifiable.
     pub fn signed_bytes(&self) -> Vec<u8> {
-        format!("{}\n{}\n{}", self.version, self.url, self.sha256).into_bytes()
+        let mut text = format!("{}\n{}\n{}", self.version, self.url, self.sha256);
+        if let (Some(url), Some(sha256)) = (&self.msi_url, &self.msi_sha256) {
+            text.push('\n');
+            text.push_str(url);
+            text.push('\n');
+            text.push_str(sha256);
+        }
+        text.into_bytes()
     }
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct UpdateSettings {
-    /// Off by default: no request is made until someone turns this on.
-    #[serde(default)]
+    /// On by default: one signed check at launch, which Settings → Updates can turn off.
+    #[serde(default = "default_true")]
     pub enabled: bool,
     /// The manifest location. Kept next to the switch so the file is the whole configuration.
     #[serde(default)]
     pub manifest_url: Option<String>,
+    /// Download and run the installer without another click once a signed update is found.
+    #[serde(default = "default_true")]
+    pub auto_install: bool,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+impl Default for UpdateSettings {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            manifest_url: None,
+            auto_install: true,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -105,6 +163,8 @@ pub struct UpdateCheck {
     pub url: String,
     pub sha256: String,
     pub notes: Option<String>,
+    pub msi_url: Option<String>,
+    pub msi_sha256: Option<String>,
 }
 
 pub fn settings_path(data_dir: &Path) -> PathBuf {
@@ -116,6 +176,14 @@ pub fn load_settings(data_dir: &Path) -> UpdateSettings {
         .ok()
         .and_then(|text| serde_json::from_str(&text).ok())
         .unwrap_or_default()
+}
+
+/// The configured manifest, or the release asset GitHub publishes from the workflow.
+pub fn manifest_url(settings: &UpdateSettings) -> &str {
+    settings
+        .manifest_url
+        .as_deref()
+        .unwrap_or(GITHUB_MANIFEST_URL)
 }
 
 pub fn save_settings(data_dir: &Path, settings: &UpdateSettings) -> Result<(), UpdateError> {
@@ -180,6 +248,9 @@ pub async fn fetch_manifest(url: &str) -> Result<UpdateManifest, UpdateError> {
         .send()
         .await
         .map_err(|error| UpdateError::Network(error.to_string()))?;
+    if response.status() == reqwest::StatusCode::NOT_FOUND {
+        return Err(UpdateError::NoRelease(url.to_string()));
+    }
     if !response.status().is_success() {
         return Err(UpdateError::Network(format!("HTTP {}", response.status())));
     }
@@ -194,6 +265,164 @@ pub async fn fetch_manifest(url: &str) -> Result<UpdateManifest, UpdateError> {
         ));
     }
     parse_manifest(&String::from_utf8_lossy(&bytes))
+}
+
+/// Check the manifest the switch points at, defaulting to GitHub's newest release asset.
+pub async fn check_latest(data_dir: &Path, current: &str) -> Result<UpdateCheck, UpdateError> {
+    let settings = load_settings(data_dir);
+    if !settings.enabled {
+        return Err(UpdateError::Disabled);
+    }
+    let url = manifest_url(&settings).to_string();
+    let manifest = fetch_manifest(&url).await?;
+    check(data_dir, &manifest, current)
+}
+
+/// The two URLs an update can use. A per-machine install (MSI under Program Files) gets the MSI;
+/// everything else, including a per-user NSIS install, gets the setup executable.
+pub fn artifact_for(check: &UpdateCheck, prefer_msi: bool) -> (&str, &str) {
+    if prefer_msi {
+        if let (Some(url), Some(sha256)) = (&check.msi_url, &check.msi_sha256) {
+            return (url, sha256);
+        }
+    }
+    (&check.url, &check.sha256)
+}
+
+/// Download one installer and verify the signed hash before returning its path. The file is
+/// written under `data_dir/updates`; a failed or oversized download is removed rather than left
+/// for the installer to find.
+pub async fn download_artifact(
+    url: &str,
+    sha256: &str,
+    data_dir: &Path,
+) -> Result<PathBuf, UpdateError> {
+    let loopback = url.starts_with("http://127.0.0.1:") || url.starts_with("http://localhost:");
+    if !url.starts_with("https://") && !loopback {
+        return Err(UpdateError::NotHttps(url.to_string()));
+    }
+    let dir = data_dir.join(UPDATE_DIR);
+    std::fs::create_dir_all(&dir)?;
+    let path = dir.join(artifact_name(url));
+
+    let client = reqwest::Client::builder()
+        // A release can be a few hundred MB; 300 seconds total was too eager on a slow link.
+        .connect_timeout(std::time::Duration::from_secs(15))
+        .timeout(std::time::Duration::from_secs(900))
+        .user_agent("rigel/0.1")
+        .build()
+        .map_err(|error| UpdateError::Network(error.to_string()))?;
+    let response = client
+        .get(url)
+        .send()
+        .await
+        .map_err(|error| UpdateError::Network(error.to_string()))?;
+    if !response.status().is_success() {
+        return Err(UpdateError::Network(format!("HTTP {}", response.status())));
+    }
+    if response
+        .content_length()
+        .is_some_and(|length| length > MAX_ARTIFACT_BYTES)
+    {
+        return Err(UpdateError::TooLarge);
+    }
+
+    let mut file = tokio::fs::File::create(&path).await?;
+    let mut hasher = Sha256::new();
+    let mut total = 0u64;
+    let mut stream = response.bytes_stream();
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.map_err(|error| UpdateError::Network(error.to_string()))?;
+        total += chunk.len() as u64;
+        if total > MAX_ARTIFACT_BYTES {
+            drop(file);
+            let _ = tokio::fs::remove_file(&path).await;
+            return Err(UpdateError::TooLarge);
+        }
+        hasher.update(&chunk);
+        file.write_all(&chunk).await?;
+    }
+    file.flush().await?;
+
+    let found = format!("{:x}", hasher.finalize());
+    if !found.eq_ignore_ascii_case(sha256) {
+        let _ = tokio::fs::remove_file(&path).await;
+        return Err(UpdateError::HashMismatch {
+            expected: sha256.to_string(),
+            found,
+        });
+    }
+    Ok(path)
+}
+
+/// A fixed basename from the URL, with only filename-safe characters. The asset name is
+/// `Rigel_<version>_x64-setup.exe`; a URL without a recognised suffix falls back to an exe.
+fn artifact_name(url: &str) -> String {
+    let tail = url
+        .split(['?', '#'])
+        .next()
+        .unwrap_or(url)
+        .rsplit('/')
+        .next()
+        .unwrap_or_default();
+    let cleaned: String = tail
+        .chars()
+        .filter(|character| {
+            character.is_ascii_alphanumeric() || matches!(character, '.' | '-' | '_')
+        })
+        .collect();
+    if cleaned.ends_with(".exe") || cleaned.ends_with(".msi") {
+        cleaned
+    } else {
+        "rigel-update.exe".to_string()
+    }
+}
+
+/// Run the downloaded installer. NSIS is silent with `/S` and relaunches this app with `/R`;
+/// MSI uses a basic progress UI and never reboots. The caller exits the window after this
+/// returns, so the installer can replace the running executable.
+pub fn install_artifact(path: &Path) -> Result<(), UpdateError> {
+    if !path.is_file() {
+        return Err(UpdateError::Io(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            format!("the downloaded installer is missing: {}", path.display()),
+        )));
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = path;
+        Err(UpdateError::NotWindows)
+    }
+    #[cfg(windows)]
+    {
+        let extension = path
+            .extension()
+            .and_then(|extension| extension.to_str())
+            .unwrap_or_default()
+            .to_ascii_lowercase();
+        let mut command = match extension.as_str() {
+            "msi" => {
+                let mut command = std::process::Command::new("msiexec");
+                command.args(["/i"]).arg(path).args(["/qb", "/norestart"]);
+                command
+            }
+            "exe" => {
+                let mut command = std::process::Command::new(path);
+                // Tauri's NSIS template reads `/R` in silent mode and starts the new build after
+                // the install, so an automatic update does not leave the user with a closed app.
+                command.args(["/S", "/R"]);
+                command
+            }
+            _ => {
+                return Err(UpdateError::UnsupportedArtifact(path.display().to_string()));
+            }
+        };
+        crate::process::hide(&mut command);
+        command
+            .spawn()
+            .map_err(|error| UpdateError::Install(error.to_string()))?;
+        Ok(())
+    }
 }
 
 /// Verify a downloaded artifact against the signed hash.
@@ -231,6 +460,8 @@ pub fn check(
         url: manifest.url.clone(),
         sha256: manifest.sha256.clone(),
         notes: manifest.notes.clone(),
+        msi_url: manifest.msi_url.clone(),
+        msi_sha256: manifest.msi_sha256.clone(),
     })
 }
 
@@ -295,6 +526,8 @@ mod tests {
             signature: String::new(),
             notes: Some("a test release".to_string()),
             published_at: None,
+            msi_url: None,
+            msi_sha256: None,
         };
         let signature = key.sign(&manifest.signed_bytes());
         manifest.signature = signature
@@ -331,6 +564,148 @@ mod tests {
             verify_manifest(&rehashed, &key),
             Err(UpdateError::BadSignatureCheck)
         ));
+    }
+
+    #[test]
+    fn the_optional_msi_asset_is_covered_by_the_signature() {
+        let (mut manifest, key) = signed_manifest(7, "0.2.0", &"a".repeat(64));
+        manifest.msi_url = Some("https://example.test/rigel-0.2.0.msi".into());
+        manifest.msi_sha256 = Some("c".repeat(64));
+        // Re-sign the five-line payload the release workflow emits.
+        let signing = SigningKey::from_bytes(&[7; 32]);
+        manifest.signature = signing
+            .sign(&manifest.signed_bytes())
+            .to_bytes()
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect();
+        verify_manifest(&manifest, &key).expect("the MSI fields are part of the payload");
+
+        manifest.msi_url = Some("https://evil.test/rigel.msi".into());
+        assert!(matches!(
+            verify_manifest(&manifest, &key),
+            Err(UpdateError::BadSignatureCheck)
+        ));
+    }
+
+    #[test]
+    fn the_installer_choice_prefers_the_msi_only_when_this_copy_is_per_machine() {
+        let check = UpdateCheck {
+            current: "0.1.0".into(),
+            offered: "0.2.0".into(),
+            available: true,
+            verified: true,
+            url: "https://example.test/setup.exe".into(),
+            sha256: "a".repeat(64),
+            notes: None,
+            msi_url: Some("https://example.test/rigel.msi".into()),
+            msi_sha256: Some("b".repeat(64)),
+        };
+        assert_eq!(
+            artifact_for(&check, true),
+            ("https://example.test/rigel.msi", "b".repeat(64).as_str())
+        );
+        assert_eq!(
+            artifact_for(&check, false),
+            ("https://example.test/setup.exe", "a".repeat(64).as_str())
+        );
+        let no_msi = UpdateCheck {
+            msi_url: None,
+            msi_sha256: None,
+            ..check
+        };
+        assert_eq!(
+            artifact_for(&no_msi, true).0,
+            "https://example.test/setup.exe"
+        );
+    }
+
+    #[test]
+    fn the_manifest_defaults_to_the_latest_github_release_asset() {
+        let settings = UpdateSettings::default();
+        assert_eq!(manifest_url(&settings), GITHUB_MANIFEST_URL);
+        let custom = UpdateSettings {
+            manifest_url: Some("https://example.test/latest.json".into()),
+            ..settings
+        };
+        assert_eq!(manifest_url(&custom), "https://example.test/latest.json");
+    }
+
+    #[test]
+    fn installer_names_are_taken_from_the_asset_and_never_from_a_path() {
+        assert_eq!(
+            artifact_name(
+                "https://github.com/OkVurb/Rigel/releases/download/v1/Rigel_1_x64-setup.exe?download=1"
+            ),
+            "Rigel_1_x64-setup.exe"
+        );
+        assert_eq!(
+            artifact_name("https://example.test/Rigel.msi#fragment"),
+            "Rigel.msi"
+        );
+        assert_eq!(
+            artifact_name("https://example.test/download"),
+            "rigel-update.exe"
+        );
+        assert_eq!(
+            artifact_name("https://example.test/../../evil.exe"),
+            "evil.exe"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_download_is_hash_checked_and_a_bad_one_is_deleted() {
+        use tokio::io::AsyncReadExt;
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("a local listener");
+        let address = listener.local_addr().expect("an address");
+        let body = b"installer bytes".to_vec();
+        let expected = format!("{:x}", Sha256::digest(&body));
+        let server_body = body.clone();
+        tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.expect("one request");
+            let mut request = [0u8; 1024];
+            let _ = socket.read(&mut request).await;
+            let header = format!(
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                server_body.len()
+            );
+            socket.write_all(header.as_bytes()).await.expect("header");
+            socket.write_all(&server_body).await.expect("body");
+        });
+
+        let dir = tempfile::tempdir().unwrap();
+        let url = format!("http://127.0.0.1:{}/rigel-setup.exe", address.port());
+        let path = download_artifact(&url, &expected, dir.path())
+            .await
+            .expect("the matching bytes download");
+        assert_eq!(std::fs::read(&path).unwrap(), body);
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("a second listener");
+        let address = listener.local_addr().expect("an address");
+        let server_body = body.clone();
+        tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.expect("one request");
+            let mut request = [0u8; 1024];
+            let _ = socket.read(&mut request).await;
+            let header = format!(
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                server_body.len()
+            );
+            socket.write_all(header.as_bytes()).await.expect("header");
+            socket.write_all(&server_body).await.expect("body");
+        });
+        let url = format!("http://127.0.0.1:{}/rigel-setup.exe", address.port());
+        let wrong = "f".repeat(64);
+        assert!(matches!(
+            download_artifact(&url, &wrong, dir.path()).await,
+            Err(UpdateError::HashMismatch { .. })
+        ));
+        assert!(!path.exists(), "a mismatched download is removed");
     }
 
     #[test]
@@ -373,21 +748,24 @@ mod tests {
     }
 
     #[test]
-    fn the_switch_defaults_off_and_round_trips() {
+    fn the_switch_defaults_on_and_round_trips() {
         let dir = tempfile::tempdir().unwrap();
         let defaults = load_settings(dir.path());
-        assert!(!defaults.enabled, "no request until this is turned on");
+        assert!(defaults.enabled, "a release checks at launch by default");
+        assert!(defaults.auto_install, "auto-install is the default");
 
         save_settings(
             dir.path(),
             &UpdateSettings {
                 enabled: true,
                 manifest_url: Some("https://example.test/latest.json".into()),
+                auto_install: false,
             },
         )
         .unwrap();
         let saved = load_settings(dir.path());
         assert!(saved.enabled);
+        assert!(!saved.auto_install);
         assert_eq!(
             saved.manifest_url.as_deref(),
             Some("https://example.test/latest.json")
@@ -399,6 +777,15 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let (manifest, key) = signed_manifest(7, "0.2.0", &"a".repeat(64));
         std::fs::write(dir.path().join(PUBKEY_FILE), encode_hex(&key)).unwrap();
+        save_settings(
+            dir.path(),
+            &UpdateSettings {
+                enabled: false,
+                manifest_url: None,
+                auto_install: false,
+            },
+        )
+        .unwrap();
         assert!(matches!(
             check(dir.path(), &manifest, "0.1.0"),
             Err(UpdateError::Disabled)
@@ -409,6 +796,7 @@ mod tests {
             &UpdateSettings {
                 enabled: true,
                 manifest_url: None,
+                auto_install: false,
             },
         )
         .unwrap();

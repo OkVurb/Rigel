@@ -199,7 +199,7 @@ PY
   "$exe" --data-dir "$tmp/data" update check --manifest "$work/manifest.json" --json >/dev/null 2>&1
   disabled=$?
   set -e
-  check "checks are off by default and refuse to run" "$disabled" "1"
+  check "a disabled check refuses to run" "$disabled" "1"
 else
   note "openssl/xxd not found: the signed-manifest checks were skipped"
 fi

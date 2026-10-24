@@ -31,7 +31,7 @@ reporting.
 | MCP tool host | Scoped to one `session` and one `agent`; a tool call cannot name another agent's files or budget. | `rigel-mcp` |
 | Skills | A skill body is data. Loading one is visible in the transcript and grants no permission. | `skills/` |
 | Memory | Committed files pass a secret and absolute-path validator before landing in the tree. | `memory.rs` |
-| Updates | Off by default. A manifest is Ed25519-verified over `version\nurl\nsha256` before it is read, and the artifact's SHA-256 must match before it is offered. | `update.rs` |
+| Updates | On by default. One signed manifest check runs at launch (and on demand); Settings → Updates turns the check or auto-install off. The manifest is Ed25519-verified over `version\nurl\nsha256` (plus the optional MSI fields) before it is read, and the downloaded artifact's SHA-256 must match before anything runs. | `update.rs` |
 
 ## Network calls, exhaustively
 
@@ -39,7 +39,7 @@ reporting.
 - The selected provider directly (OpenRouter, Gemini) when configured that way.
 - `api.github.com` and `raw.githubusercontent.com` during `rigel skills index`, on demand.
 - SkillsMP and SkillHub during `rigel skills sync`, on demand.
-- The update manifest, only when `rigel update check` runs and only after the switch is on.
+- The latest GitHub release manifest (`github.com/OkVurb/Rigel/releases/latest/download/latest.json`) and its installer assets. A check runs once at launch and on demand; the installer is downloaded only for an available, signed update. Turning the update switch off stops both.
 
 Nothing else. `rigel doctor` and `rigel tools list` spawn local processes and read local files;
 they make no requests. The Phase 7 exit script runs them behind a dead proxy to keep that true.

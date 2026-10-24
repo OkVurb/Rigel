@@ -469,7 +469,8 @@ async fn installs(store: &Store) -> Check {
 }
 
 /// The update switch is a row of its own: N5 says the fetch can be disabled, and a user
-/// reading `doctor` should not have to open a JSON file to find out which way it is set.
+/// reading `doctor` should not have to open a JSON file to find out which way it is set or
+/// which manifest it will read.
 fn updates(data_dir: &Path) -> Check {
     let settings = rigel_core::update::load_settings(data_dir);
     if !settings.enabled {
@@ -478,13 +479,7 @@ fn updates(data_dir: &Path) -> Check {
     match rigel_core::update::public_key(data_dir) {
         Ok(_) => Check::ok(
             "updates",
-            format!(
-                "on · {}",
-                settings
-                    .manifest_url
-                    .as_deref()
-                    .unwrap_or("no manifest URL")
-            ),
+            format!("on · {}", rigel_core::update::manifest_url(&settings)),
         ),
         Err(_) => Check::warn(
             "updates",

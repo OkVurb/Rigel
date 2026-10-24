@@ -221,7 +221,7 @@ cargo run -q -p rigel-cli -- tools ledger
 # a report with an exit code: 0 clear, 1 warnings, 2 failures
 cargo run -q -p rigel-cli -- doctor --project . --json
 
-# updates are off until asked for; the manifest is signed and hash-checked
+# updates check GitHub at launch; the manifest is signed and hash-checked
 cargo run -q -p rigel-cli -- update status
 cargo run -q -p rigel-cli -- update check --manifest ./release.json
 
@@ -268,7 +268,7 @@ each surface and the evidence for it.
 | **Tools** | Twelve probed tools, requirements traced to the line that said so, the trust arithmetic, gated installs |
 | **Doctor** | One row per check and an exit code: `0` clear, `1` warnings, `2` failures |
 | **MCP** | A stdio host scoped to one session and one agent, sharing the same tools |
-| **Updates** | An Ed25519 manifest and an artifact SHA-256 check — real, and off until asked for |
+| **Updates** | One signed check of the latest GitHub release, an artifact SHA-256 and Ed25519 check, and auto-install — both switches in Settings → Updates |
 
 The full table, including what is deliberately unfinished, is [docs/what-works.md](docs/what-works.md).
 
@@ -277,10 +277,11 @@ The full table, including what is deliberately unfinished, is [docs/what-works.m
 <details>
 <summary><b>Does Rigel need the network?</b></summary>
 
-Only to index or sync a source (`skills index`, `skills sync`) and to run a model turn. Search, the
-static review, evidence, variants and the diff all read local SQLite. A re-index inside the
-freshness window makes zero HTTP requests; after it, each URL is revalidated with
-`If-None-Match`.
+Only to index or sync a source (`skills index`, `skills sync`), to run a model turn, and to check
+for updates. Search, the static review, evidence, variants and the diff all read local SQLite. A
+re-index inside the freshness window makes zero HTTP requests; after it, each URL is revalidated
+with `If-None-Match`. The update check is one signed request to the latest GitHub release at
+launch, or whenever you press Check now; Settings → Updates turns it and auto-install off.
 
 </details>
 

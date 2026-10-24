@@ -85,11 +85,15 @@ runs an elevation tool.
 
 ## Updates
 
-`update.rs` is the only update code. The switch defaults to off. A manifest is Ed25519-verified over
-`version\nurl\nsha256` against a key in `update-pubkey.txt` or `RIGEL_UPDATE_PUBKEY`, and the
-artifact's SHA-256 must match before it is offered. Nothing installs itself. That Ed25519 key is
-not the Authenticode certificate: Windows checks the installer and the PE files inside it, while
-`rigel update verify` checks the manifest, and the two keys never stand in for each other.
+`update.rs` is the only update code. Updates are on by default: the window checks
+`github.com/OkVurb/Rigel/releases/latest/download/latest.json` once at launch and whenever the user
+presses Check now, and Settings → Updates can turn the check or auto-install off. A manifest is
+Ed25519-verified over `version\nurl\nsha256` (plus the optional MSI URL and hash) against the
+bundled `update-pubkey.txt` or `RIGEL_UPDATE_PUBKEY`. The downloaded installer's SHA-256 must match
+before it is started. A per-machine MSI install chooses the signed MSI asset, and a per-user install
+chooses the NSIS setup. That Ed25519 key is not the Authenticode certificate: Windows checks the
+installer and the PE files inside it, while Rigel checks the manifest, and the two keys never stand
+in for each other.
 
 ## Testing
 

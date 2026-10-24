@@ -9,6 +9,8 @@ import {
   type SafetyView,
   type Settings,
   type SpendReport,
+  type UpdateCheck,
+  type UpdateStatus,
 } from "./api";
 import { ModelControls } from "./modelpicker";
 import { ensurePermission } from "./notify";
@@ -266,6 +268,9 @@ export default function SettingsView({ keys, project, session, onKeys, onNotice 
   const [writableInput, setWritableInput] = useState("");
   const [dailyInput, setDailyInput] = useState("");
   const [safetyBusy, setSafetyBusy] = useState(false);
+  const [updateStatus, setUpdateStatus] = useState<UpdateStatus | null>(null);
+  const [updateCheck, setUpdateCheck] = useState<UpdateCheck | null>(null);
+  const [updateBusy, setUpdateBusy] = useState(false);
 
   const provider = settings?.provider ?? "omniroute";
   const providerInfo = PROVIDERS.find((item) => item.id === provider) ?? PROVIDERS[0];
@@ -300,6 +305,10 @@ export default function SettingsView({ keys, project, session, onKeys, onNotice 
       .harnessProbe(false)
       .then((next) => live && setHarnesses(next))
       .catch(() => live && setHarnesses(null));
+    api
+      .updateStatus()
+      .then((next) => live && setUpdateStatus(next))
+      .catch(() => live && setUpdateStatus(null));
     if (project) {
       api
         .spendReport(project)
@@ -423,6 +432,66 @@ export default function SettingsView({ keys, project, session, onKeys, onNotice 
       );
     } catch (problem) {
       setError(problem instanceof Error ? problem.message : String(problem));
+    }
+  };
+
+  const saveUpdateSwitch = async (
+    field: "enabled" | "auto_install",
+    enabled: boolean,
+  ) => {
+    if (!updateStatus) return;
+    setUpdateBusy(true);
+    try {
+      const next = await api.updateSet(
+        field === "enabled" ? enabled : updateStatus.enabled,
+        field === "auto_install" ? enabled : updateStatus.auto_install,
+        null,
+      );
+      setUpdateStatus(next);
+      if (!next.enabled) setUpdateCheck(null);
+      onNotice(
+        field === "enabled"
+          ? enabled
+            ? "Rigel will check GitHub once at launch and on demand."
+            : "Update checks are off; no request is made."
+          : enabled
+            ? "A signed update will download and install when found."
+            : "Updates will wait for an Install click.",
+      );
+    } catch (failure) {
+      setError(failure instanceof Error ? failure.message : String(failure));
+    } finally {
+      setUpdateBusy(false);
+    }
+  };
+
+  const checkForUpdate = async () => {
+    setUpdateBusy(true);
+    setError(null);
+    try {
+      const result = await api.updateCheck();
+      setUpdateCheck(result);
+      onNotice(
+        result.available
+          ? `Rigel ${result.offered} is available.`
+          : `Rigel ${result.current} is current.`,
+      );
+    } catch (failure) {
+      setUpdateCheck(null);
+      setError(failure instanceof Error ? failure.message : String(failure));
+    } finally {
+      setUpdateBusy(false);
+    }
+  };
+
+  const installUpdate = async () => {
+    setUpdateBusy(true);
+    setError(null);
+    try {
+      onNotice(await api.updateInstall());
+    } catch (failure) {
+      setError(failure instanceof Error ? failure.message : String(failure));
+      setUpdateBusy(false);
     }
   };
 
@@ -913,6 +982,75 @@ export default function SettingsView({ keys, project, session, onKeys, onNotice 
             <code> reasoning_effort</code>; it is not baked into the model id. Subagents stay on
             the cheap allowlist and cannot be pointed at an expensive model.
           </p>
+        </section>
+
+        <section className="settings-section">
+          <div className="settings-head">
+            <h3>Updates</h3>
+            <span className={`pill ${updateStatus?.enabled ? "completed" : "cancelled"}`}>
+              {updateStatus
+                ? updateStatus.enabled
+                  ? `v${updateStatus.current}`
+                  : "off"
+                : "checking"}
+            </span>
+          </div>
+          <p className="fine">
+            One signed check at launch, then only when you press Check now. The manifest comes
+            from <code>github.com/OkVurb/Rigel/releases/latest</code>; the installer's SHA-256 and
+            publisher signature are verified before anything runs. No telemetry and no request
+            while the switch is off.
+          </p>
+          <label className="toggle">
+            <input
+              type="checkbox"
+              checked={updateStatus?.enabled ?? false}
+              disabled={!updateStatus || updateBusy}
+              onChange={(event) => void saveUpdateSwitch("enabled", event.target.checked)}
+            />
+            Check GitHub for updates
+          </label>
+          <label className="toggle">
+            <input
+              type="checkbox"
+              checked={updateStatus?.auto_install ?? false}
+              disabled={!updateStatus?.enabled || updateBusy}
+              onChange={(event) => void saveUpdateSwitch("auto_install", event.target.checked)}
+            />
+            Install automatically when a signed update is found
+          </label>
+          <div className="settings-actions">
+            <button
+              className="chip"
+              onClick={() => void checkForUpdate()}
+              disabled={!updateStatus?.enabled || updateBusy}
+            >
+              {updateBusy ? "Working\u2026" : "Check now"}
+            </button>
+            {updateCheck?.available ? (
+              <button
+                className="primary"
+                onClick={() => void installUpdate()}
+                disabled={updateBusy}
+              >
+                Install v{updateCheck.offered}
+              </button>
+            ) : null}
+          </div>
+          {updateCheck ? (
+            <p className={`fine${updateCheck.available ? " accent" : ""}`}>
+              {updateCheck.available
+                ? `Rigel ${updateCheck.offered} is available${updateCheck.notes ? ` — ${updateCheck.notes}` : "."}`
+                : `Rigel ${updateCheck.current} is current.`}
+            </p>
+          ) : null}
+          {updateStatus && !updateStatus.key_present ? (
+            <p className="fine">
+              This build has no publisher key, so it cannot verify a release. Reinstall a release
+              build; a development build can set <code>RIGEL_UPDATE_PUBKEY</code>.
+            </p>
+          ) : null}
+          <p className="fine mono">{updateStatus?.manifest_url ?? ""}</p>
         </section>
 
         <section className="settings-section">

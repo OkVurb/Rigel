@@ -2110,6 +2110,112 @@ fn settings_set(settings: Settings) -> Result<Settings, String> {
     Ok(settings)
 }
 
+#[derive(Debug, Clone, Serialize)]
+pub struct UpdateStatus {
+    pub current: String,
+    pub enabled: bool,
+    pub auto_install: bool,
+    pub manifest_url: String,
+    pub key_present: bool,
+}
+
+fn update_status_now() -> Result<UpdateStatus, String> {
+    let dir = index_dir();
+    let settings = rigel_core::update::load_settings(&dir);
+    Ok(UpdateStatus {
+        current: env!("CARGO_PKG_VERSION").to_string(),
+        enabled: settings.enabled,
+        auto_install: settings.auto_install,
+        manifest_url: rigel_core::update::manifest_url(&settings).to_string(),
+        key_present: rigel_core::update::public_key(&dir).is_ok(),
+    })
+}
+
+#[tauri::command]
+fn update_status() -> Result<UpdateStatus, String> {
+    update_status_now()
+}
+
+/// The two switches and an optional manifest override, saved beside the app data. The manifest
+/// URL is https-only; the default is the latest GitHub release's signed `latest.json`.
+#[tauri::command]
+fn update_set(
+    enabled: bool,
+    auto_install: bool,
+    manifest_url: Option<String>,
+) -> Result<UpdateStatus, String> {
+    if let Some(url) = manifest_url.as_deref() {
+        if !url.trim().is_empty() && !url.starts_with("https://") {
+            return Err("the update manifest must be an https URL".to_string());
+        }
+    }
+    // The window has no URL field, so `null` means "keep whatever the CLI configured". An
+    // explicit empty string clears it and returns to the GitHub default.
+    let manifest_url = match manifest_url {
+        Some(url) if url.trim().is_empty() => None,
+        Some(url) => Some(url),
+        None => rigel_core::update::load_settings(&index_dir()).manifest_url,
+    };
+    let settings = rigel_core::update::UpdateSettings {
+        enabled,
+        auto_install,
+        manifest_url,
+    };
+    rigel_core::update::save_settings(&index_dir(), &settings).map_err(message)?;
+    update_status_now()
+}
+
+/// One check, made only when the window asks. The core verifies the Ed25519 signature before it
+/// reads the version, then compares the signed version with this build.
+#[tauri::command]
+async fn update_check() -> Result<rigel_core::UpdateCheck, String> {
+    rigel_core::update::check_latest(&index_dir(), env!("CARGO_PKG_VERSION"))
+        .await
+        .map_err(message)
+}
+
+/// Download the signed installer, verify its hash, start it and close the window so the installer
+/// can replace the executable. A per-machine MSI install uses the MSI twin when the manifest has
+/// one; a per-user NSIS install uses the setup executable.
+#[tauri::command]
+async fn update_install(app: tauri::AppHandle) -> Result<String, String> {
+    let dir = index_dir();
+    let check = rigel_core::update::check_latest(&dir, env!("CARGO_PKG_VERSION"))
+        .await
+        .map_err(message)?;
+    if !check.available {
+        return Err("this build is already current".to_string());
+    }
+    let (url, sha256) = rigel_core::update::artifact_for(&check, installed_per_machine());
+    let path = rigel_core::update::download_artifact(url, sha256, &dir)
+        .await
+        .map_err(message)?;
+    rigel_core::update::install_artifact(&path).map_err(message)?;
+
+    let handle = app.clone();
+    std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_secs(1));
+        handle.exit(0);
+    });
+    Ok(format!(
+        "Installing {} — Rigel will close while the installer runs.",
+        check.offered
+    ))
+}
+
+/// A per-machine MSI lives under Program Files; a per-user NSIS install does not. The updater
+/// uses this only to choose between the two signed URLs in the same manifest.
+fn installed_per_machine() -> bool {
+    let exe = std::env::current_exe()
+        .map(|path| path.to_string_lossy().to_lowercase())
+        .unwrap_or_default();
+    ["ProgramFiles", "ProgramFiles(x86)"]
+        .iter()
+        .filter_map(std::env::var_os)
+        .map(|root| PathBuf::from(root).to_string_lossy().to_lowercase())
+        .any(|root| !root.is_empty() && exe.starts_with(&root))
+}
+
 /// Replay-ready usage for the status bar: one place computes the money and tokens.
 #[tauri::command]
 fn usage_summary(project: String, session: String) -> Result<Usage, String> {
@@ -2184,6 +2290,27 @@ fn install_chat_sidecar(app: &tauri::AppHandle) -> Result<String, String> {
     rigel_core::agent::agentchat::install_sidecar(source, index_dir().join("agentchat"))
 }
 
+/// The release publisher's public key ships beside the executable. Copy it into app data so the
+/// CLI and the window verify the same manifest; a rotation replaces the old copy on next launch.
+fn install_update_pubkey(app: &tauri::AppHandle) -> Result<(), String> {
+    let source = app
+        .path()
+        .resource_dir()
+        .map_err(message)?
+        .join("update-pubkey.txt");
+    if !source.is_file() {
+        return Ok(());
+    }
+    let target = index_dir().join(rigel_core::UPDATE_PUBKEY_FILE);
+    if let Some(parent) = target.parent() {
+        fs::create_dir_all(parent).map_err(message)?;
+    }
+    if fs::read_to_string(&source).ok() != fs::read_to_string(&target).ok() {
+        fs::copy(&source, &target).map_err(message)?;
+    }
+    Ok(())
+}
+
 /// Launch the chat server when the open project carries its checkout and nothing is answering.
 /// Same contract as `warm_router`: a thread, a dropped error, and the Chat tab as the place the
 /// reason appears. `ensure_server` already returns without spawning when the checkout is not
@@ -2227,6 +2354,9 @@ pub fn run() {
             // the copied config is pointed at whichever project is open. The router needs none.
             if let Err(problem) = install_chat_sidecar(app.handle()) {
                 eprintln!("rigel: chat sidecar not installed: {problem}");
+            }
+            if let Err(problem) = install_update_pubkey(app.handle()) {
+                eprintln!("rigel: update public key not installed: {problem}");
             }
             warm_router();
             spawn_conflict_watcher(app.handle().clone());
@@ -2316,6 +2446,10 @@ pub fn run() {
             prompt_refine,
             settings_get,
             settings_set,
+            update_status,
+            update_set,
+            update_check,
+            update_install,
             usage_summary,
             skills_search,
             skills_count,

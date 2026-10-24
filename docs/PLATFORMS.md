@@ -40,7 +40,7 @@ belong to the release operator. Two signatures travel with a release, and they u
 | signature | key | checked by |
 | --- | --- | --- |
 | the MSI and NSIS wrappers **and every PE file inside them** | Authenticode code-signing certificate (`RIGEL_CERT_THUMBPRINT`) | Windows, SmartScreen |
-| the update manifest (`version\nurl\nsha256`) | Ed25519 publisher key (`update-pubkey.txt` or `RIGEL_UPDATE_PUBKEY`) | `rigel update verify` |
+| the update manifest (`version\nurl\nsha256`, plus the optional MSI URL/hash) | Ed25519 publisher key (`update-pubkey.txt` or `RIGEL_UPDATE_PUBKEY`) | `rigel update verify` |
 
 They never substitute for each other. Tauri's updater key (`TAURI_SIGNING_PRIVATE_KEY`) is not
 used here at all: Rigel's updater is its own manifest format, not `tauri-plugin-updater`'s.
@@ -103,6 +103,35 @@ $env:RIGEL_CERT_THUMBPRINT = $cert.Thumbprint
 .\scripts\sign-installers.ps1 -Build
 ```
 
+### Publishing an update
+
+The app checks the newest GitHub release's `latest.json` at launch; Settings → Updates can turn
+that check and auto-install off. A tag starting with `v` runs `.github/workflows/release.yml`,
+which stamps that version into the build, builds the sidecar and both installers, signs the
+manifest, verifies that signature against the committed public key, and uploads the MSI, NSIS
+setup and `latest.json` to the release. The workflow needs one repository secret:
+
+| secret | value |
+| --- | --- |
+| `RIGEL_UPDATE_SIGNING_KEY` | the publisher's 32-byte Ed25519 seed, 64 hex characters |
+
+The matching public key is committed at `crates/rigel-app/resources/update-pubkey.txt`; the app
+copies it into the data directory at launch, and `RIGEL_UPDATE_PUBKEY` overrides it for a
+development build. Do not put the private seed in a tracked file. `scripts/sign-update-manifest.mjs`
+signs exactly the bytes `rigel-core::update::UpdateManifest::signed_bytes` verifies.
+
+```bash
+# bump the version in the same commit as the feature, then tag it
+git tag v0.1.1
+git push origin v0.1.1
+```
+
+The release workflow publishes the tag. The app's next launch offers the update (or installs it if
+the second switch is on); the NSIS installer restarts the new build, and a per-machine MSI update
+shows its own progress window. The installer is unsigned until the Authenticode certificate
+exists; the manifest signature and SHA-256 still catch a changed artifact, but SmartScreen may
+warn about the unsigned installer.
+
 ### The Store MSIX route (a side quest)
 
 An MSIX submitted to the Microsoft Store is re-signed by Microsoft: no certificate purchase and no
@@ -137,7 +166,9 @@ an image, and a signed build needs a certificate. `docs/qa/p7-acceptance.md` rec
 proved what.
 
 The update public key is `update-pubkey.txt` in the data directory, or `RIGEL_UPDATE_PUBKEY`.
-`rigel update status` prints which one is in use, never the key itself.
+A release build bundles the public half in `crates/rigel-app/resources/update-pubkey.txt` and copies
+it into the data directory at launch. `rigel update status` prints which one is in use, never the
+key itself.
 
 ## macOS — buildable, unsupported
 

@@ -1,17 +1,17 @@
 //! `rigel update` — the switch, the manifest and the signature check (P7.7).
 //!
-//! Nothing here runs on a timer. `status` prints the switch, `check` verifies a manifest the
-//! user pointed at (a file or an https URL), and `verify` compares a downloaded artifact with
-//! the hash the signed manifest names. `enable` is the only thing that makes a future check
-//! possible, and the default is off.
+//! Nothing here runs on a timer. `status` prints the switch, `check` verifies the latest GitHub
+//! release manifest (or a file/URL the user points at), and `verify` compares a downloaded
+//! artifact with the hash the signed manifest names. A check is allowed by default; `disable`
+//! stops it, and no command runs on a timer.
 
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use clap::Subcommand;
 use rigel_core::update::{
-    self, PUBKEY_FILE, UpdateManifest, UpdateSettings, fetch_manifest, load_settings,
-    parse_manifest, save_settings, settings_path, verify_artifact, verify_manifest,
+    self, PUBKEY_FILE, UpdateManifest, fetch_manifest, load_settings, manifest_url, parse_manifest,
+    save_settings, settings_path, verify_artifact, verify_manifest,
 };
 use serde_json::json;
 
@@ -31,7 +31,7 @@ pub enum UpdateCommand {
         json: bool,
     },
 
-    /// Turn checks off. The default state.
+    /// Turn checks off, so no check runs at launch.
     Disable {
         #[arg(long)]
         json: bool,
@@ -75,7 +75,8 @@ pub async fn run(dir: &Path, command: UpdateCommand) -> ExitCode {
                         "ok": true,
                         "version": env!("CARGO_PKG_VERSION"),
                         "enabled": settings.enabled,
-                        "manifest_url": settings.manifest_url,
+                        "auto_install": settings.auto_install,
+                        "manifest_url": manifest_url(&settings),
                         "settings": settings_path(dir),
                         "key": key_state,
                         "key_file": dir.join(PUBKEY_FILE),
@@ -88,13 +89,19 @@ pub async fn run(dir: &Path, command: UpdateCommand) -> ExitCode {
                     if settings.enabled { "on" } else { "off" }
                 );
                 println!(
-                    "manifest     {}",
-                    settings.manifest_url.as_deref().unwrap_or("not set")
+                    "auto-install {}",
+                    if settings.auto_install { "on" } else { "off" }
                 );
+                println!("manifest     {}", manifest_url(&settings));
                 println!("public key   {key_state}");
                 println!("settings     {}", settings_path(dir).display());
                 println!(
-                    "             no request is made unless `rigel update check` asks for one"
+                    "             {}",
+                    if settings.enabled {
+                        "the app checks at launch; the CLI only when `update check` asks"
+                    } else {
+                        "no request is made while updates are off"
+                    }
                 );
             }
             ExitCode::SUCCESS
@@ -129,10 +136,8 @@ pub async fn run(dir: &Path, command: UpdateCommand) -> ExitCode {
         }
 
         UpdateCommand::Disable { json: as_json } => {
-            let settings = UpdateSettings {
-                enabled: false,
-                manifest_url: load_settings(dir).manifest_url,
-            };
+            let mut settings = load_settings(dir);
+            settings.enabled = false;
             match save_settings(dir, &settings) {
                 Ok(()) => {
                     if as_json {
@@ -156,15 +161,13 @@ pub async fn run(dir: &Path, command: UpdateCommand) -> ExitCode {
                     .map_err(update::UpdateError::from)
                     .and_then(|text| parse_manifest(&text)),
                 (None, Some(url)) => fetch_manifest(&url).await,
-                (None, None) => match load_settings(dir).manifest_url {
-                    Some(url) => fetch_manifest(&url).await,
-                    None => {
-                        eprintln!(
-                            "rigel: give --manifest <file> or --url <https url>, or set one with `rigel update enable --manifest`"
-                        );
-                        return ExitCode::from(1);
+                (None, None) => {
+                    let settings = load_settings(dir);
+                    if !settings.enabled {
+                        return failure(update::UpdateError::Disabled, as_json);
                     }
-                },
+                    fetch_manifest(manifest_url(&settings)).await
+                }
             };
 
             let manifest = match parsed {

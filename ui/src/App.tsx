@@ -15,6 +15,8 @@ import {
   type SkillSource,
   type SourceStatus,
   type SwarmTarget,
+  type UpdateCheck,
+  type UpdateStatus,
 } from "./api";
 import ChatView from "./agentchat";
 import { RigelMark } from "./mark";
@@ -89,6 +91,10 @@ export default function App() {
   const [keys, setKeys] = useState<KeyStatus | null>(null);
   const [keyPromptDismissed, setKeyPromptDismissed] = useState(false);
   const [swarmNotice, setSwarmNotice] = useState<string | null>(null);
+  const [updateStatus, setUpdateStatus] = useState<UpdateStatus | null>(null);
+  const [update, setUpdate] = useState<UpdateCheck | null>(null);
+  const [updateDismissed, setUpdateDismissed] = useState(false);
+  const [updateBusy, setUpdateBusy] = useState(false);
 
   const setActive = useCallback((next: Session | null) => setActiveSession(next), []);
   const noticeFromSession = useCallback((next: string) => setNotice(next), []);
@@ -135,6 +141,53 @@ export default function App() {
       live = false;
     };
   }, []);
+
+  // One signed check at launch when the switch is on. A missing release, an offline machine
+  // and a disabled switch are all silent: this must never delay or break the window.
+  useEffect(() => {
+    if (!isTauri()) return;
+    let live = true;
+    void (async () => {
+      try {
+        const status = await api.updateStatus();
+        if (!live) return;
+        setUpdateStatus(status);
+        if (!status.enabled) return;
+        setUpdate(await api.updateCheck());
+      } catch {
+        // No release published, offline, or checks off: leave the window alone.
+      }
+    })();
+    return () => {
+      live = false;
+    };
+  }, []);
+
+  const installUpdate = useCallback(async () => {
+    setUpdateBusy(true);
+    try {
+      setNotice(await api.updateInstall());
+    } catch (failure) {
+      setUpdateBusy(false);
+      setNotice(failure instanceof Error ? failure.message : String(failure));
+    }
+  }, []);
+
+  // Auto-install waits briefly so the window shows the version first. Dismissing the banner
+  // cancels this timer; a dev build never replaces itself with a release download.
+  useEffect(() => {
+    if (
+      !isTauri() ||
+      import.meta.env.DEV ||
+      !update?.available ||
+      updateDismissed ||
+      !updateStatus?.auto_install
+    ) {
+      return;
+    }
+    const timer = setTimeout(() => void installUpdate(), 1500);
+    return () => clearTimeout(timer);
+  }, [installUpdate, update, updateDismissed, updateStatus]);
 
   useEffect(() => {
     let live = true;
@@ -547,6 +600,32 @@ ${task}`,
           ●
         </div>
       </nav>
+
+      {isTauri() && update?.available && !updateDismissed ? (
+        <div className="key-banner update-banner" role="status">
+          <span>
+            Rigel {update.offered} is available
+            {updateStatus?.auto_install && !import.meta.env.DEV
+              ? " — installing automatically"
+              : "."}
+          </span>
+          <button
+            className="chip warn"
+            onClick={() => void installUpdate()}
+            disabled={updateBusy}
+          >
+            {updateBusy ? "Installing…" : "Install update"}
+          </button>
+          <button
+            className="key-banner-close"
+            aria-label="Dismiss"
+            title="Dismiss"
+            onClick={() => setUpdateDismissed(true)}
+          >
+            ×
+          </button>
+        </div>
+      ) : null}
 
       {isTauri() &&
       keys &&

@@ -46,6 +46,28 @@ export interface Settings {
   notify_turn_failed: boolean;
 }
 
+/** The update switch, this build's version and whether a publisher key is present. */
+export interface UpdateStatus {
+  current: string;
+  enabled: boolean;
+  auto_install: boolean;
+  manifest_url: string;
+  key_present: boolean;
+}
+
+/** A signed manifest that verified, whether or not it is newer than this build. */
+export interface UpdateCheck {
+  current: string;
+  offered: string;
+  available: boolean;
+  verified: boolean;
+  url: string;
+  sha256: string;
+  notes: string | null;
+  msi_url: string | null;
+  msi_sha256: string | null;
+}
+
 /** D82: an opt-in, local-only diagnostics bundle. Nothing leaves the machine. */
 export interface DiagnosticsBundle {
   path: string;
@@ -1236,6 +1258,51 @@ export const api = {
   async saveSettings(settings: Settings): Promise<Settings> {
     if (!isTauri()) return settings;
     return call<Settings>("settings_set", { settings });
+  },
+
+  async updateStatus(): Promise<UpdateStatus> {
+    if (!isTauri()) {
+      return {
+        current: "0.1.1",
+        enabled: false,
+        auto_install: false,
+        manifest_url: "https://github.com/OkVurb/Rigel/releases/latest/download/latest.json",
+        key_present: false,
+      };
+    }
+    return call<UpdateStatus>("update_status");
+  },
+
+  async updateSet(
+    enabled: boolean,
+    autoInstall: boolean,
+    manifestUrl: string | null = null,
+  ): Promise<UpdateStatus> {
+    if (!isTauri()) {
+      return {
+        current: "0.1.1",
+        enabled,
+        auto_install: autoInstall,
+        manifest_url:
+          manifestUrl ?? "https://github.com/OkVurb/Rigel/releases/latest/download/latest.json",
+        key_present: false,
+      };
+    }
+    return call<UpdateStatus>("update_set", {
+      enabled,
+      autoInstall,
+      manifestUrl,
+    });
+  },
+
+  async updateCheck(): Promise<UpdateCheck> {
+    if (!isTauri()) throw new Error("Update checks run in the desktop app.");
+    return call<UpdateCheck>("update_check");
+  },
+
+  async updateInstall(): Promise<string> {
+    if (!isTauri()) throw new Error("Updates install from the desktop app.");
+    return call<string>("update_install");
   },
 
   /** Compose the PR title/body locally, for a review before creating it. */

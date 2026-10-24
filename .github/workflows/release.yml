@@ -1,0 +1,90 @@
+name: release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: ui/package-lock.json
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install Tauri CLI
+        run: cargo install tauri-cli --version "^2" --locked
+
+      - name: Install UI dependencies
+        working-directory: ui
+        run: npm ci
+
+      - name: Build the pinned Chat sidecar
+        run: python scripts/sidecar/build-agentchat.py
+
+      # The tag is the version the binary reports. Cargo.toml and tauri.conf.json are patched in
+      # the runner only; the repository keeps its development version.
+      - name: Stamp the release version
+        run: node scripts/set-release-version.mjs "${{ github.ref_name }}"
+
+      - name: Build the MSI and NSIS installers
+        working-directory: crates/rigel-app
+        run: cargo tauri build
+
+      - name: Sign the update manifest and publish the release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RIGEL_UPDATE_SIGNING_KEY: ${{ secrets.RIGEL_UPDATE_SIGNING_KEY }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          if (-not $env:RIGEL_UPDATE_SIGNING_KEY) {
+            throw "The RIGEL_UPDATE_SIGNING_KEY repository secret is not set."
+          }
+
+          $tag = "${{ github.ref_name }}"
+          $version = $tag.TrimStart("v")
+          $nsis = Get-ChildItem "target/release/bundle/nsis/*-setup.exe" | Select-Object -First 1
+          $msi = Get-ChildItem "target/release/bundle/msi/*.msi" | Select-Object -First 1
+          if (-not $nsis -or -not $msi) {
+            throw "The installer bundles were not produced."
+          }
+
+          $env:RIGEL_UPDATE_VERSION = $version
+          $env:RIGEL_UPDATE_URL = "https://github.com/${{ github.repository }}/releases/download/$tag/$($nsis.Name)"
+          $env:RIGEL_UPDATE_SHA256 = (Get-FileHash $nsis.FullName -Algorithm SHA256).Hash.ToLower()
+          $env:RIGEL_UPDATE_MSI_URL = "https://github.com/${{ github.repository }}/releases/download/$tag/$($msi.Name)"
+          $env:RIGEL_UPDATE_MSI_SHA256 = (Get-FileHash $msi.FullName -Algorithm SHA256).Hash.ToLower()
+          $env:RIGEL_UPDATE_NOTES = "Rigel $version"
+
+          node scripts/sign-update-manifest.mjs latest.json
+
+          # Prove the secret in this repository matches the public key in the build before the
+          # release exists. A mismatch fails here, not after every installed copy asks.
+          $env:RIGEL_UPDATE_PUBKEY = (Get-Content "crates/rigel-app/resources/update-pubkey.txt" -Raw).Trim()
+          $verify = Join-Path $env:RUNNER_TEMP "update-verify"
+          cargo run -q -p rigel-cli -- --data-dir $verify update enable
+          cargo run -q -p rigel-cli -- --data-dir $verify update check --manifest latest.json
+          cargo run -q -p rigel-cli -- --data-dir $verify update verify $nsis.FullName --manifest latest.json
+
+          if (gh release view $tag 2>$null) {
+            gh release upload $tag latest.json $nsis.FullName $msi.FullName --clobber
+          } else {
+            gh release create $tag latest.json $nsis.FullName $msi.FullName `
+              --title "Rigel $version" --generate-notes --latest
+          }

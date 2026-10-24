@@ -112,7 +112,7 @@ enum Command {
         command: tools::TrustCommand,
     },
 
-    /// Signed updates, off by default.
+    /// Signed updates; GitHub is checked at launch.
     Update {
         #[command(subcommand)]
         command: update::UpdateCommand,
