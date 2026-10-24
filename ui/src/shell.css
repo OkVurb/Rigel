@@ -146,6 +146,7 @@ input {
   display: grid;
   place-items: center;
   width: 46px;
+  padding: 0;
   border: 0;
   background: transparent;
   color: var(--muted);
@@ -477,6 +478,33 @@ input {
   display: flex;
   gap: 8px;
   flex: 0 0 auto;
+}
+
+/* Project actions sit above the session thread, right-aligned, and stack when the
+   detail pane is narrow. */
+.session-project {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 8px;
+  flex: 0 0 auto;
+  margin-bottom: 10px;
+}
+
+.session-project .open-project {
+  max-width: 100%;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
+.session-project .open-project > button {
+  flex: 0 0 auto;
+  white-space: nowrap;
+}
+
+.session-project .workspace-form {
+  width: min(420px, 100%);
+  margin-top: 0;
 }
 
 .project-current {
@@ -1538,14 +1566,28 @@ input {
   border-top: 1px solid var(--hairline);
 }
 
-.composer textarea {
+.composer-field {
+  position: relative;
   flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  border: 1px solid var(--hairline);
+  border-radius: 8px;
+  background: var(--surface);
+}
+
+.composer-field:focus-within {
+  border-color: rgba(233, 162, 59, 0.45);
+}
+
+.composer-field textarea {
   min-height: 44px;
   max-height: 140px;
   padding: 8px 10px;
-  border: 1px solid var(--hairline);
-  border-radius: 6px;
-  background: var(--surface);
+  border: 0;
+  border-radius: 8px 8px 0 0;
+  background: transparent;
   color: var(--text);
   font: inherit;
   font-size: 13px;
@@ -1553,8 +1595,173 @@ input {
   resize: vertical;
 }
 
-.composer textarea:disabled {
+.composer-field textarea:focus {
+  outline: none;
+}
+
+.composer-field textarea:disabled {
   color: var(--faint);
+}
+
+.composer-tray {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+  min-height: 30px;
+  padding: 0 6px 6px;
+}
+
+.composer-add {
+  display: flex;
+  flex: 0 0 auto;
+}
+
+.composer-plus {
+  display: grid;
+  place-items: center;
+  width: 26px;
+  height: 26px;
+  padding: 0;
+  border: 1px solid var(--hairline);
+  border-radius: 999px;
+  background: var(--raised);
+  color: var(--muted);
+  cursor: pointer;
+}
+
+.composer-plus:hover:not(:disabled),
+.composer-plus[aria-expanded="true"] {
+  border-color: rgba(233, 162, 59, 0.5);
+  color: var(--accent);
+}
+
+.composer-plus:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.composer-attachments {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.composer-attachment {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  min-width: 0;
+  max-width: min(220px, 100%);
+  height: 22px;
+  padding: 0 3px 0 7px;
+  border: 1px solid var(--hairline);
+  border-radius: 999px;
+  background: var(--raised);
+  color: var(--muted);
+  font-family: var(--mono);
+  font-size: 10px;
+}
+
+.composer-attachment > span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.composer-attachment > button {
+  display: grid;
+  place-items: center;
+  width: 16px;
+  height: 16px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--faint);
+  font-size: 13px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.composer-attachment > button:hover {
+  color: var(--text);
+}
+
+.composer-menu {
+  position: absolute;
+  left: 0;
+  bottom: calc(100% + 6px);
+  z-index: 30;
+  width: min(260px, 100%);
+  padding: 6px;
+  border: 1px solid var(--hairline);
+  border-radius: 8px;
+  background: var(--raised);
+  box-shadow: 0 16px 40px rgba(0, 0, 0, 0.45);
+}
+
+.composer-menu-label {
+  margin: 4px 7px 6px;
+  color: var(--faint);
+  font-size: 9px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.composer-menu-item {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  width: 100%;
+  min-height: 31px;
+  padding: 0 7px;
+  border: 0;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--text);
+  font: inherit;
+  font-size: 12px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.composer-menu-item:hover:not(:disabled) {
+  background: var(--surface);
+}
+
+.composer-menu-item:disabled {
+  color: var(--faint);
+  cursor: default;
+}
+
+.composer-menu-item svg {
+  flex: 0 0 auto;
+  color: var(--muted);
+}
+
+.composer-menu-item > span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.composer-menu-item small {
+  margin-left: auto;
+  color: var(--faint);
+  font-family: var(--mono);
+  font-size: 9px;
+}
+
+.composer-menu-hint {
+  margin: 6px 7px 2px;
+  color: var(--faint);
+  font-size: 10px;
+  line-height: 1.4;
 }
 
 .composer .primary {

@@ -313,6 +313,81 @@ fn project_workspace_root() -> String {
     workspace_root().to_string_lossy().into_owned()
 }
 
+/* ------------------------------- attachments ------------------------------ */
+
+/// Copy files chosen in the native picker into `.rigel/attachments` and return project-relative
+/// paths. `.rigel` is outside the checkpoint tree, so an attachment never makes the session look
+/// dirty; the paths are what the composer adds to the next turn.
+#[tauri::command]
+fn attachment_import(project: String, paths: Vec<String>) -> Result<Vec<String>, String> {
+    let root = PathBuf::from(&project);
+    if !root.is_dir() {
+        return Err("Open a project folder before attaching files.".to_string());
+    }
+    if paths.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let dir = root.join(".rigel").join("attachments");
+    fs::create_dir_all(&dir).map_err(message)?;
+    // Attachments are local context, not source: keep the directory out of the project's diff
+    // even when the project does not ignore `.rigel` itself.
+    let ignore = dir.join(".gitignore");
+    if !ignore.exists() {
+        fs::write(
+            &ignore,
+            "# Written by Rigel. Files attached from the composer are local to this machine.\n*\n",
+        )
+        .map_err(message)?;
+    }
+
+    let mut imported = Vec::with_capacity(paths.len());
+    for source in paths {
+        let source = PathBuf::from(source);
+        if !source.is_file() {
+            return Err(format!("{} is not a file.", source.display()));
+        }
+        let name = source
+            .file_name()
+            .ok_or_else(|| "the picked file has no name".to_string())?;
+        let target = free_attachment_path(&dir, name)?;
+        fs::copy(&source, &target).map_err(message)?;
+        let relative = target.strip_prefix(&root).map_err(message)?;
+        imported.push(relative.to_string_lossy().replace('\\', "/"));
+    }
+    Ok(imported)
+}
+
+/// Keep the original filename unless that name is already taken, then add the smallest suffix
+/// that is free. Two files with the same name in one pick coexist instead of one overwriting the
+/// other.
+fn free_attachment_path(dir: &Path, name: &std::ffi::OsStr) -> Result<PathBuf, String> {
+    let mut target = dir.join(name);
+    if !target.exists() {
+        return Ok(target);
+    }
+
+    let original = Path::new(name);
+    let stem = original
+        .file_stem()
+        .map(|stem| stem.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "attachment".to_string());
+    let extension = original
+        .extension()
+        .map(|extension| format!(".{}", extension.to_string_lossy()))
+        .unwrap_or_default();
+    for suffix in 1..=9_999 {
+        target = dir.join(format!("{stem}-{suffix}{extension}"));
+        if !target.exists() {
+            return Ok(target);
+        }
+    }
+    Err(format!(
+        "could not find a free name for {}",
+        original.display()
+    ))
+}
+
 #[tauri::command]
 fn session_start(
     project: String,
@@ -1474,6 +1549,7 @@ pub fn run() {
             project_open,
             project_create,
             project_workspace_root,
+            attachment_import,
             session_start,
             session_list,
             session_get,
@@ -1538,4 +1614,80 @@ pub fn run() {
                 rigel_core::agent::agentchat::stop_all();
             }
         });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn path_string(path: &Path) -> String {
+        path.to_string_lossy().into_owned()
+    }
+
+    #[test]
+    fn attachment_import_copies_into_the_project() {
+        let project = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let source = outside.path().join("notes.txt");
+        fs::write(&source, "hello").unwrap();
+
+        let imported = attachment_import(path_string(project.path()), vec![path_string(&source)])
+            .expect("the file should import");
+
+        assert_eq!(imported, vec![".rigel/attachments/notes.txt"]);
+        assert_eq!(
+            fs::read_to_string(project.path().join(".rigel/attachments/notes.txt")).unwrap(),
+            "hello"
+        );
+        assert!(
+            project
+                .path()
+                .join(".rigel/attachments/.gitignore")
+                .is_file()
+        );
+    }
+
+    #[test]
+    fn a_second_file_with_the_same_name_gets_a_suffix() {
+        let project = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let first = outside.path().join("one").join("notes.txt");
+        let second = outside.path().join("two").join("notes.txt");
+        fs::create_dir_all(first.parent().unwrap()).unwrap();
+        fs::create_dir_all(second.parent().unwrap()).unwrap();
+        fs::write(&first, "one").unwrap();
+        fs::write(&second, "two").unwrap();
+
+        let imported = attachment_import(
+            path_string(project.path()),
+            vec![path_string(&first), path_string(&second)],
+        )
+        .expect("both files should import");
+
+        assert_eq!(
+            imported,
+            vec![
+                ".rigel/attachments/notes.txt",
+                ".rigel/attachments/notes-1.txt"
+            ]
+        );
+        assert_eq!(
+            fs::read_to_string(project.path().join(".rigel/attachments/notes-1.txt")).unwrap(),
+            "two"
+        );
+    }
+
+    #[test]
+    fn a_directory_is_not_an_attachment() {
+        let project = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let directory = outside.path().join("folder");
+        fs::create_dir_all(&directory).unwrap();
+
+        let error =
+            attachment_import(path_string(project.path()), vec![path_string(&directory)])
+                .expect_err("a directory must be refused");
+
+        assert!(error.contains("is not a file"), "{error}");
+    }
 }

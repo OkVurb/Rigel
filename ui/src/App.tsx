@@ -428,6 +428,49 @@ ${task}`,
     </form>
   ) : null;
 
+  // Project-level actions live with the session thread, not the shelf.
+  const projectControls = (
+    <div className="session-project">
+      <div className="open-project">
+        {project ? (
+          <button
+            className="project-current"
+            title={`${project.root} — click to switch folders`}
+            onClick={() => void chooseFolder()}
+          >
+            <span>project</span>
+            <strong>{project.name}</strong>
+          </button>
+        ) : null}
+        <button
+          className="primary"
+          onClick={() => void chooseFolder()}
+          disabled={!native}
+          title={
+            native
+              ? "Choose a folder with the system picker"
+              : "The desktop app has the folder picker"
+          }
+        >
+          {project ? "Switch folder…" : "Open folder…"}
+        </button>
+        <button
+          className="primary"
+          onClick={() => void beginWorkspace()}
+          disabled={!native}
+          title={
+            native
+              ? "Create a workspace folder under your home directory"
+              : "Available in the desktop app"
+          }
+        >
+          New workspace
+        </button>
+      </div>
+      {workspaceForm}
+    </div>
+  );
+
   return (
     <div
       className={`shell${native ? " chrome" : ""}${view === "session" ? " session" : ""}${
@@ -509,7 +552,8 @@ ${task}`,
           onActive={setActive}
           onNotice={noticeFromSession}
           onOpenSettings={() => setView("settings")}
-          onChooseProject={() => void chooseFolder()}
+          onBrowseSkills={() => setView("shelf")}
+          projectControls={projectControls}
           onSwarmPrepare={prepareSwarm}
           onSwarm={sendSwarm}
         />
@@ -675,45 +719,7 @@ ${task}`,
             </p>
           </div>
 
-          <div className="open-project">
-            {project ? (
-              <button
-                className="project-current"
-                title={`${project.root} — click to switch folders`}
-                onClick={() => void chooseFolder()}
-              >
-                <span>project</span>
-                <strong>{project.name}</strong>
-              </button>
-            ) : null}
-            <button
-              className="primary"
-              onClick={() => void chooseFolder()}
-              disabled={!isTauri()}
-              title={
-                isTauri()
-                  ? "Choose a folder with the system picker"
-                  : "The desktop app has the folder picker"
-              }
-            >
-              {project ? "Switch folder…" : "Open folder…"}
-            </button>
-            <button
-              className="chip"
-              onClick={() => void beginWorkspace()}
-              disabled={!isTauri()}
-              title={
-                isTauri()
-                  ? "Create a workspace folder under your home directory"
-                  : "Available in the desktop app"
-              }
-            >
-              New workspace
-            </button>
-          </div>
         </header>
-
-        {workspaceForm}
 
         <p className="notice" role="status">
           {notice}
