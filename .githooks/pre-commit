@@ -1,0 +1,4 @@
+#!/bin/sh
+# Enabled per clone with `git config core.hooksPath .githooks` (see CONTRIBUTING.md).
+# The check itself lives in scripts/check-hygiene.sh so CI runs the same code.
+exec bash "$(git rev-parse --show-toplevel)/scripts/check-hygiene.sh"

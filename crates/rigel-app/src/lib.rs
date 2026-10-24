@@ -21,12 +21,14 @@ use std::sync::Arc;
 use rigel_core::agent::approval::{ApprovalBus, PendingApproval};
 use rigel_core::agent::{Cancels, Coordinator, DEFAULT_MAX_STEPS, fixed_context_chars};
 use rigel_core::{
-    Agent, AgentEvent, ApprovalScope, AttributedHunk, BudgetService, ClaimConflict, ClaimService,
-    CommandApprover, CommandDecision, CommandRequest, ConflictWatcher, EventSink, InterruptSink,
-    MemoryFile, MemoryService, Model, OpenRouterModel, POLL_INTERVAL, Patch, PatchPipeline,
-    ResumeOutcome, Scopes, Session, SessionService, SkillDetail, SkillIndex, SkillsError, StopAt,
-    Store, SubagentPolicy, SyncPolicy, TeamAgent, Tools, Turn, TurnQuote, TurnTranscript,
-    UnverifiedChange, Usage, WriteMode, credentials, diagnostics, skills::search::SearchHit,
+    Agent, AgentEvent, AppliedReview, ApprovalScope, AttributedHunk, BudgetService, ClaimConflict,
+    ClaimService, CommandApprover, CommandDecision, CommandRequest, ConflictWatcher, EventSink,
+    HunkComment, HunkComments, InterruptSink, MemoryFile, MemoryService, MergeReview, MergeReviews,
+    Model, OpenRouterModel, POLL_INTERVAL, Patch, PatchPipeline, PlanApprover, PlanDecision,
+    PlanRequest, ResumeOutcome, Scopes, Session, SessionService, SkillDetail, SkillIndex,
+    SkillsError, SnapshotService, StopAt, Store, SubagentPolicy, SyncPolicy, TeamAgent, Tools,
+    Turn, TurnQuote, TurnTranscript, UnverifiedChange, Usage, WorktreeService, WriteMode,
+    apply_review, credentials, diagnostics, skills::search::SearchHit,
 };
 use serde::{Deserialize, Serialize};
 use tauri::{Emitter, State};
@@ -64,6 +66,11 @@ fn default_effort() -> String {
     "medium".to_string()
 }
 
+/// D90 defaults: notifications are on, but a platform that refuses permission stays quiet.
+fn default_true() -> bool {
+    true
+}
+
 fn valid_effort(effort: &str) -> bool {
     matches!(effort, "low" | "medium" | "high")
 }
@@ -82,6 +89,12 @@ pub struct Settings {
     /// Sent as `reasoning_effort` on every native turn; never folded into the model id.
     #[serde(default = "default_effort")]
     pub effort: String,
+    #[serde(default = "default_true")]
+    pub notify_approval: bool,
+    #[serde(default = "default_true")]
+    pub notify_turn_done: bool,
+    #[serde(default = "default_true")]
+    pub notify_turn_failed: bool,
 }
 
 impl Default for Settings {
@@ -93,6 +106,9 @@ impl Default for Settings {
             provider: default_provider(),
             model: default_model(),
             effort: default_effort(),
+            notify_approval: true,
+            notify_turn_done: true,
+            notify_turn_failed: true,
         }
     }
 }
@@ -528,6 +544,131 @@ fn diagnostics_export(
     })
 }
 
+/// D91: which rule files a turn would read, for Settings. Read-only; no file is changed.
+#[tauri::command]
+fn rules_sources(project: String) -> Result<Vec<rigel_core::rules::RuleSource>, String> {
+    let root = std::fs::canonicalize(&project).map_err(message)?;
+    Ok(rigel_core::rules::load(&root).sources)
+}
+
+/// D91: the committed memory rendered as one copyable `AGENTS.md` block.
+#[tauri::command]
+fn rules_export_memory(project: String) -> Result<String, String> {
+    let root = std::fs::canonicalize(&project).map_err(message)?;
+    Ok(rigel_core::rules::export_memory(&root))
+}
+
+/// D97: the exact title and body the next click would send to gh.
+#[tauri::command]
+fn pull_request_plan(
+    project: String,
+    session: String,
+) -> Result<rigel_core::forge::PullRequestPlan, String> {
+    tauri::async_runtime::block_on(async move {
+        let root = std::fs::canonicalize(&project).map_err(message)?;
+        let service = SessionService::open(&root).await.map_err(message)?;
+        let session = service.get(&session).await.map_err(message)?;
+        let turns = service.transcript(&session.id).await.map_err(message)?;
+        rigel_core::forge::plan(&root, &session, &turns).map_err(message)
+    })
+}
+
+/// D97: the explicit click. gh authenticates itself; Rigel never sees a forge token.
+#[tauri::command]
+fn pull_request_create(project: String, session: String) -> Result<String, String> {
+    tauri::async_runtime::block_on(async move {
+        let root = std::fs::canonicalize(&project).map_err(message)?;
+        let service = SessionService::open(&root).await.map_err(message)?;
+        let session = service.get(&session).await.map_err(message)?;
+        let turns = service.transcript(&session.id).await.map_err(message)?;
+        let plan = rigel_core::forge::plan(&root, &session, &turns).map_err(message)?;
+        rigel_core::forge::create(&root, &plan).map_err(message)
+    })
+}
+
+#[tauri::command]
+fn checkpoint_list(
+    project: String,
+    session: String,
+) -> Result<Vec<rigel_core::Checkpoint>, String> {
+    tauri::async_runtime::block_on(async move {
+        let root = std::fs::canonicalize(&project).map_err(message)?;
+        SessionService::open(&root)
+            .await
+            .map_err(message)?
+            .checkpoints(&session)
+            .await
+            .map_err(message)
+    })
+}
+
+/// D89: put the tree back to the snapshot a turn recorded. Explicit only; the preview and the
+/// journal stay available, so this is a reviewed restore rather than a rollback of history.
+#[tauri::command]
+fn checkpoint_restore(
+    project: String,
+    id: String,
+) -> Result<rigel_core::snapshot::RestoreReport, String> {
+    tauri::async_runtime::block_on(async move {
+        let root = std::fs::canonicalize(&project).map_err(message)?;
+        let service = SessionService::open(&root).await.map_err(message)?;
+        let journal = service
+            .checkpoint_journal(&id)
+            .await
+            .map_err(message)?
+            .ok_or_else(|| "checkpoint not found".to_string())?;
+        let snapshot = journal
+            .get("snapshot_id")
+            .and_then(|value| value.as_str())
+            .ok_or_else(|| {
+                "this checkpoint predates per-turn snapshots; resume it instead".to_string()
+            })?;
+        SnapshotService::new(&root, root.join(".rigel"))
+            .restore(snapshot, &root)
+            .map_err(message)
+    })
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct SessionExport {
+    pub markdown_path: String,
+    pub json_path: String,
+    pub markdown: String,
+}
+
+/// D95: one Markdown bundle per session, with the JSON beside it. The same redaction path as
+/// diagnostics; writes under the app data folder so a session's machine paths never land in a
+/// project that might be committed.
+#[tauri::command]
+fn session_export(project: String, id: String) -> Result<SessionExport, String> {
+    tauri::async_runtime::block_on(async move {
+        let root = std::fs::canonicalize(&project).map_err(message)?;
+        let service = SessionService::open(&root).await.map_err(message)?;
+        let session = service.get(&id).await.map_err(message)?;
+        let agents = service.agents(&id).await.map_err(message)?;
+        let turns = service.transcript(&id).await.map_err(message)?;
+        let patches = PatchPipeline::new(&root, service.pool().clone())
+            .list(&id)
+            .await
+            .unwrap_or_default();
+        let (markdown, json) = diagnostics::session_bundle(
+            &session,
+            &agents,
+            &turns,
+            &patches,
+            &diagnostics::secrets(),
+        );
+        let (md_path, json_path) =
+            diagnostics::write_session_bundle(&index_dir(), &id, &markdown, &json)
+                .map_err(message)?;
+        Ok(SessionExport {
+            markdown_path: md_path.display().to_string(),
+            json_path: json_path.display().to_string(),
+            markdown,
+        })
+    })
+}
+
 #[tauri::command]
 fn session_resume(project: String, id: String, force: bool) -> Result<ResumeOutcome, String> {
     tauri::async_runtime::block_on(async move {
@@ -593,6 +734,30 @@ fn agent_spawn(
     })
 }
 
+/// D94: the four role presets, for the roster picker.
+#[tauri::command]
+fn role_presets() -> Vec<rigel_core::agent::RolePreset> {
+    rigel_core::agent::ROLE_PRESETS.to_vec()
+}
+
+/// D94: apply a preset from the roster. The next turn reads the new role.
+#[tauri::command]
+fn role_apply(
+    project: String,
+    session: String,
+    agent: String,
+    preset: String,
+) -> Result<Agent, String> {
+    tauri::async_runtime::block_on(async move {
+        SessionService::open(Path::new(&project))
+            .await
+            .map_err(message)?
+            .apply_role_preset(&session, &agent, &preset)
+            .await
+            .map_err(message)
+    })
+}
+
 #[tauri::command]
 fn agent_stop(state: State<'_, AppRuntime>, project: String, agent: String) -> Result<(), String> {
     state.cancels.cancel_agent(&agent);
@@ -629,7 +794,16 @@ fn turn_send(
     let service = tauri::async_runtime::block_on(SessionService::open(&root)).map_err(message)?;
     let settings = load_settings();
     let provider = settings.provider.trim().to_lowercase();
-    let effort = effort.unwrap_or_else(|| settings.effort.clone());
+
+    // A role preset (D94) carries its own model/effort pair. It wins over the composer's
+    // defaults, because applying the preset is the explicit choice; a custom role changes
+    // nothing and the caller's values stand.
+    let agent_row = tauri::async_runtime::block_on(service.agent(&agent)).map_err(message)?;
+    let preset = rigel_core::agent::roles::preset(agent_row.role.as_deref());
+    let effort = preset
+        .map(|preset| preset.effort.to_string())
+        .or(effort)
+        .unwrap_or_else(|| settings.effort.clone());
     if !valid_effort(&effort) {
         return Err(format!(
             "unknown effort `{effort}`; use low, medium or high"
@@ -638,7 +812,11 @@ fn turn_send(
     // The provider picks the default model; the effort is applied on the wire, never folded
     // into the id the provider chose.
     let model_name = wire_model(
-        &model.unwrap_or_else(|| configured_model(&settings, &provider)),
+        &preset
+            .map(|preset| preset.model.to_string())
+            .or(model)
+            .or_else(|| agent_row.model.clone())
+            .unwrap_or_else(|| configured_model(&settings, &provider)),
         &effort,
         &provider,
     );
@@ -646,7 +824,6 @@ fn turn_send(
     // A Claude turn is not the native loop: the harness runs it and the window's approval card
     // answers its questions. The row is created here so the renderer gets it back at once, and
     // `claude::start` adopts that same row (P4.6).
-    let agent_row = tauri::async_runtime::block_on(service.agent(&agent)).map_err(message)?;
     if agent_row.harness == "claude" {
         let turn = tauri::async_runtime::block_on(service.append_turn(&agent, Some(&prompt)))
             .map_err(message)?;
@@ -722,6 +899,10 @@ fn turn_send(
     .with_command_approval(Arc::new(WindowApprover {
         app: app.clone(),
         bus: ApprovalBus::new(index_dir()),
+    }))
+    .with_plan_approval(Arc::new(WindowApprover {
+        app: app.clone(),
+        bus: ApprovalBus::new(index_dir()),
     }));
     let coordinator = Coordinator {
         session: service.clone(),
@@ -737,6 +918,7 @@ fn turn_send(
         subagents: SubagentPolicy::default(),
         depth: 0,
         parent_cancel: None,
+        worktree_dir: Some(index_dir()),
         chat_parent: None,
     };
 
@@ -839,6 +1021,36 @@ impl CommandApprover for WindowApprover {
     }
 }
 
+/// D114: a writable fan-out is a plan question on the same card, with its own verbs.
+///
+/// The card lists each child's role, files and plan; approving starts the fan-out, skipping
+/// records the user's reason, and anything else refuses. The same ten-minute silence rule
+/// applies: no answer is no permission.
+#[async_trait::async_trait]
+impl PlanApprover for WindowApprover {
+    async fn approve_plan(&self, request: &PlanRequest) -> PlanDecision {
+        let roles = request
+            .agents
+            .iter()
+            .map(|agent| agent.role.as_str())
+            .collect::<Vec<_>>()
+            .join(", ");
+        let pending = PendingApproval::now(
+            "plan",
+            format!("plan:{}:{}", request.session_id, request.agents.len()),
+            format!("writable agents: {roles}"),
+        )
+        .with_detail(serde_json::json!({
+            "session_id": request.session_id,
+            "agents": request.agents,
+        }));
+        let _ = self.app.emit("rigel://approval", &pending);
+        self.bus
+            .ask_plan(pending, std::time::Duration::from_secs(600))
+            .await
+    }
+}
+
 /// Every open question, oldest first. The card polls this after a turn starts.
 #[tauri::command]
 fn approval_pending() -> Vec<PendingApproval> {
@@ -848,9 +1060,17 @@ fn approval_pending() -> Vec<PendingApproval> {
 /// Answer one question. `None` is a refusal, which is also what an unknown scope means: an
 /// unreadable answer never becomes an allow.
 #[tauri::command]
-fn approval_answer(id: String, scope: Option<String>) -> Result<(), String> {
+fn approval_answer(
+    id: String,
+    scope: Option<String>,
+    skip: Option<bool>,
+    note: Option<String>,
+) -> Result<(), String> {
+    // A plan skip is an answer in its own right; it needs no scope.
+    let skip = skip.unwrap_or(false);
     let scope = match scope.as_deref() {
         None | Some("deny") | Some("reject") => None,
+        Some(_) if skip => None,
         Some(text) => match ApprovalScope::parse(text) {
             Some(scope) => Some(scope),
             None => {
@@ -860,7 +1080,7 @@ fn approval_answer(id: String, scope: Option<String>) -> Result<(), String> {
             }
         },
     };
-    ApprovalBus::new(index_dir()).answer(&id, scope)
+    ApprovalBus::new(index_dir()).answer_with(&id, scope, skip, note)
 }
 
 /* ---------------------------- claims and conflicts ------------------------ */
@@ -908,6 +1128,152 @@ fn conflict_resolve(project: String, id: String, resolution: String) -> Result<(
             .resolve_conflict(&id, &resolution)
             .await
             .map_err(message)
+    })
+}
+
+/// The three rendered versions of a conflict (D79). Read once, when the row is expanded; the
+/// two-second coordination poll must not carry whole files.
+#[tauri::command]
+fn conflict_sides(project: String, id: String) -> Result<rigel_core::ConflictSides, String> {
+    tauri::async_runtime::block_on(async move {
+        let root = std::fs::canonicalize(&project).map_err(message)?;
+        let service = SessionService::open(&root).await.map_err(message)?;
+        ClaimService::new(service.pool().clone(), &root)
+            .sides(&id)
+            .await
+            .map_err(message)
+    })
+}
+
+/// Merge the three sides and return the text, writing nothing. The Diff view edits this, then
+/// hands it back through `conflict_resolve_merged`.
+#[tauri::command]
+fn conflict_merge(project: String, id: String) -> Result<rigel_core::MergedConflict, String> {
+    tauri::async_runtime::block_on(async move {
+        let root = std::fs::canonicalize(&project).map_err(message)?;
+        let service = SessionService::open(&root).await.map_err(message)?;
+        ClaimService::new(service.pool().clone(), &root)
+            .merge(&id)
+            .await
+            .map_err(message)
+    })
+}
+
+/// Write the merged text through the CAS patch pipeline and resolve the conflict (D79). The
+/// patch is attributed to `user`, and the row records which patch carried the file.
+#[tauri::command]
+fn conflict_resolve_merged(
+    project: String,
+    session: String,
+    id: String,
+    merged: String,
+) -> Result<rigel_core::MergeResolution, String> {
+    tauri::async_runtime::block_on(async move {
+        let root = std::fs::canonicalize(&project).map_err(message)?;
+        let service = SessionService::open(&root).await.map_err(message)?;
+        let pipeline = PatchPipeline::new(&root, service.pool().clone());
+        ClaimService::new(service.pool().clone(), &root)
+            .resolve_with_merge(&pipeline, &session, &id, &merged)
+            .await
+            .map_err(message)
+    })
+}
+
+/// One writable subagent, as the Diff view lists it (D80). The pending diff is deliberately
+/// not here: this is read by the two-second coordination poll, and a worktree diff can be a
+/// whole file.
+#[derive(Debug, Clone, Serialize)]
+pub struct WritableView {
+    pub agent_id: String,
+    pub role: Option<String>,
+    pub model: Option<String>,
+    pub status: String,
+    pub worktree: Option<String>,
+    pub plan: Option<String>,
+    pub plan_note: Option<String>,
+    /// The latest merge verdict, merged or not, approved or overridden.
+    pub review: Option<MergeReview>,
+}
+
+#[tauri::command]
+fn writable_list(project: String, session: String) -> Result<Vec<WritableView>, String> {
+    tauri::async_runtime::block_on(async move {
+        let service = SessionService::open(Path::new(&project))
+            .await
+            .map_err(message)?;
+        let reviews = MergeReviews::new(service.pool().clone());
+        let mut out = Vec::new();
+        for row in service.writable_agents(&session).await.map_err(message)? {
+            let review = reviews.latest(&row.agent.id).await.map_err(message)?;
+            out.push(WritableView {
+                agent_id: row.agent.id,
+                role: row.agent.role,
+                model: row.agent.model,
+                status: row.agent.status,
+                worktree: row.agent.worktree,
+                plan: row.plan,
+                plan_note: row.plan_note,
+                review,
+            });
+        }
+        Ok(out)
+    })
+}
+
+/// The worktree's pending changes as one unified diff. Read once, when the row is expanded.
+#[derive(Debug, Clone, Serialize)]
+pub struct WritableDiff {
+    pub agent_id: String,
+    pub files: Vec<String>,
+    pub diff: String,
+}
+
+#[tauri::command]
+fn writable_diff(project: String, agent: String) -> Result<WritableDiff, String> {
+    tauri::async_runtime::block_on(async move {
+        let root = std::fs::canonicalize(&project).map_err(message)?;
+        let service = SessionService::open(&root).await.map_err(message)?;
+        if !service.is_writable(&agent).await.map_err(message)? {
+            return Err(format!("{agent} is not a writable subagent"));
+        }
+        let data = index_dir();
+        let worktrees = WorktreeService::new(&root, &data, service.pool().clone());
+        let (diff, files) = worktrees.diff(&agent).await.map_err(message)?;
+        Ok(WritableDiff {
+            agent_id: agent,
+            files,
+            diff,
+        })
+    })
+}
+
+/// The Diff view's decision about a recorded review: merge an approved one that a conflict
+/// interrupted, or cross a block with a typed reason (D115). No model is called — the verdict
+/// stands as written, the reason is stored beside it, and the worktree must still hold exactly
+/// the diff the verdict was about.
+#[tauri::command]
+fn writable_merge(
+    project: String,
+    session: String,
+    agent: String,
+    reason: Option<String>,
+) -> Result<AppliedReview, String> {
+    tauri::async_runtime::block_on(async move {
+        let root = std::fs::canonicalize(&project).map_err(message)?;
+        let service = SessionService::open(&root).await.map_err(message)?;
+        let data = index_dir();
+        let worktrees = WorktreeService::new(&root, &data, service.pool().clone());
+        let reviews = MergeReviews::new(service.pool().clone());
+        apply_review(
+            &service,
+            &worktrees,
+            &reviews,
+            &session,
+            &agent,
+            reason.as_deref(),
+        )
+        .await
+        .map_err(message)
     })
 }
 
@@ -1059,6 +1425,144 @@ fn budget_raise(project: String, session: String, cap_cents: i64) -> Result<Sess
     })
 }
 
+/* --------------------------------- safety -------------------------------- */
+
+/// D113 and D116 in one read: how many agents may write at once, what the day may cost, and
+/// what it has cost so far.
+#[derive(Debug, Clone, Serialize)]
+pub struct SafetyView {
+    pub writable_agents: i64,
+    pub daily_cap_micros: Option<i64>,
+    pub day: String,
+    pub today_micros: i64,
+}
+
+#[tauri::command]
+fn safety_get(project: String) -> Result<SafetyView, String> {
+    tauri::async_runtime::block_on(async move {
+        let service = SessionService::open(Path::new(&project))
+            .await
+            .map_err(message)?;
+        let budget = BudgetService::with_null_interrupt(service.pool().clone());
+        let settings = budget.safety_settings().await.map_err(message)?;
+        let daily = budget.daily_status().await.map_err(message)?;
+        Ok(SafetyView {
+            writable_agents: settings.writable_agents,
+            daily_cap_micros: settings.daily_cap_micros,
+            day: daily.day,
+            today_micros: daily.spend_micros,
+        })
+    })
+}
+
+/// Change one knob. The daily cap takes dollars, which is what the user types; the ledger
+/// stores micro-dollars, which is what every other amount uses. `clear_daily_cap` turns the
+/// cap off without pretending it was set to zero.
+#[tauri::command]
+fn safety_set(
+    project: String,
+    session: String,
+    writable_agents: Option<i64>,
+    daily_cap_cents: Option<i64>,
+    clear_daily_cap: Option<bool>,
+) -> Result<SafetyView, String> {
+    tauri::async_runtime::block_on(async move {
+        let service = SessionService::open(Path::new(&project))
+            .await
+            .map_err(message)?;
+        let budget = BudgetService::with_null_interrupt(service.pool().clone());
+        if let Some(count) = writable_agents {
+            budget.set_writable_agents(count).await.map_err(message)?;
+        }
+        if clear_daily_cap.unwrap_or(false) {
+            budget
+                .set_daily_cap(&session, None)
+                .await
+                .map_err(message)?;
+        } else if let Some(cents) = daily_cap_cents {
+            budget
+                .set_daily_cap(&session, Some(cents * 10_000))
+                .await
+                .map_err(message)?;
+        }
+        let settings = budget.safety_settings().await.map_err(message)?;
+        let daily = budget.daily_status().await.map_err(message)?;
+        Ok(SafetyView {
+            writable_agents: settings.writable_agents,
+            daily_cap_micros: settings.daily_cap_micros,
+            day: daily.day,
+            today_micros: daily.spend_micros,
+        })
+    })
+}
+
+/* ---------------------------------- plan --------------------------------- */
+
+/// D98: whether this session is planning, and when a plan was last approved.
+#[tauri::command]
+fn plan_get(project: String, session: String) -> Result<rigel_core::plan::PlanState, String> {
+    tauri::async_runtime::block_on(async move {
+        let service = SessionService::open(Path::new(&project))
+            .await
+            .map_err(message)?;
+        rigel_core::plan::state(service.pool(), &session)
+            .await
+            .map_err(message)
+    })
+}
+
+/// D98: turn plan mode on, or approve the plan by turning it off (which records the hand-off).
+#[tauri::command]
+fn plan_set(
+    project: String,
+    session: String,
+    enabled: bool,
+) -> Result<rigel_core::plan::PlanState, String> {
+    tauri::async_runtime::block_on(async move {
+        let service = SessionService::open(Path::new(&project))
+            .await
+            .map_err(message)?;
+        rigel_core::plan::set(service.pool(), &session, enabled)
+            .await
+            .map_err(message)
+    })
+}
+
+/// D92: spend across every session in this project.
+#[tauri::command]
+fn spend_report(project: String) -> Result<rigel_core::spend::SpendReport, String> {
+    tauri::async_runtime::block_on(async move {
+        let service = SessionService::open(Path::new(&project))
+            .await
+            .map_err(message)?;
+        rigel_core::spend::report(service.pool())
+            .await
+            .map_err(message)
+    })
+}
+
+/// D92: cap one task (agent) below the session cap. `None` removes it.
+#[tauri::command]
+fn task_cap_set(
+    project: String,
+    session: String,
+    agent: String,
+    cap_cents: Option<i64>,
+) -> Result<rigel_core::BudgetSnapshot, String> {
+    tauri::async_runtime::block_on(async move {
+        let service = SessionService::open(Path::new(&project))
+            .await
+            .map_err(message)?;
+        let budget = BudgetService::with_null_interrupt(service.pool().clone());
+        let cap = cap_cents.map(|cents| cents * 10_000);
+        budget
+            .set_task_cap(&session, &agent, cap)
+            .await
+            .map_err(message)?;
+        budget.snapshot(&agent).await.map_err(message)
+    })
+}
+
 /* --------------------------------- patches ------------------------------- */
 
 #[tauri::command]
@@ -1085,6 +1589,71 @@ fn patch_hunks(project: String, session: String) -> Result<Vec<AttributedHunk>, 
             .await
             .map_err(message)
     })
+}
+
+/* ----------------------------- hunk comments ----------------------------- */
+
+#[tauri::command]
+fn hunk_comment_add(
+    project: String,
+    hunk: String,
+    body: String,
+    author: Option<String>,
+) -> Result<HunkComment, String> {
+    tauri::async_runtime::block_on(async move {
+        let service = SessionService::open(Path::new(&project))
+            .await
+            .map_err(message)?;
+        let comments = HunkComments::new(service.pool().clone());
+        comments
+            .add(&hunk, &body, author.as_deref().unwrap_or("user"))
+            .await
+            .map_err(message)
+    })
+}
+
+#[tauri::command]
+fn hunk_comments(project: String, session: String) -> Result<Vec<HunkComment>, String> {
+    tauri::async_runtime::block_on(async move {
+        let service = SessionService::open(Path::new(&project))
+            .await
+            .map_err(message)?;
+        let comments = HunkComments::new(service.pool().clone());
+        comments.for_session(&session).await.map_err(message)
+    })
+}
+
+/// Send a comment to the agent that wrote the hunk, as a turn. The comment is marked
+/// delivered with the turn's id, so a failure to record that leaves it pending and visible
+/// rather than silently answered.
+#[tauri::command]
+fn hunk_comment_deliver(
+    app: tauri::AppHandle,
+    state: State<'_, AppRuntime>,
+    project: String,
+    session: String,
+    id: String,
+) -> Result<TurnReply, String> {
+    let service = tauri::async_runtime::block_on(SessionService::open(Path::new(&project)))
+        .map_err(message)?;
+    let comments = HunkComments::new(service.pool().clone());
+    let comment = tauri::async_runtime::block_on(comments.get(&id))
+        .map_err(message)?
+        .ok_or_else(|| format!("no comment {id}"))?;
+
+    let reply = turn_send(
+        app,
+        state,
+        project,
+        session,
+        comment.agent_id.clone(),
+        comment.prompt(),
+        None,
+        None,
+    )?;
+
+    tauri::async_runtime::block_on(comments.deliver(&id, &reply.turn.id)).map_err(message)?;
+    Ok(reply)
 }
 
 #[tauri::command]
@@ -1556,6 +2125,13 @@ pub fn run() {
             session_transcript,
             session_resume,
             diagnostics_export,
+            session_export,
+            rules_sources,
+            pull_request_plan,
+            pull_request_create,
+            rules_export_memory,
+            checkpoint_list,
+            checkpoint_restore,
             agent_list,
             agent_team,
             agent_spawn,
@@ -1566,19 +2142,36 @@ pub fn run() {
             approval_answer,
             watch_project,
             claim_list,
+            writable_list,
+            writable_diff,
+            writable_merge,
             conflict_resolve,
+            conflict_sides,
+            conflict_merge,
+            conflict_resolve_merged,
             turn_estimate,
             budget_get,
             budget_set,
             budget_raise,
+            safety_get,
+            safety_set,
             patch_list,
             patch_hunks,
+            hunk_comment_add,
+            hunk_comments,
+            hunk_comment_deliver,
             patch_revert,
             memory_read,
             memory_write,
             key_status,
             key_set,
             key_delete,
+            plan_get,
+            plan_set,
+            role_presets,
+            role_apply,
+            spend_report,
+            task_cap_set,
             harness_probe,
             servers_start,
             omniroute_status,

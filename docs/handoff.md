@@ -507,6 +507,73 @@ Everything except the certificate is consistent; D109 blocks the rest.
   bodies are shown before first use, and scripts still ask.
 - **Verification gets its own harness** (D118), and support stays asynchronous (D119).
 
+**Round-7 safety block (23 Oct 2026): D80 with D113–D116.** Writable subagents shipped with
+the four safety defaults that make the path defensible, not after them:
+
+- **D80** — a writable child is registered with a claim on each assigned file, gets a detached
+  worktree at `HEAD`, and runs there with the normal tool set limited to that assignment (an
+  assigned file that does not exist yet is allowed, so `write_file` is usable). The parent sees the
+  worktree path and the changed files, not the child's transcript. Its work lands only through
+  `merge_subagent`, which reads the diff from the worktree, reviews it, records the verdict, and
+  merges file by file through the CAS journal, attributed to the child. A clean merge removes the
+  worktree; a conflict leaves it for inspection.
+- **D113** — three writable children at once per project, counted from the durable `agents.writable`
+  flag while they run; read-only children are unlimited. The number is a row in `safety_settings`
+  and Settings → Safety edits it (1–16).
+- **D114** — a writable fan-out requires a plan per child and one user answer before registration:
+  approve, skip with a recorded reason, or deny. The answer is `ApprovalBus`'s plan question (the
+  same card, its own verbs); approval is stored as `agents.plan_json`, a waiver as `agents.plan_note`,
+  and a denial starts nothing at all.
+- **D115** — the merge reviewer is a separate model call with clean context: system instructions
+  plus the unified diff, no transcript, no tools, `REVIEW_MODEL` (the cheapest allowlist entry).
+  It answers APPROVE or BLOCK; anything else is `unavailable` and blocks. An override needs a typed
+  reason, which is stored beside the verdict in `merge_reviews` and reported in the tool result.
+- **D116** — `daily_spend` is incremented in the same transaction as the session total, and the
+  $20/day cap is on by default across every session in the project. `reserve` refuses the turn
+  before it starts; `account` returns `DailyExceeded` and interrupts every running agent after the
+  step that crosses it. The 80% warning fires once per day; Settings → Safety shows the day and
+  raises or clears the cap.
+
+**The writable path is visible where the patches are (23 Oct 2026).** The Diff view gains a
+`Subagent worktrees` block between Claims and Patches. Each writable child is listed with the plan
+the user approved (or the recorded waiver), the stored verdict — `approved`, `blocked` or
+`unavailable` — the reviewer's reason, the hash of the diff it judged, and the override reason when
+there is one. A block that merged anyway is drawn in the danger colour and labelled `merged over a
+block`: it is the one row that must not read as routine. The pending diff is read on demand through
+`writable_diff`, which returns the worktree's unified diff and writes nothing; the row list rides
+the existing two-second coordination poll because it carries no file bodies. Once a merge removes
+the checkout the row says so instead of showing a path that no longer exists. Reading the list,
+the review and the diff is covered by the writable suite, including a blocked merge with its
+override and a pending diff read that leaves the main tree untouched.
+
+**The Diff view can decide a review now (23 Oct 2026).** A stored review that has not merged
+carries its decision inline. An approved one — the reviewer said yes but a conflict interrupted
+the merge — has a single `merge this review` button that needs no reason. A blocked or
+unavailable one needs a typed reason before `override & merge` enables. Neither button calls a
+model: the verdict stands as written, the reason is written to `merge_reviews.override_note`, and
+`apply_review` only proceeds while the worktree's current diff still hashes to the review's
+`diff_sha`. A checkout that moved after the review is refused with that sentence rather than
+merged under a verdict about other bytes. The files still go through the CAS journal attributed
+to the child, so a stale main tree is refused by the pipeline; a partial merge reports
+applied/conflicted/skipped, leaves the review open, and the row keeps its checkout. Two tests
+cover both paths: an approved review applied with no agent turn (attribution intact, review marked
+merged, checkout removed), and a blocked one refused without a reason, refused once the worktree
+changed, then applied with the reason stored beside the unchanged `blocked` verdict.
+
+**A merge in the window is written into the transcript (23 Oct 2026).** `apply_review` now posts
+a `note` item on the parent turn that spawned the child — the turn the child's own rows already
+hang under — so the user's decision exists in the transcript and not only in `merge_reviews`.
+The note names the child (role and the first eight characters of its id), what landed (`1 file
+landed in the main tree`), or the applied/conflicted/skipped counts with the checkout still in
+place; when a block was crossed it also carries the verdict and the user's reason. Refusals, a
+stale review and a second apply post nothing. A turn's prompt is built from scratch, so a
+transcript row alone would never reach the model: `SessionService::previous_notes` reads the notes
+left on the agent's previous turn and `drive` restates them in the preamble (“The user acted in
+the window…”), which is the one path by which a window action enters a model call. The UI paints
+a note as an italic line in the user's voice (`you · …`), not as model output. The writable suite
+asserts one note per merge, with the override reason carried through; the native suite asserts
+the note is restated exactly once, in the turn after the one it was posted on.
+
 **Round-6 safety pair (23 Oct 2026):** D78 and D82 are code, not notes. `StreamRedactor` in
 `crates/rigel-adapters/src/lib.rs` holds back the longest suffix that could still become a secret
 (at most a full secret's length, not length − 1: a chunk ending exactly on a secret must not leak
@@ -517,6 +584,23 @@ versions, the newest turn, key-presence only, and a redacted log tail, written u
 `<app data>/diagnostics/` and copied to the clipboard; a panic hook appends a redacted record to
 `<app data>/crash.log`. Settings gains the action, and nothing is sent anywhere. The two remaining
 open items are unchanged: P7.5 needs a trusted certificate and P7.9 needs a clean boot.
+
+**Round-7 features, first three (23 Oct 2026):** D95 exports one Markdown bundle and its JSON
+under `<app data>/exports/`, built from the same redaction path as diagnostics and linked from the
+Session header. D89 now records a snapshot after every completed turn (best effort, under
+`<repo>/.rigel/snapshots/` and gitignored), lists checkpoints per turn and restores one only on an
+explicit click. D90 adds three per-event notification switches to Settings; notifications are
+silent, never fire for a focused window, and use the WebView Notification API after a user-granted
+permission. Session export, checkpoints and notifications each have their own tests or build
+coverage; no external service is involved.
+
+**Three more queue items (23 Oct 2026):** D91 adds `rigel_core::rules`, which reads
+`AGENTS.md`, `CLAUDE.md` and `.cursor/rules/*` with per-file and total caps, labels them as
+imported data in the native preamble, lists the sources in Settings and copies committed memory
+as an `AGENTS.md` block. D96 exposes `rigel_skills_show` over MCP: source, trust evidence, session
+pin, index body hash and install path, all from the local index with no network. D97 composes a
+pull-request title and body from the session's turns and runs `gh pr create` only from an explicit
+Diff-tab click; `gh` supplies its own auth and Rigel never holds a forge token.
 
 **Environment facts a fresh agent will trip over:** the debug app loads `http://localhost:5173`, so
 `npm --prefix ui run dev` must be running before `cargo run -p rigel-app`; `vendor/agentchattr`
@@ -610,7 +694,7 @@ command must say so explicitly.
 | D76 | **A room transcript is copied read-only into the project database**, so resume and the transcript pane show what the room said, with its own agent rows. It is **not** ingested into the billing ledger: external CLIs bill themselves, and a cost Rigel did not observe would be the first invented number in a product whose pitch is an honest bill. | grilling round 6 (Q92), 22 Oct |
 | D77 | **The room may bind a LAN interface, with real per-agent auth.** If it ships in v1 this **supersedes D70** and turns `127.0.0.1:8300` plus one session token into an authenticated multi-machine surface; the loopback-only refusal in `agentchat.rs` and the local-user sentence in SECURITY.md are then wrong and must move with it. Scope put to the user as Q103. | grilling round 6 (Q93), 22 Oct |
 | D78 | **Redaction gets a sliding window.** A streaming delta holds back a partial-secret tail (at most the longest secret's length minus one) and flushes it on the next chunk or at end of stream, so a credential split across chunks cannot reach a rendered event. This closes the deviation recorded under P4.6 rather than documenting it. | grilling round 6 (Q94), 22 Oct |
-| D79 | **The conflict view becomes a real three-way merge:** rendered base/ours/theirs text, and a resolution that writes a merged file through the CAS patch pipeline. Replaces the hash-only deviation under P5.4; `migrations/project/0004_patch_hunks.sql` and `diff.tsx` grow with it. This is new implementation work, not a rename. | grilling round 6 (Q95), 22 Oct |
+| D79 | **The conflict view becomes a real three-way merge:** rendered base/ours/theirs text, and a resolution that writes a merged file through the CAS patch pipeline. Replaces the hash-only deviation under P5.4; `migrations/project/0004_patch_hunks.sql` and `diff.tsx` grow with it. This is new implementation work, not a rename. **Built 23 Oct:** migration 0010 adds `claims.base_text` — captured when the claim is taken, the one moment the file on disk is the version the claimant started from — and `conflict_sides`, which stores the three rendered versions. `ours` is the claimant's own applied patches walked forward from that base and verified against every `result_hash`; a side that does not hash to the ledger stays empty with a note. `merge::three_way` (`crates/rigel-core/src/merge.rs`) is a line-level LCS merge with `<<<<<<< ours` blocks, CRLF-aware and capped at 4 000 lines a side. `conflict_sides`, `conflict_merge` and `conflict_resolve_merged` are the app commands; the write goes through `PatchPipeline::propose_with` with the captured `theirs` hash as the CAS base — a file that moved after capture is refused with `StaleBase` — is attributed to `user`, and `conflict_sides.merged_patch_id` records the patch that carried it. The Diff view expands a row into the three panes, merges, edits and writes; the old hashes stay visible. `tests/merge.rs` covers the captured hashes, an external write recovered by merging with the claimant's version, a linear writer that needs no write, marker output, a claim collision with no observed hash, the pre-0010 fallback and a stale write refused. | grilling round 6 (Q95), 22 Oct |
 | D80 | **Spawned subagents become writable**, putting worktrees (P5.5) on the main path instead of the external-agent side road. Every safety surface moves with them: claims gate (D53), pre-destructive snapshot, per-agent budget, attribution and merge-back review (D64). Closes the P5.5 deviation by removing it rather than declaring it. | grilling round 6 (Q96), 22 Oct |
 | D81 | **Cursor and Cline leave the advertised matrix.** Their adapters stay in the tree behind the fixture harnesses and the exit test keeps exercising them, but README, PLATFORMS, the roster and the Phase 4 prose stop claiming five supported harnesses: Codex, Claude and Gemini are the supported set, and the other two are labelled "unverified on this machine". **Amends the Phase 4 exit-test claim, not its coverage.** | grilling round 6 (Q97), 22 Oct |
 | D82 | **Diagnostics are opt-in and never sent.** An "Export diagnostics" action gathers doctor JSON, the last turn and a redacted log into one copyable bundle, and a local crash log is written beside the app data. Nothing phones home; D37's no-telemetry clause is untouched. | grilling round 6 (Q98), 22 Oct |
@@ -619,12 +703,12 @@ command must say so explicitly.
 | D85 | **No paid surface in year one.** MIT/Apache-2.0 stays, nothing is gated, and the shared cross-machine room/claims plane is explicitly later. Adoption and interventions-per-task (D17) are the only measures. | grilling round 6 (Q101), 22 Oct |
 | D86 | **The release sequence is settled: an unsigned private beta now, a public launch only once a trusted certificate exists.** D71's unsigned builds go to a handful of people with a published SHA-256; D84's launch post waits for signing, so D65's "visibility at 1.0" becomes "visibility once signed". D72's condition is corrected rather than dropped: it is the *public* beta that waits for the certificate, not the private one. P7.5 is therefore ordered in parallel with the beta, not after it. | grilling round 6 follow-up (Q102), 22 Oct |
 | D87 | **The LAN room is v1 scope, not a direction.** D77 stands as scope: 0.1.0 may bind a LAN interface with real auth, which supersedes D70's "nothing remote in v1" **for the room only**. Shipping with it: a bind setting, a token per agent instead of one session token, the auth design in SECURITY.md, and tests for a wrong-token agent and a foreign-origin post. Everything else in D70 (phone access, cross-machine sessions) stays out. | grilling round 6 follow-up (Q103), 22 Oct |
-| D88 | **Inline hunk comments are in 0.1.0.** A comment attaches to a `patch_hunks` row, names its author agent, and is delivered to that agent as a turn. The Diff tab gains a comment box per hunk; the patch stays read-only. | grilling round 7 (Q104), 22 Oct |
+| D88 | **Inline hunk comments are in 0.1.0.** A comment attaches to a `patch_hunks` row, names its author agent, and is delivered to that agent as a turn. The Diff tab gains a comment box per hunk; the patch stays read-only. **Built 23 Oct:** `hunk_comments` (migration 0009) stores the hunk, its patch, the hunk's author and the commenter separately; `HunkComments::add` copies the author from `patch_hunks`, refuses an empty body and caps at 4 000 chars. `hunk_comment_add` / `hunk_comments` / `hunk_comment_deliver` are the app commands; delivery sends `path + @@ header + body` to that agent through `turn_send` and records the turn id, and delivering twice keeps the first id. The Diff tab has a thread and a comment box per hunk with a `send to <agent>` button; the patch's status and diff are asserted unchanged. `crates/rigel-core/src/comments.rs`, `migrations/project/0009_hunk_comments.sql`, `tests/comments.rs`, `ui/src/diff.tsx`. | grilling round 7 (Q104), 22 Oct |
 | D89 | **Per-turn checkpoints are in 0.1.0.** `snapshot.rs` takes a checkpoint at the end of every turn (in addition to the pre-destructive one), lists it in the transcript, and restores it on request. The pre-destructive snapshot keeps its own id and reason. | grilling round 7 (Q105), 22 Oct |
 | D90 | **Desktop notifications are in 0.1.0** for three events: approval waiting, turn finished, turn failed. Per-event toggles, no sound by default, no notification for a turn the user is watching. | grilling round 7 (Q106), 22 Oct |
 | D91 | **Rules interop is in 0.1.0.** The session preamble reads `AGENTS.md`, `CLAUDE.md` and `.cursor/rules/*`; Settings lists which sources were used; Rigel's memory can be exported as an `AGENTS.md` block. Reading is additive — D2/D43 memory stays the source of record. | grilling round 7 (Q107), 22 Oct |
 | D92 | **A cross-session spend view and per-task caps are in 0.1.0.** A query over existing usage rows answers cost per project and per agent over time, and a task may set its own cap below the session cap. **Amends D10 additively** — the session cap is still the outer bound. | grilling round 7 (Q108), 22 Oct |
-| D93 | **skills.sh import is in 0.1.0**, storing the audit verdict (Gen/Socket/Snyk) with its date as trust evidence. Rigel's own arithmetic stays the visible score; an audit is an input, not a grade. | grilling round 7 (Q109), 22 Oct |
+| D93 | **skills.sh import is in 0.1.0**, storing the audit verdict (Gen/Socket/Snyk) with its date as trust evidence. Rigel's own arithmetic stays the visible score; an audit is an input, not a grade. **Built 23 Oct:** `rigel skills import --skills-sh <page>` parses the `/security/<vendor>` links, reads each verdict's own date from the audit page (`Audited by Socket on Sep 15, 2026`), indexes only that skill's body (`GitHubSource::with_slug`), and writes one `audit:<vendor>=<verdict>` evidence row per vendor, labelled `audited`. A page with no audit section is refused and writes nothing. `crates/rigel-core/src/skills/skillssh.rs`, `tests/skillssh.rs`; verified live against `vercel-labs/skills/find-skills`: three verdicts dated 15 Sep 2026, one body indexed, grade still Rigel's own `C`. | grilling round 7 (Q109), 22 Oct |
 | D94 | **Agent role presets are in 0.1.0:** implementer, reviewer, tester, researcher — each a saved prompt, model/effort pair and tool allowance, applied from the roster. | grilling round 7 (Q110), 22 Oct |
 | D95 | **Session export is in 0.1.0:** one Markdown bundle per session (prompt, turns, tool calls, per-agent spend, linked patches) with the JSON beside it. Shares the assembly path with D82's diagnostics export. | grilling round 7 (Q111), 22 Oct |
 | D96 | **The shelf is queryable over MCP in 0.1.0:** `rigel_skills_search` and `rigel_skills_show` return id, source, trust score, pins and install path from the local index. No network. | grilling round 7 (Q112), 22 Oct |
@@ -1728,8 +1812,8 @@ egress outside an approved origin.
 - [x] **P5.1** Claim ledger: acquire, heartbeat, stale scan, 24 h expiry, never `DELETE` — `crates/rigel-core/src/claims.rs` on the Phase 1 `claims` table: paths are normalised and refused outside the root, a live claim held by another agent is returned as `held_by` (the schema's partial unique index means there is only ever one live row) and the collision is written to `claim_conflicts`; `heartbeat` refreshes every active row; `stale` is computed (90 s without a heartbeat) and reported, never auto-released; `expire` releases past 24 h with reason `expired`; `release` sets `released_at` and a reason and never deletes. Eight tests cover the advisory answer, idempotent claiming, the tombstone, expiry, staleness, unverified changes and path refusal.
 - [x] **P5.2** MCP tools `rigel_claim`, `rigel_release`, `rigel_who` with the schemas from §7.1 — advertised and implemented in `crates/rigel-mcp/src/lib.rs`; `rigel_claim` returns `held`/`held_by` per path, `rigel_who` returns claims plus `unverified_changes`, and `rigel_release` is a tombstone. The tool list test pins that no advertised description contains the forbidden word.
 - [x] **P5.3** Watcher plus attribution: reported changes first, observed changes second, `ambiguous` flag — `crates/rigel-core/src/attribute.rs` is a 250 ms poll (no new dependency): it stats the tree, hashes only files whose size or mtime moved, skips `.git`/`.rigel`/`target`/`node_modules`/build output, caps at 5 000 files and 1 MiB per hash, and reports deletions. Attribution names the single running agent, lists all of them and sets `ambiguous` when several were running. The desktop app runs a `ConflictWatcher` against the open project and records a row when a claimed path changes and the claimant was not the writer.
-- [x] **P5.4** Conflict rows and the three-way diff view — conflicts are rows in `claim_conflicts` with claimant, writer, `base_hash` and `observed_hash`, listed by `ClaimService::conflicts`; the Diff view's strip shows both names, both hashes and a resolve action. **Deviation:** the "three-way" record is the base and observed *hashes*, not rendered base/ours/theirs text; the clicked resolution is recorded on the row rather than producing a merged file.
-- [x] **P5.5** Worktrees and merge-back — `WorktreeService` creates a detached checkout under `%APPDATA%\Rigel\worktrees\<agent>`, records `agents.worktree`, previews the diff, and merges each changed file through the same CAS patch pipeline (a moved main tree is a conflict; a deletion is reported, not written). `rigel worktree create|list|preview|merge|remove` drives it, and `tests/worktree.rs` covers a clean merge, a moved main tree, new/deleted files, identical bytes, non-repositories and force-removal. **Deviation:** native subagents are read-only by design, so there is no writable spawned agent to host automatically; worktrees serve external and CLI agents, and the column/service are ready for a writable spawn path.
+- [x] **P5.4** Conflict rows and the three-way diff view — conflicts are rows in `claim_conflicts` with claimant, writer, `base_hash` and `observed_hash`, listed by `ClaimService::conflicts`; the Diff view's strip shows both names, both hashes and a resolve action. **D79 replaced the hash-only deviation:** `claims.base_text` keeps the version the claimant started from, `conflict_sides` stores base/ours/theirs (each verified against its hash), and `ClaimService::merge` runs a line-level three-way merge. The strip expands to three panes; the merged text is editable and `conflict_resolve_merged` writes it through the CAS patch pipeline as a `user` patch, then records `merged_patch_id` on the conflict. A write that moved the file after capture is refused with `StaleBase` rather than overwritten. `crates/rigel-core/src/merge.rs`, `migrations/project/0010_conflict_sides.sql`, `tests/merge.rs`.
+- [x] **P5.5** Worktrees and merge-back — `WorktreeService` creates a detached checkout under `%APPDATA%\Rigel\worktrees\<agent>`, records `agents.worktree`, previews the diff, and merges each changed file through the same CAS patch pipeline (a moved main tree is a conflict; a deletion is reported, not written). `rigel worktree create|list|preview|merge|remove` drives it, and `tests/worktree.rs` covers a clean merge, a moved main tree, new/deleted files, identical bytes, non-repositories and force-removal. **D80 removed the deviation:** `spawn_agents` accepts `mode: "write"`, registers a claim for every assigned file, gives the child its own worktree with the full tool set scoped to that file list, and returns the worktree and the changed files instead of the child's transcript. The child's changes land only through `merge_subagent`, which reads the diff, runs a clean-context reviewer, stores the verdict, and merges through the same CAS journal (`migrations/project/0011_writable_agents.sql`, `crates/rigel-core/src/safety.rs`, `tests/writable.rs`). Read-only children are unchanged and need no worktree.
 - [x] **P5.6** Merged diff UI: per-hunk attribution gutter, conflict strip, per-patch revert — `migrations/project/0004_patch_hunks.sql` stores one row per hunk (header, ranges, patch, ordinal); `PatchPipeline::attributed_hunks` joins it to the patch's agent and status; `ui/src/diff.tsx` renders one gutter block per hunk with its own agent and status pill while keeping the conflict strip, claims list, unverified counts and per-patch revert; `patch_hunks` is a Tauri command. `tests/hunks.rs` pins two agents in one file, repeated edits, a reverted patch and header parsing.
 - [x] **P5.7** CLI `claim list|release` — `rigel claim list [--path] [--history] [--json]` and `rigel claim release <path> [--agent] [--reason]` in `crates/rigel-cli/src/claims.rs`; releasing without `--agent` finds the current holder, and releasing an unheld path is a refusal with exit 1.
 - [x] **P5.8** **Exit test:** two agents edit one file; the conflict surfaces within 2 s with both attributions; the UI never displays the word "locked" (asserted by a string test) — `scripts/p5-exit-test.sh` runs the ledger and attribution tests (including `a_conflict_surfaces_within_two_seconds_of_the_write`, which polls a real file write and asserts both claimant and writer on the row), the MCP claim round trip, a real `rigel claim list`/`release` against a temp project, and a word-boundary grep over `ui/src` plus the CLI output. It passes.
@@ -1786,25 +1870,27 @@ agent is missing today.
 | Golden fixtures | one recorded session per harness per scenario (start, tool call, approval, error, interrupt) | `crates/rigel-adapters/tests/fixtures` |
 | Fake harness binaries | small bins speaking ACP / app-server / NDJSON with scripted hangs and malformed lines | `crates/rigel-adapters/tests/bin` |
 | Integration | patch CAS, resume after kill, conflict detection on a real git repo, worktree merge-back | `crates/rigel-core/tests/it` |
-| UI | Playwright over the four surfaces' key states | `ui/e2e` |
+| UI | Playwright over the five surfaces' key states, in the browser preview | `ui/tests` |
 | Manual | per-phase script in `docs/qa/<phase>.md`, run before ticking the exit test | — |
 
 Non-negotiable tests, by name:
 
 1. `patch_apply_is_cas` — stale base returns `STALE_BASE` and writes nothing.
 2. `resume_never_duplicates_patches` — kill between journal write and rename; assert idempotence.
-3. `claim_never_reports_locked` — string scan over UI copy and MCP descriptions (N1 as a test).
+3. `claim_never_reports_locked` — scans the public copy (README and user-facing docs, `ui/src`, MCP descriptions) for a lock claim; a hit is allowed only in a prohibition (N1 as a test).
 4. `budget_stops_within_one_turn` — fake adapter emits usage above cap; assert interrupt called once.
 5. `memory_rejects_paths` — every pattern in §7.1.
-6. `fixture_replay_matches_normalisation` — recorded harness streams normalise to expected items.
+6. `fixture_replay_covers_every_harness_and_scenario` — every harness and scenario the replay suite consumes has a fixture, and it is not empty; `crates/rigel-adapters/tests/replay.rs` runs the streams themselves.
 
-As of 22 Oct 2026, `cargo test --workspace` covers 102 core unit tests plus the adapter, CLI and
-integration suites; `npx tsc --noEmit` and `npm --prefix ui run build` are part of the same gate.
+As of 23 Oct 2026, `cargo test --workspace` covers 419 tests across the core, adapter, CLI and
+app suites; `npx tsc --noEmit`, `npm --prefix ui run build` and the five-surface Playwright
+smoke (`npm --prefix ui run test:e2e`) are part of the same gate.
 The chat module's own tests pin the config parser, the harness argv (including the unattended
 flags), the API-key readiness rule and the checkout guess; the spawn call itself is still
 untested (§2.10, item 7).
 
-A failing test is fixed by fixing the cause. No suppressions, no `#[ignore]` above, no snapshot updates
+All six are live tests: the two that were specifications (`P4.7`, `P5.8`) were implemented when
+their surfaces landed. A failing test is fixed by fixing the cause. No suppressions, no `#[ignore]` above, no snapshot updates
 without reading the diff.
 
 ---

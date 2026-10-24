@@ -279,6 +279,27 @@ export const previewTranscript: TurnTranscript[] = [
         },
         created_at: ago(4),
       },
+      // D115: a merge the user decided in the Diff view is posted here, in the window's own
+      // voice, and restated in the next turn's preamble.
+      {
+        id: "item-preview-8",
+        turn_id: turnTwo.id,
+        seq: 4,
+        kind: "note",
+        status: "ok",
+        body: {
+          text: "the user merged writer c4d18e77's work from the Diff view, overriding a blocked review (\"the caller asked for exactly this comment\"): 1 file landed in the main tree",
+          kind: "user_merge",
+          agent_id: "c4d18e77-2b90-4a51-8f0e-6d3a9b5c7e21",
+          review_id: "review-preview-3",
+          files: ["crates/rigel-core/src/retry.rs"],
+          applied: 1,
+          conflicted: 0,
+          skipped: 0,
+          overridden: true,
+        },
+        created_at: ago(1),
+      },
     ],
   },
   { turn: turnChild, items: childItems },

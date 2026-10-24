@@ -475,7 +475,7 @@ ${task}`,
     <div
       className={`shell${native ? " chrome" : ""}${view === "session" ? " session" : ""}${
         view === "settings" ? " settings" : ""
-      }`}
+      }${view === "diff" ? " diff" : ""}`}
     >
       {native ? <Titlebar project={project?.name ?? null} /> : null}
 

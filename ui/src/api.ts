@@ -40,12 +40,83 @@ export interface Settings {
   model: string;
   /** Separate reasoning effort: low, medium or high. */
   effort: string;
+  /** D90: per-event desktop notifications; no sound, and a watched turn stays silent. */
+  notify_approval: boolean;
+  notify_turn_done: boolean;
+  notify_turn_failed: boolean;
 }
 
 /** D82: an opt-in, local-only diagnostics bundle. Nothing leaves the machine. */
 export interface DiagnosticsBundle {
   path: string;
   body: string;
+}
+
+/** D97: the exact title and body a pull request would use. */
+export interface PullRequestPlan {
+  title: string;
+  body: string;
+  branch: string;
+  base: string;
+}
+
+/** D91: one project rule file the native preamble reads. */
+export interface RuleSource {
+  path: string;
+  bytes: number;
+  kind: "agents" | "claude" | "cursor" | string;
+  truncated: boolean;
+}
+
+/** D89: a per-turn tree checkpoint. `turn_id` names the turn it followed. */
+export interface Checkpoint {
+  id: string;
+  session_id: string;
+  turn_id: string | null;
+  tree_hash: string;
+  created_at: number;
+}
+
+/** D95: one Markdown session bundle, with its JSON beside it. */
+export interface SessionExport {
+  markdown_path: string;
+  json_path: string;
+  markdown: string;
+}
+
+/** D98: a session's plan phase. Approval turns `mode` off and records `approved_at`. */
+export interface PlanState {
+  session_id: string;
+  mode: boolean;
+  approved_at: number | null;
+  updated_at: number;
+}
+
+/** D94: a saved role prompt, model/effort pair and tool allowance. */
+export interface RolePreset {
+  id: string;
+  title: string;
+  brief: string;
+  model: string;
+  effort: string;
+  tools: string[];
+}
+
+/** D92: one row of the cross-session spend report. `micros` is the canonical unit. */
+export interface SpendRow {
+  key: string;
+  label: string;
+  micros: number;
+  turns: number;
+}
+
+/** D92: every recorded turn, grouped by session, day and agent. */
+export interface SpendReport {
+  total_micros: number;
+  turns: number;
+  by_session: SpendRow[];
+  by_agent: SpendRow[];
+  by_day: SpendRow[];
 }
 
 /** Live state of the local OmniRoute router. `origin` is where it listens. */
@@ -131,7 +202,7 @@ export interface Item {
   id: string;
   turn_id: string;
   seq: number;
-  kind: "message" | "reasoning" | "command" | "file_change" | "mcp_call" | "web_search" | "plan" | "approval" | "usage" | "error" | string;
+  kind: "message" | "reasoning" | "command" | "file_change" | "mcp_call" | "web_search" | "plan" | "approval" | "usage" | "error" | "note" | string;
   status: string;
   body: Record<string, unknown>;
   created_at: number;
@@ -141,6 +212,17 @@ export interface Item {
 export interface TurnTranscript {
   turn: Turn;
   items: Item[];
+}
+
+/**
+ * D113/D116: the safety knobs and today's ledger. The window reads this in Settings and
+ * after a raise; the cap itself is enforced in the core, not here.
+ */
+export interface SafetyView {
+  writable_agents: number;
+  daily_cap_micros: number | null;
+  day: string;
+  today_micros: number;
 }
 
 export interface BudgetSnapshot {
@@ -172,6 +254,8 @@ export interface Patch {
 
 /** One `@@` block and the agent whose patch proposed it (P5.6). */
 export interface AttributedHunk {
+  /** The `patch_hunks` row: what a comment attaches to. */
+  id: string;
   patch_id: string;
   path: string;
   ordinal: number;
@@ -183,6 +267,23 @@ export interface AttributedHunk {
   new_lines: number;
   created_at: number;
   status: string;
+}
+
+/** A comment on one hunk, addressed to the agent that wrote it (D88). */
+export interface HunkComment {
+  id: string;
+  hunk_id: string;
+  patch_id: string;
+  path: string;
+  header: string;
+  /** The hunk's author: who the comment is for. */
+  agent_id: string;
+  /** `user`, or the id of the agent that wrote it. */
+  author: string;
+  body: string;
+  created_at: number;
+  delivered_turn_id: string | null;
+  delivered_at: number | null;
 }
 
 export interface Recovery {
@@ -402,6 +503,9 @@ export type AgentEvent =
   | { type: "turn_finished"; turn_id: string; status: string; stop: string; usage: Usage; session_spend_micros: number; cap_micros: number | null }
   | { type: "budget_warning"; session_id: string; spend_micros: number; cap_micros: number; remaining_micros: number }
   | { type: "budget_exceeded"; session_id: string; spend_micros: number; cap_micros: number }
+  | { type: "task_budget_exceeded"; session_id: string; agent_id: string; spend_micros: number; cap_micros: number }
+  | { type: "daily_budget_warning"; day: string; spend_micros: number; cap_micros: number }
+  | { type: "daily_budget_exceeded"; day: string; spend_micros: number; cap_micros: number }
   | { type: "approval_requested"; approval_id: string; kind: string; detail: unknown }
   | { type: "approval_resolved"; approval_id: string; decision: string }
   | { type: "session_updated"; session: Session }
@@ -561,6 +665,104 @@ export interface CoordinationView {
   conflicts: ClaimConflict[];
 }
 
+/** One stored verdict from the clean-context reviewer (D115). */
+export interface MergeReviewView {
+  id: string;
+  session_id: string;
+  agent_id: string;
+  reviewer_model: string;
+  verdict: "approved" | "blocked" | "unavailable";
+  reason: string | null;
+  /** The hash of the exact diff the verdict was about. */
+  diff_sha: string;
+  files: string[];
+  /** The reason the user typed to merge over a block, if they did. */
+  override_note: string | null;
+  /** False means the reviewer answered but the merge did not happen (or has not yet). */
+  merged: boolean;
+  created_at: number;
+}
+
+/**
+ * A writable subagent as the Diff view lists it (D80). The pending diff is not here: this
+ * rides the two-second poll, and a worktree diff can be a whole file.
+ */
+export interface WritableAgentView {
+  agent_id: string;
+  role: string | null;
+  model: string | null;
+  status: string;
+  worktree: string | null;
+  plan: string | null;
+  plan_note: string | null;
+  review: MergeReviewView | null;
+}
+
+/** A worktree's pending changes as one unified diff, read on demand. */
+export interface WritableDiffView {
+  agent_id: string;
+  files: string[];
+  diff: string;
+}
+
+/** One file's outcome from a merge, as the CAS pipeline reported it. */
+export interface MergeLineView {
+  path: string;
+  status: "applied" | "conflicted" | "deleted" | "unsupported" | "unchanged" | string;
+  patch_id: string | null;
+  detail: string | null;
+}
+
+export interface MergeReportView {
+  agent_id: string;
+  base: string;
+  lines: MergeLineView[];
+  applied: number;
+  conflicted: number;
+  skipped: number;
+}
+
+/** The result of a merge the user decided: the review it happened under, and what it did. */
+export interface AppliedMerge {
+  review: MergeReviewView;
+  report: MergeReportView;
+  worktree_removed: boolean;
+}
+
+/** One side of a conflict: its text and the hash those bytes must have (D79). */
+export interface ConflictText {
+  hash: string;
+  text: string;
+}
+
+/** The three rendered versions. A side is null when Rigel could not rebuild it. */
+export interface ConflictSides {
+  id: string;
+  path: string;
+  base: ConflictText | null;
+  ours: ConflictText | null;
+  theirs: ConflictText | null;
+  /** Why a side is missing, when one is. */
+  note?: string;
+  merged_patch_id?: string;
+  merged_hash?: string;
+}
+
+/** The merge text, before anything is written. */
+export interface MergedConflict {
+  id: string;
+  path: string;
+  merged: string;
+  conflicts: number;
+  clean: boolean;
+}
+
+export interface MergeResolution {
+  path: string;
+  patch: Patch | null;
+  unchanged: boolean;
+}
+
 export const isTauri = (): boolean =>
   typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
 
@@ -583,12 +785,21 @@ export const api = {
       return call<PendingApproval[]>("approval_pending");
     },
     /** Answer one question. A refusal is `null` on the wire, never an unknown string. */
-    async answer(id: string, scope: ApprovalAnswer): Promise<void> {
+    async answer(
+      id: string,
+      scope: ApprovalAnswer,
+      options?: { skip?: boolean; note?: string },
+    ): Promise<void> {
       if (!isTauri()) {
         previewQueue = previewQueue.filter((pending) => pending.id !== id);
         return;
       }
-      return call<void>("approval_answer", { id, scope: scope === "deny" ? null : scope });
+      return call<void>("approval_answer", {
+        id,
+        scope: scope === "deny" || options?.skip ? null : scope,
+        skip: options?.skip ?? false,
+        note: options?.note ?? null,
+      });
     },
   },
 
@@ -701,6 +912,32 @@ export const api = {
     return call<void>("turn_cancel", { turn });
   },
 
+  /** D98: read the session's plan phase. */
+  async planGet(project: string, session: string): Promise<PlanState> {
+    return call<PlanState>("plan_get", { project, session });
+  },
+
+  /** D98: plan on; approving sets `enabled: false` and records the hand-off. */
+  async planSet(project: string, session: string, enabled: boolean): Promise<PlanState> {
+    return call<PlanState>("plan_set", { project, session, enabled });
+  },
+
+  /** D94: the four built-in role presets. */
+  async rolePresets(): Promise<RolePreset[]> {
+    if (!isTauri()) return [];
+    return call<RolePreset[]>("role_presets");
+  },
+
+  /** D94: apply a preset from the roster; the next turn reads the new role. */
+  async roleApply(
+    project: string,
+    session: string,
+    agent: string,
+    preset: string,
+  ): Promise<Agent> {
+    return call<Agent>("role_apply", { project, session, agent, preset });
+  },
+
   /**
    * Price the first step of a turn before it is sent. In the browser this is a local
    * heuristic over sample prices; in the app the quote comes from Rust, priced with the
@@ -737,6 +974,47 @@ export const api = {
     return call<Session>("budget_raise", { project, session, capCents });
   },
 
+  /** D92: spend across every session in the project. */
+  /** The writable-agent cap and the day's spend. */
+  async safetyGet(project: string): Promise<SafetyView> {
+    return call<SafetyView>("safety_get", { project });
+  },
+  /**
+   * Change one knob. `dailyCapCents: null` leaves it alone; pass `clearDailyCap` to turn it
+   * off. A one-click raise is exactly this call with a larger number.
+   */
+  async safetySet(
+    project: string,
+    session: string,
+    input: {
+      writableAgents?: number;
+      dailyCapCents?: number;
+      clearDailyCap?: boolean;
+    },
+  ): Promise<SafetyView> {
+    return call<SafetyView>("safety_set", {
+      project,
+      session,
+      writableAgents: input.writableAgents ?? null,
+      dailyCapCents: input.dailyCapCents ?? null,
+      clearDailyCap: input.clearDailyCap ?? false,
+    });
+  },
+
+  async spendReport(project: string): Promise<SpendReport> {
+    return call<SpendReport>("spend_report", { project });
+  },
+
+  /** D92: cap one task (agent) below the session cap. `null` removes it. */
+  async taskCapSet(
+    project: string,
+    session: string,
+    agent: string,
+    capCents: number | null,
+  ): Promise<BudgetSnapshot> {
+    return call<BudgetSnapshot>("task_cap_set", { project, session, agent, capCents });
+  },
+
 
   /** The merged diff: claims, unverified changes and open conflicts (P5.6). */
   async claimList(project: string): Promise<CoordinationView> {
@@ -746,9 +1024,53 @@ export const api = {
     return call<CoordinationView>("claim_list", { project });
   },
 
+  /** Writable subagents with their plans and latest review; polled with the claims. */
+  async writableList(project: string, session: string): Promise<WritableAgentView[]> {
+    if (!isTauri()) return [];
+    return call<WritableAgentView[]>("writable_list", { project, session });
+  },
+
+  /** The worktree's pending changes as one diff, read once when a row is expanded. */
+  async writableDiff(project: string, agent: string): Promise<WritableDiffView> {
+    return call<WritableDiffView>("writable_diff", { project, agent });
+  },
+
+  /**
+   * Merge a recorded review on the user's behalf. An approved review needs no reason; a
+   * blocked or unavailable one needs the typed reason that will be stored beside it.
+   */
+  async writableMerge(
+    project: string,
+    session: string,
+    agent: string,
+    reason: string | null,
+  ): Promise<AppliedMerge> {
+    return call<AppliedMerge>("writable_merge", { project, session, agent, reason });
+  },
+
   async resolveConflict(project: string, id: string, resolution: string): Promise<void> {
     if (!isTauri()) return;
     return call<void>("conflict_resolve", { project, id, resolution });
+  },
+
+  /** Read the base/ours/theirs text once, when a conflict row is expanded (D79). */
+  async conflictSides(project: string, id: string): Promise<ConflictSides> {
+    return call<ConflictSides>("conflict_sides", { project, id });
+  },
+
+  /** Compute the merge; nothing is written until `resolveMergedConflict`. */
+  async mergeConflict(project: string, id: string): Promise<MergedConflict> {
+    return call<MergedConflict>("conflict_merge", { project, id });
+  },
+
+  /** Write the merged text through the CAS patch pipeline and resolve the conflict (D79). */
+  async resolveMergedConflict(
+    project: string,
+    session: string,
+    id: string,
+    merged: string,
+  ): Promise<MergeResolution> {
+    return call<MergeResolution>("conflict_resolve_merged", { project, session, id, merged });
   },
 
   /** Tell the desktop watcher which project to follow. */
@@ -763,6 +1085,24 @@ export const api = {
 
   async patchHunks(project: string, session: string): Promise<AttributedHunk[]> {
     return call<AttributedHunk[]>("patch_hunks", { project, session });
+  },
+
+  async hunkComments(project: string, session: string): Promise<HunkComment[]> {
+    return call<HunkComment[]>("hunk_comments", { project, session });
+  },
+
+  /** Attach a comment to one hunk. Nothing is sent until `deliverHunkComment`. */
+  async addHunkComment(project: string, hunk: string, body: string): Promise<HunkComment> {
+    return call<HunkComment>("hunk_comment_add", { project, hunk, body });
+  },
+
+  /** Send the comment to the hunk's author as a turn. */
+  async deliverHunkComment(
+    project: string,
+    session: string,
+    id: string,
+  ): Promise<TurnReply> {
+    return call<TurnReply>("hunk_comment_deliver", { project, session, id });
   },
 
   async revertPatch(id: string): Promise<Patch> {
@@ -857,6 +1197,9 @@ export const api = {
         provider: "omniroute",
         model: "gpt-5.6-sol-medium",
         effort: "medium",
+        notify_approval: true,
+        notify_turn_done: true,
+        notify_turn_failed: true,
       };
     }
     return call<Settings>("settings_get");
@@ -865,6 +1208,45 @@ export const api = {
   async saveSettings(settings: Settings): Promise<Settings> {
     if (!isTauri()) return settings;
     return call<Settings>("settings_set", { settings });
+  },
+
+  /** Compose the PR title/body locally, for a review before creating it. */
+  async pullRequestPlan(project: string, session: string): Promise<PullRequestPlan> {
+    return call<PullRequestPlan>("pull_request_plan", { project, session });
+  },
+
+  /** Run gh pr create. Only an explicit click calls this. */
+  async createPullRequest(project: string, session: string): Promise<string> {
+    return call<string>("pull_request_create", { project, session });
+  },
+
+  /** Project rule files a native turn would read (D91). */
+  async rulesSources(project: string): Promise<RuleSource[]> {
+    if (!isTauri()) return [];
+    return call<RuleSource[]>("rules_sources", { project });
+  },
+
+  /** Committed memory as one copyable AGENTS.md block. */
+  async exportMemory(project: string): Promise<string> {
+    if (!isTauri()) return "";
+    return call<string>("rules_export_memory", { project });
+  },
+
+  /** Per-turn checkpoints, newest last. */
+  async listCheckpoints(project: string, session: string): Promise<Checkpoint[]> {
+    if (!isTauri()) return [];
+    return call<Checkpoint[]>("checkpoint_list", { project, session });
+  },
+
+  /** Restore the snapshot a turn recorded. Explicit; the journal is not rolled back. */
+  async restoreCheckpoint(project: string, id: string): Promise<{ files_restored: number }> {
+    return call<{ files_restored: number }>("checkpoint_restore", { project, id });
+  },
+
+  /** Write a session's Markdown and JSON under the app data folder. */
+  async exportSession(project: string, id: string): Promise<SessionExport> {
+    if (!isTauri()) throw new Error("Export a session from the desktop app, not the browser preview.");
+    return call<SessionExport>("session_export", { project, id });
   },
 
   /** Assemble the diagnostics bundle on demand; it is written locally and returned for copying. */

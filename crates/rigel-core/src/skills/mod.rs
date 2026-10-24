@@ -15,6 +15,7 @@
 //! | [`hub`] | SkillsMP and SkillHub (HTML) connectors |
 //! | [`cluster`] | SimHash and near-duplicate clusters |
 //! | [`evidence`] | measured vs advertised numbers |
+//! | [`skillssh`] | the directory's page, its audits and their dates |
 //! | [`search`] | FTS5 query construction and the documented ordering |
 //! | [`index`] | the `SkillIndex` service that ties all of the above together |
 
@@ -28,6 +29,7 @@ pub mod hub;
 pub mod index;
 pub mod scan;
 pub mod search;
+pub mod skillssh;
 pub mod source;
 
 use std::io;
@@ -45,6 +47,7 @@ pub use index::{
 };
 pub use scan::{Capability, EvidenceLine, Severity};
 pub use search::{SearchHit, SearchOrder};
+pub use skillssh::{AuditVerdict, SkillsShPage};
 pub use source::{
     FetchedSkill, RepoSnapshot, SkillRecord, Source, SourceState, SourceStatus, SyncPolicy,
 };

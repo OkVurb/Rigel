@@ -56,7 +56,11 @@ jobs:
           cache: npm
           cache-dependency-path: ui/package-lock.json
       - run: npm ci
+      - name: Install Chromium
+        run: npx playwright install --with-deps chromium
       - run: npm run build
+      - name: Five surfaces smoke
+        run: npm run test:e2e
       - name: Handoff checklist
         run: node scripts/handoff-status.mjs
         working-directory: .
@@ -72,3 +76,13 @@ jobs:
       # Offline and dependency-free: reads README.md, docs/ and the issue forms only.
       - name: Docs links, anchors and issue forms
         run: node scripts/check-docs.mjs
+
+  hygiene:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # ACTIVE-WORK.md and tmp/ are local-only; the check lives in scripts/ so
+      # the pre-commit hook runs exactly the same code.
+      - name: No local-only paths are committed
+        run: bash scripts/check-hygiene.sh

@@ -35,13 +35,18 @@ pub struct EvidenceSummary {
     pub source: String,
     pub source_url: Option<String>,
     pub observed_at: i64,
-    /// `measured` or `unmeasured`. The shelf prints this verbatim next to the numbers.
+    /// `measured`, `unmeasured`, or `audited` for a dated third-party verdict. The shelf
+    /// prints this verbatim next to the numbers.
     pub label: &'static str,
 }
 
 impl From<Evidence> for EvidenceSummary {
     fn from(evidence: Evidence) -> Self {
-        let label = if evidence.measured.is_some() {
+        let label = if evidence.metric.starts_with("audit:") {
+            // A directory's verdict is dated evidence, not a number Rigel measured. It never
+            // moves the grade (D93); the label says so next to the row.
+            "audited"
+        } else if evidence.measured.is_some() {
             "measured"
         } else {
             "unmeasured"

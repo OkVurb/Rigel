@@ -30,17 +30,19 @@ pub mod omniroute;
 pub mod openrouter;
 pub mod pricing;
 pub mod refine;
+pub mod roles;
 pub mod scripted;
 pub mod subagents;
 pub mod team;
 pub mod tools;
 
 pub use approval::{
-    ApprovalScope, CommandApprover, CommandDecision, CommandRequest, DenyCommands, Scopes,
+    ApprovalScope, CommandApprover, CommandDecision, CommandRequest, DenyCommands, DenyPlans,
+    PlanAgent, PlanApprover, PlanDecision, PlanRequest, Scopes,
 };
 pub use coordinator::{
-    AgentError, Cancels, Coordinator, DEFAULT_MAX_STEPS, DEFAULT_SUBAGENT_MODEL, SUBAGENT_MODELS,
-    StopReason, SubagentPolicy, TurnRun, fixed_context_chars,
+    AgentError, Cancels, Coordinator, DEFAULT_MAX_STEPS, DEFAULT_SUBAGENT_MODEL, MAX_PLAN_CHARS,
+    REVIEW_MODEL, SUBAGENT_MODELS, StopReason, SubagentPolicy, TurnRun, fixed_context_chars,
 };
 pub use deliberation::{Deliberation, Deliberator, ModelDeliberator, NoDeliberation, Position};
 pub use destructive::{Finding, POLICIES, Policy, classify};
@@ -54,5 +56,6 @@ pub use model::{
 pub use omniroute::ServerStatus;
 pub use openrouter::{DEFAULT_BASE_URL, DEFAULT_MODEL, OpenRouterModel};
 pub use refine::{MAX_ROUNDS, PromptRefiner, RefineRequest, Refinement};
+pub use roles::{PRESETS as ROLE_PRESETS, RolePreset};
 pub use scripted::{Script, ScriptedModel};
 pub use tools::{ToolOutcome, Tools};

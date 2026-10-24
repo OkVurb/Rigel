@@ -251,6 +251,43 @@ impl WorktreeService {
             .collect())
     }
 
+    /// The changes as one unified diff, with the paths it covers (D115).
+    ///
+    /// Git's status order is stable, so the same worktree always produces the same bytes and
+    /// the same hash. Deletions, renames and binary files are left out here exactly as
+    /// `merge_back` leaves them out; the caller sees them in the merge report instead of a
+    /// diff it cannot act on.
+    pub async fn diff(&self, agent_id: &str) -> Result<(String, Vec<String>), WorktreeError> {
+        let worktree = self.get(agent_id).await?;
+        let mut out = String::new();
+        let mut files = Vec::new();
+        for change in self.changes(&worktree.path)? {
+            if matches!(change.status, "deleted" | "renamed" | "unsupported") {
+                continue;
+            }
+            let Ok(bytes) = std::fs::read(worktree.path.join(&change.path)) else {
+                continue;
+            };
+            let Ok(content) = String::from_utf8(bytes) else {
+                continue;
+            };
+            let base = self
+                .git_bytes(&["show", &format!("{}:{}", worktree.base, change.path)])
+                .unwrap_or_default();
+            let base = String::from_utf8(base).unwrap_or_default();
+            let diff = crate::patches::unified_diff(&change.path, &base, &content);
+            if diff.is_empty() {
+                continue;
+            }
+            files.push(change.path.clone());
+            out.push_str(&diff);
+            if !out.ends_with('\n') {
+                out.push('\n');
+            }
+        }
+        Ok((out, files))
+    }
+
     /// Move every change back into the main tree through a patch, or explain why not.
     pub async fn merge_back(
         &self,

@@ -56,6 +56,31 @@ pub const PROJECT_MIGRATIONS: &[Migration] = &[
         name: "0006_team",
         sql: include_str!("../../../migrations/project/0006_team.sql"),
     },
+    Migration {
+        version: 7,
+        name: "0007_task_caps",
+        sql: include_str!("../../../migrations/project/0007_task_caps.sql"),
+    },
+    Migration {
+        version: 8,
+        name: "0008_plan_mode",
+        sql: include_str!("../../../migrations/project/0008_plan_mode.sql"),
+    },
+    Migration {
+        version: 9,
+        name: "0009_hunk_comments",
+        sql: include_str!("../../../migrations/project/0009_hunk_comments.sql"),
+    },
+    Migration {
+        version: 10,
+        name: "0010_conflict_sides",
+        sql: include_str!("../../../migrations/project/0010_conflict_sides.sql"),
+    },
+    Migration {
+        version: 11,
+        name: "0011_writable_agents",
+        sql: include_str!("../../../migrations/project/0011_writable_agents.sql"),
+    },
 ];
 
 /// `%APPDATA%\Rigel\index.db`

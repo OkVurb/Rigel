@@ -31,10 +31,10 @@
 </p>
 
 <p align="center">
-  <img src="screenshots/rigel-demo.gif" width="800" alt="A loop through the Rigel window: the session turn, the shell, the evidence table and targets" />
+  <img src="screenshots/rigel-demo.gif" width="800" alt="Screen recording of the Rigel window: the agent roster and a session turn waiting on approval, a typed prompt, the agents' chat room, the provider and harness settings, then the skill shelf" />
 </p>
 
-<p align="center"><sub>Session · the shell · evidence · targets</sub></p>
+<p align="center"><sub>Recorded from the running window: session · chat · settings · shelf</sub></p>
 
 ## 💡 Why Rigel
 
@@ -60,7 +60,7 @@ one made things worse. Star counts and install numbers surface none of that.
 | 🧬 | **Duplicate detection** | SimHash clusters, with variants listed under every row |
 | 🛡️ | **Static safety review** | Six capability rules, each with the `file:line` that triggered it |
 | 📊 | **Measured vs advertised** | An advertised number stays `unmeasured` until a measurement exists |
-| 🤖 | **Native agent** | Streaming turns, ten path-checked tools, approvals and snapshots, subagents, and a cap that holds within one turn |
+| 🤖 | **Native agent** | Streaming turns, ten path-checked tools, approvals and snapshots, read and writable subagents with a review before merge, and a cap that holds within one turn |
 | 🔀 | **Attributed diff** | Every agent's writes merged, a conflict strip, and per-patch revert |
 | 🧰 | **Tools and trust** | What is installed, what a skill needs (with the line that said so), and the five-factor arithmetic |
 | 🩺 | **Doctor** | One row per check and an exit code: `0` clear, `1` warnings, `2` failures |
@@ -244,8 +244,9 @@ each surface and the evidence for it.
 |---|---|
 | **Shelf** | FTS5 search, six-rule static review with `file:line` evidence, evidence table, variants — all offline |
 | **Session** | The native agent streaming turns, approvals, snapshots, subagents, a live model picker, and a cap that holds within one turn |
+| **Safety** | Three writable agents at once, a per-child plan the user approves, a clean-context reviewer on every merge, and a $20/day cap across the project |
 | **Harnesses** | Codex, Claude, Gemini CLI, Cursor and Cline, each probed as its own row with its own key |
-| **Diff** | Attributed writes, the conflict strip, claims with stale rows, per-patch revert |
+| **Diff** | Attributed writes, the conflict strip, claims with stale rows, per-patch revert, subagent plans with their merge reviews and pending worktree diffs, and a merge or recorded override for an unmerged review |
 | **Tools** | Twelve probed tools, requirements traced to the line that said so, the trust arithmetic, gated installs |
 | **Doctor** | One row per check and an exit code: `0` clear, `1` warnings, `2` failures |
 | **MCP** | A stdio host scoped to one session and one agent, sharing the same tools |
@@ -328,6 +329,7 @@ A model turn needs a key; the deterministic scripted model drives the tests with
 - `node scripts/fix-cursor-hooks.mjs` — repair Cursor's project-relative hook paths
 - `node scripts/handoff-status.mjs` — checklist progress per phase; fails if the §11 summary table is stale
 - `node scripts/check-docs.mjs` — fails on a link or anchor in `README.md` or `docs/` that resolves nowhere, or an issue form GitHub would reject
+- `bash scripts/check-hygiene.sh` — fails if `ACTIVE-WORK.md` or a path under `tmp/` is committed; the pre-commit hook runs it too
 - `bash scripts/dev.sh` — local dev: the desktop shell under `infisical run --env=dev`, with the setup steps in [INFISICAL.md](INFISICAL.md)
 - `bash scripts/p3-exit-test.sh` — the Phase 3 exit test; needs a built `rigel` and `python`
 - `bash scripts/p5-exit-test.sh` — two agents on one file: conflict in two seconds, no "locked"
@@ -344,13 +346,15 @@ change that violates one is a bug even if the tests pass. The checks are exactly
 cargo fmt --all -- --check
 cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
-(cd ui && npx tsc --noEmit && npm run build)
+(cd ui && npx tsc --noEmit && npm run build && npm run test:e2e)
 ```
 
 A schema change is a new numbered file in `migrations/` plus a `Migration` entry; an applied migration
-is never edited. Security reports go to `security@rigel.invalid`, as [SECURITY.md](SECURITY.md)
-describes, and not to the issue tracker. A failing test is fixed by fixing the cause: no `#[ignore]`,
-no weakened assertion, no lint silenced with an `allow` attribute.
+is never edited. `bash scripts/dev.sh` enables the pre-commit hook on first run, and
+`git config core.hooksPath .githooks` does it directly; the hook runs the same hygiene check as CI.
+Security reports go to `security@rigel.invalid`, as [SECURITY.md](SECURITY.md) describes, and not
+to the issue tracker. A failing test is fixed by fixing the cause: no `#[ignore]`, no weakened
+assertion, no lint silenced with an `allow` attribute.
 
 ## 🚧 Limits, stated plainly
 
@@ -365,7 +369,17 @@ no weakened assertion, no lint silenced with an `allow` attribute.
 - Skill bodies live on disk in `blobs/`, not in SQLite. Deleting that directory forces a re-fetch; the
   rows will report `body: not fetched` until one happens. `rigel skills gc` only removes blobs no row
   or cache entry names.
-- **Subagents are cheap, read-only and concurrent.** The allowlist is eight models, all at
+- **The merge reviewer is a model, not a proof.** It sees the diff and nothing else, and its
+  APPROVE is a signal, not a guarantee; the patch journal and the worktree are what make a bad
+  merge recoverable. The daily cap is counted in the project database, so it is global across
+  this project's sessions, not across every project the window has opened.
+- **Subagents are cheap and concurrent; up to three may write.** Read children cannot write or
+  spawn. A writable child is started only with a plan the user approved (or skipped with a
+  recorded reason), holds a claim on each of its files, works in its own worktree, and merges
+  only after a clean-context reviewer reads the diff. A blocked review needs a typed override,
+  which is stored beside the verdict. The writable count and the $20/day cap live in
+  Settings → Safety; the cap covers every session in the project and interrupts every running
+  agent after the step that crosses it. The allowlist is eight models, all at
   $5/M output or less: `openai/gpt-5-nano` (default), `openai/gpt-5.4-nano`,
   `google/gemini-2.5-flash-lite`, `deepseek/deepseek-v4.1-flash`,
   `qwen/qwen3-coder-30b-a3b-instruct`, `anthropic/claude-haiku-5.5`,

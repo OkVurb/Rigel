@@ -96,6 +96,7 @@ fn coordinator(
         subagents: rigel_core::agent::SubagentPolicy::default(),
         depth: 0,
         parent_cancel: None,
+        worktree_dir: None,
         chat_parent: None,
     }
 }
@@ -349,8 +350,9 @@ async fn subagents_are_read_only_billed_separately_and_nested_under_the_parent()
         max_steps: 10,
         subagents: rigel_core::agent::SubagentPolicy::default(),
         depth: 0,
-        parent_cancel: None,
+        worktree_dir: None,
         chat_parent: None,
+        parent_cancel: None,
     }
     .run(&session.id, &agent.id, "read the repo")
     .await
@@ -907,8 +909,9 @@ async fn sibling_subagents_overlap_their_model_calls() {
         max_steps: 10,
         subagents: rigel_core::agent::SubagentPolicy::default(),
         depth: 0,
-        parent_cancel: None,
+        worktree_dir: None,
         chat_parent: None,
+        parent_cancel: None,
     }
     .run(&session.id, &agent.id, "work")
     .await
@@ -1098,8 +1101,9 @@ async fn children_see_their_files_and_the_shared_board() {
         max_steps: 10,
         subagents: rigel_core::agent::SubagentPolicy::default(),
         depth: 0,
-        parent_cancel: None,
+        worktree_dir: None,
         chat_parent: None,
+        parent_cancel: None,
     }
     .run(&session.id, &agent.id, "work")
     .await
@@ -1157,6 +1161,95 @@ async fn children_see_their_files_and_the_shared_board() {
     );
 }
 
+/// A decision the user made in the window (D115's Diff-view merge) is posted on the previous
+/// turn. Every turn starts from a fresh message list, so restating it is the only way the note
+/// reaches the model at all.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_note_the_user_left_on_the_last_turn_reaches_the_next_prompt() {
+    const NOTE: &str =
+        "the user merged writer 0b7e3021's work from the Diff view: 1 file landed in the main tree";
+    let tmp = repo();
+    let service = SessionService::open(tmp.path()).await.unwrap();
+    let session = service.start(Some("notes"), Some(25)).await.unwrap();
+    let agent = service
+        .register_agent(&session.id, "native", Some("worker"))
+        .await
+        .unwrap();
+
+    let model = Arc::new(RecordingModel::default());
+    let cancels = Arc::new(Cancels::new());
+    let budget = Arc::new(BudgetService::new(
+        service.pool().clone(),
+        cancels.clone() as Arc<dyn rigel_core::InterruptSink>,
+    ));
+    let tools = Tools::new(
+        tmp.path().to_path_buf(),
+        service.clone(),
+        budget.clone(),
+        tmp.path().join("index"),
+        StopAt::Never,
+    );
+    let coordinator = Coordinator {
+        session: service.clone(),
+        budget,
+        tools,
+        model: model.clone(),
+        sink: Arc::new(rigel_core::NullSink),
+        cancels,
+        project_root: tmp.path().to_path_buf(),
+        model_name: "recording".to_string(),
+        effort: None,
+        max_steps: 10,
+        subagents: rigel_core::agent::SubagentPolicy::default(),
+        depth: 0,
+        worktree_dir: None,
+        chat_parent: None,
+        parent_cancel: None,
+    };
+    let first = coordinator
+        .run(&session.id, &agent.id, "split the work")
+        .await
+        .unwrap();
+
+    // The user merges the child's work in the Diff view: the note lands on the turn that ran.
+    let body = serde_json::json!({ "text": NOTE, "kind": "user_merge" });
+    service
+        .append_item(&first.turn.id, "note", "ok", &body, &body)
+        .await
+        .unwrap();
+
+    let second = coordinator
+        .run(&session.id, &agent.id, "carry on")
+        .await
+        .unwrap();
+    assert_eq!(second.stop, StopReason::Completed);
+
+    let notes = service
+        .previous_notes(&agent.id, &second.turn.id)
+        .await
+        .unwrap();
+    assert_eq!(notes.len(), 1, "the previous turn holds exactly one note");
+
+    let systems = model.systems.lock().unwrap();
+    let parents: Vec<&String> = systems
+        .iter()
+        .filter(|system| system.contains("You are Rigel's native agent"))
+        .collect();
+    assert_eq!(
+        parents
+            .iter()
+            .filter(|system| system.contains(NOTE))
+            .count(),
+        1,
+        "the note is stated once, in the turn that follows it: {parents:?}"
+    );
+    let last = parents.last().expect("the second turn was prompted");
+    assert!(
+        last.contains("The user acted in the window") && last.contains(NOTE),
+        "the note reaches the next prompt: {last}"
+    );
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn stopping_a_parent_stops_the_children_it_spawned() {
     let tmp = repo();
@@ -1196,8 +1289,9 @@ async fn stopping_a_parent_stops_the_children_it_spawned() {
         max_steps: 10,
         subagents: rigel_core::agent::SubagentPolicy::default(),
         depth: 0,
-        parent_cancel: None,
+        worktree_dir: None,
         chat_parent: None,
+        parent_cancel: None,
     }
     .run(&session.id, &agent.id, "work")
     .await
@@ -1331,8 +1425,9 @@ async fn the_coordinators_effort_reaches_every_step_request() {
         max_steps: 3,
         subagents: rigel_core::agent::SubagentPolicy::default(),
         depth: 0,
-        parent_cancel: None,
+        worktree_dir: None,
         chat_parent: None,
+        parent_cancel: None,
     }
     .run(&session.id, &agent.id, "say done")
     .await
@@ -1347,5 +1442,65 @@ async fn the_coordinators_effort_reaches_every_step_request() {
     assert!(
         seen.iter().all(|effort| effort.as_deref() == Some("low")),
         "every step request carries the coordinator's effort: {seen:?}"
+    );
+}
+
+#[tokio::test]
+async fn plan_mode_refuses_the_edit_until_the_plan_is_approved() {
+    let tmp = repo();
+    let service = SessionService::open(tmp.path()).await.unwrap();
+    let session = service.start(Some("plan"), Some(25)).await.unwrap();
+    let agent = service
+        .register_agent(&session.id, "native", Some("implementer"))
+        .await
+        .unwrap();
+    let script = r#"{
+      "steps": [
+        {"tool_calls": [{"name": "read_file", "arguments": {"path": "src/lib.rs"}}],
+         "usage": {"input_tokens": 10, "output_tokens": 2, "cost_usd": 0.0001}},
+        {"tool_calls": [{"name": "edit_file", "arguments": {
+            "path": "src/lib.rs",
+            "old_string": "    a - b",
+            "new_string": "    a.saturating_sub(b)"
+        }}],
+         "usage": {"input_tokens": 10, "output_tokens": 2, "cost_usd": 0.0001}},
+        {"text": "Plan: make subtraction saturating.", "usage": {"input_tokens": 5, "output_tokens": 2, "cost_usd": 0.0001}}
+      ]
+    }"#;
+
+    rigel_core::plan::set(service.pool(), &session.id, true)
+        .await
+        .unwrap();
+    let planned = coordinator(tmp.path(), &service, script, StopAt::Never, 10)
+        .run(&session.id, &agent.id, "plan the fix")
+        .await
+        .unwrap();
+    assert_eq!(planned.stop, StopReason::Completed);
+    assert!(
+        std::fs::read_to_string(tmp.path().join("src/lib.rs"))
+            .unwrap()
+            .contains("    a - b"),
+        "plan mode must not change the tree"
+    );
+    let transcript = service.transcript(&session.id).await.unwrap();
+    let body = serde_json::to_string(&transcript[0].items).unwrap();
+    assert!(
+        body.contains("PLAN_MODE"),
+        "the refusal is in the transcript"
+    );
+
+    rigel_core::plan::set(service.pool(), &session.id, false)
+        .await
+        .unwrap();
+    let worked = coordinator(tmp.path(), &service, script, StopAt::Never, 10)
+        .run(&session.id, &agent.id, "do it")
+        .await
+        .unwrap();
+    assert_eq!(worked.stop, StopReason::Completed);
+    assert!(
+        std::fs::read_to_string(tmp.path().join("src/lib.rs"))
+            .unwrap()
+            .contains("a.saturating_sub(b)"),
+        "approval lets the same edit through"
     );
 }

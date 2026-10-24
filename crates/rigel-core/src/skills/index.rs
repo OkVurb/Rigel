@@ -156,7 +156,30 @@ impl SkillIndex {
         target: &str,
         policy: SyncPolicy,
     ) -> Result<IngestReport, SkillsError> {
-        let source = self.github().await?;
+        self.walk_repo(target, policy, None).await
+    }
+
+    /// Index one skill by its directory name. The skills.sh import uses this so a page costs
+    /// one body, not a whole repository's worth of requests.
+    pub async fn index_skill(
+        &self,
+        target: &str,
+        policy: SyncPolicy,
+        slug: &str,
+    ) -> Result<IngestReport, SkillsError> {
+        self.walk_repo(target, policy, Some(slug)).await
+    }
+
+    async fn walk_repo(
+        &self,
+        target: &str,
+        policy: SyncPolicy,
+        slug: Option<&str>,
+    ) -> Result<IngestReport, SkillsError> {
+        let mut source = self.github().await?;
+        if let Some(slug) = slug {
+            source = source.with_slug(slug);
+        }
         match source.fetch_repo(target, policy).await {
             Ok(snapshot) => self.ingest(&snapshot).await,
             Err(error) => {

@@ -5,9 +5,13 @@ import {
   type HarnessInfo,
   type KeyStatus,
   type OmnirouteStatus,
+  type RuleSource,
+  type SafetyView,
   type Settings,
+  type SpendReport,
 } from "./api";
 import { ModelControls } from "./modelpicker";
+import { ensurePermission } from "./notify";
 
 interface Props {
   keys: KeyStatus | null;
@@ -234,6 +238,16 @@ function HarnessKeyRow({
  * OmniRoute has a second axis OpenRouter does not: the router is a process on this machine,
  * so this screen reports whether it is answering and can start it.
  */
+function dollarsLabel(micros: number | null): string {
+  return micros === null ? "no cap" : dollars(micros);
+}
+
+function dollars(micros: number): string {
+  const sign = micros < 0 ? "-" : "";
+  const value = Math.abs(micros);
+  return `${sign}$${Math.floor(value / 1_000_000)}.${String(Math.floor((value % 1_000_000) / 100)).padStart(4, "0")}`;
+}
+
 export default function SettingsView({ keys, project, session, onKeys, onNotice }: Props) {
   const [value, setValue] = useState("");
   const [busy, setBusy] = useState(false);
@@ -245,11 +259,32 @@ export default function SettingsView({ keys, project, session, onKeys, onNotice 
   const [harnesses, setHarnesses] = useState<HarnessInfo[] | null>(null);
   const [probing, setProbing] = useState(false);
   const [diagnostics, setDiagnostics] = useState<{ path: string; body: string } | null>(null);
+  const [rules, setRules] = useState<RuleSource[]>([]);
   const [exporting, setExporting] = useState(false);
+  const [spend, setSpend] = useState<SpendReport | null>(null);
+  const [safety, setSafety] = useState<SafetyView | null>(null);
+  const [writableInput, setWritableInput] = useState("");
+  const [dailyInput, setDailyInput] = useState("");
+  const [safetyBusy, setSafetyBusy] = useState(false);
 
   const provider = settings?.provider ?? "omniroute";
   const providerInfo = PROVIDERS.find((item) => item.id === provider) ?? PROVIDERS[0];
   const present = keys ? (provider === "omniroute" ? keys.omniroute : keys.openrouter) : null;
+
+  useEffect(() => {
+    if (!project) {
+      setRules([]);
+      return;
+    }
+    let live = true;
+    api
+      .rulesSources(project)
+      .then((next) => live && setRules(next))
+      .catch(() => live && setRules([]));
+    return () => {
+      live = false;
+    };
+  }, [project]);
 
   useEffect(() => {
     let live = true;
@@ -265,10 +300,29 @@ export default function SettingsView({ keys, project, session, onKeys, onNotice 
       .harnessProbe(false)
       .then((next) => live && setHarnesses(next))
       .catch(() => live && setHarnesses(null));
+    if (project) {
+      api
+        .spendReport(project)
+        .then((next) => live && setSpend(next))
+        .catch(() => live && setSpend(null));
+      api
+        .safetyGet(project)
+        .then((next) => {
+          if (!live) return;
+          setSafety(next);
+          setWritableInput(String(next.writable_agents));
+          setDailyInput(
+            next.daily_cap_micros === null
+              ? ""
+              : String(Math.round(next.daily_cap_micros / 10_000)),
+          );
+        })
+        .catch(() => live && setSafety(null));
+    }
     return () => {
       live = false;
     };
-  }, []);
+  }, [project]);
 
   const refreshHarnesses = async (force = false) => {
     setProbing(force);
@@ -306,6 +360,41 @@ export default function SettingsView({ keys, project, session, onKeys, onNotice 
     }
   };
 
+  // D113/D116: one save writes both knobs, because they are read together everywhere.
+  const saveSafety = async (clearDaily = false) => {
+    if (!project) {
+      onNotice("Open a project first — the safety settings live in its database.");
+      return;
+    }
+    setSafetyBusy(true);
+    try {
+      const count = Number.parseInt(writableInput, 10);
+      const dailyDollars = clearDaily ? null : Number.parseFloat(dailyInput);
+      const next = await api.safetySet(project, session ?? "", {
+        writableAgents: Number.isFinite(count) ? Math.max(1, Math.min(16, count)) : undefined,
+        dailyCapCents:
+          !clearDaily && dailyDollars !== null && Number.isFinite(dailyDollars)
+            ? Math.max(1, Math.round(dailyDollars * 100))
+            : undefined,
+        clearDailyCap: clearDaily,
+      });
+      setSafety(next);
+      setWritableInput(String(next.writable_agents));
+      setDailyInput(
+        next.daily_cap_micros === null ? "" : String(Math.round(next.daily_cap_micros / 10_000)),
+      );
+      onNotice(
+        clearDaily
+          ? "Daily cap turned off. Session caps still apply."
+          : `Safety saved: ${next.writable_agents} writable agent(s), ${dollarsLabel(next.daily_cap_micros)} a day.`,
+      );
+    } catch (failure) {
+      setError(failure instanceof Error ? failure.message : String(failure));
+    } finally {
+      setSafetyBusy(false);
+    }
+  };
+
   const choose = async (id: string) => {
     if (!settings || settings.provider === id) return;
     const next = { ...settings, provider: id };
@@ -330,6 +419,22 @@ export default function SettingsView({ keys, project, session, onKeys, onNotice 
     try {
       setSettings(await api.saveSettings(next));
       onNotice(`Default model: ${model} · ${effort} effort.`);
+    } catch (problem) {
+      setError(problem instanceof Error ? problem.message : String(problem));
+    }
+  };
+
+  const saveNotification = async (field: "notify_approval" | "notify_turn_done" | "notify_turn_failed", enabled: boolean) => {
+    if (!settings) return;
+    if (enabled && !(await ensurePermission())) {
+      onNotice("The OS refused notification permission; the switches stay off in this window.");
+      return;
+    }
+    const next = { ...settings, [field]: enabled };
+    setSettings(next);
+    try {
+      setSettings(await api.saveSettings(next));
+      onNotice(enabled ? "Notification enabled." : "Notification disabled.");
     } catch (problem) {
       setError(problem instanceof Error ? problem.message : String(problem));
     }
@@ -603,6 +708,155 @@ export default function SettingsView({ keys, project, session, onKeys, onNotice 
           </div>
         </section>
 
+
+        <section className="settings-section">
+          <div className="settings-head">
+            <h3>Spend</h3>
+            <span className="pill cancelled">
+              {spend ? `${spend.turns} turns` : "no data"}
+            </span>
+          </div>
+          <p className="fine">
+            Every recorded turn, grouped across sessions. The session database is the source
+            of truth; nothing here is estimated a second time.
+          </p>
+          {spend ? (
+            <>
+              <p className="settings-total">
+                {dollars(spend.total_micros)} total
+              </p>
+              <div className="harness-list">
+                {spend.by_day.slice(0, 7).map((row) => (
+                  <div className="harness-row spend-row" key={row.key}>
+                    <span>{row.label}</span>
+                    <span className="mono">{dollars(row.micros)}</span>
+                    <span className="fine">{row.turns} turns</span>
+                  </div>
+                ))}
+                {spend.by_session.slice(0, 5).map((row) => (
+                  <div className="harness-row spend-row" key={row.key}>
+                    <span>{row.label}</span>
+                    <span className="mono">{dollars(row.micros)}</span>
+                    <span className="fine">{row.turns} turns</span>
+                  </div>
+                ))}
+              </div>
+            </>
+          ) : (
+            <p className="fine">Open a project to see its recorded spend.</p>
+          )}
+        </section>
+
+        <section className="settings-section">
+          <div className="settings-head">
+            <h3>Safety</h3>
+            <span className={`pill ${safety ? "completed" : "cancelled"}`}>
+              {safety ? `${dollars(safety.today_micros)} today` : "no data"}
+            </span>
+          </div>
+          <p className="fine">
+            Three writable agents at once by default; read-only helpers are not counted. The
+            daily cap applies to every session in this project and stops every running agent
+            when it is crossed. Both are recorded in the project database, not a settings file.
+          </p>
+          {safety ? (
+            <div className="safety-form">
+              <label>
+                <span>Writable agents at once</span>
+                <input
+                  value={writableInput}
+                  onChange={(event) => setWritableInput(event.target.value)}
+                  inputMode="numeric"
+                  aria-label="Writable agents at once"
+                />
+              </label>
+              <label>
+                <span>Daily cap, $</span>
+                <input
+                  value={dailyInput}
+                  onChange={(event) => setDailyInput(event.target.value)}
+                  inputMode="decimal"
+                  placeholder="off"
+                  aria-label="Daily cap in dollars"
+                />
+              </label>
+              <div className="cap-form">
+                <button
+                  className="chip"
+                  onClick={() => void saveSafety(false)}
+                  disabled={safetyBusy}
+                >
+                  Save safety
+                </button>
+                <button
+                  className="chip danger"
+                  onClick={() => void saveSafety(true)}
+                  disabled={safetyBusy}
+                >
+                  Turn the daily cap off
+                </button>
+              </div>
+              <p className="fine mono">
+                {safety.day} · {dollars(safety.today_micros)} of{" "}
+                {dollarsLabel(safety.daily_cap_micros)} · {safety.writable_agents} writable
+              </p>
+            </div>
+          ) : (
+            <p className="fine">Open a project to see its safety settings.</p>
+          )}
+        </section>
+
+        <section className="settings-section">
+          <div className="settings-head">
+            <h3>Project rules</h3>
+            <span className={`pill ${rules.length ? "completed" : "cancelled"}`}>
+              {rules.length ? `${rules.length} source${rules.length === 1 ? "" : "s"}` : "none"}
+            </span>
+          </div>
+          <p className="fine">
+            Read-only, imported as data before every native turn. Memory stays the source of
+            record; an <code>AGENTS.md</code> here does not outrank the current request.
+          </p>
+          {rules.length ? (
+            <div className="harness-list">
+              {rules.map((rule) => (
+                <div className="harness-row" key={rule.path}>
+                  <code className="harness-path">{rule.path}</code>
+                  <p className="fine">
+                    {rule.kind} · {Math.round(rule.bytes / 1024)} KiB
+                    {rule.truncated ? " · truncated to the context cap" : ""}
+                  </p>
+                </div>
+              ))}
+            </div>
+          ) : (
+            <p className="fine">No AGENTS.md, CLAUDE.md or .cursor/rules file in this project.</p>
+          )}
+          <div className="settings-actions">
+            <button
+              className="chip"
+              disabled={!project}
+              onClick={() => {
+                void api
+                  .exportMemory(project ?? "")
+                  .then((body) => {
+                    if (!body) {
+                      onNotice("No committed memory to export yet.");
+                      return;
+                    }
+                    void navigator.clipboard?.writeText(body);
+                    onNotice("Memory copied as an AGENTS.md block.");
+                  })
+                  .catch((failure) =>
+                    onNotice(failure instanceof Error ? failure.message : "Export failed."),
+                  );
+              }}
+            >
+              Copy memory as AGENTS.md
+            </button>
+          </div>
+        </section>
+
         <section className="settings-section">
           <div className="settings-head">
             <h3>Diagnostics</h3>
@@ -654,6 +908,34 @@ export default function SettingsView({ keys, project, session, onKeys, onNotice 
             <code> reasoning_effort</code>; it is not baked into the model id. Subagents stay on
             the cheap allowlist and cannot be pointed at an expensive model.
           </p>
+        </section>
+
+        <section className="settings-section">
+          <div className="settings-head">
+            <h3>Desktop notifications</h3>
+            <span className="pill cancelled">no sound</span>
+          </div>
+          <p className="fine">
+            A turn you are already watching stays silent. These switches only affect events that
+            happen while the window is in the background.
+          </p>
+          {(
+            [
+              ["notify_approval", "Approval waiting"],
+              ["notify_turn_done", "Turn finished"],
+              ["notify_turn_failed", "Turn failed"],
+            ] as const
+          ).map(([field, label]) => (
+            <label className="toggle" key={field}>
+              <input
+                type="checkbox"
+                checked={settings?.[field] ?? true}
+                disabled={!settings}
+                onChange={(event) => void saveNotification(field, event.target.checked)}
+              />
+              {label}
+            </label>
+          ))}
         </section>
       </main>
 

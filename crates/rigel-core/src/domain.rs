@@ -173,6 +173,25 @@ pub enum AgentEvent {
         spend_micros: i64,
         cap_micros: i64,
     },
+    /// D116: the day is at 80% of its cap. Fired once per day, not once per step.
+    DailyBudgetWarning {
+        day: String,
+        spend_micros: i64,
+        cap_micros: i64,
+    },
+    /// D116: the day's cap was crossed; every running agent was interrupted.
+    DailyBudgetExceeded {
+        day: String,
+        spend_micros: i64,
+        cap_micros: i64,
+    },
+    /// D92: one task crossed its own cap. Only that agent stops; the session may continue.
+    TaskBudgetExceeded {
+        session_id: String,
+        agent_id: String,
+        spend_micros: i64,
+        cap_micros: i64,
+    },
     ApprovalRequested {
         approval_id: String,
         kind: String,

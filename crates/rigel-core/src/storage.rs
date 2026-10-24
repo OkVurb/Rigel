@@ -164,6 +164,7 @@ fn write_gitignore(dir: &Path) -> Result<(), StorageError> {
                 rigel.db-wal\n\
                 rigel.db-shm\n\
                 sessions/\n\
+                snapshots/\n\
                 worktrees/\n";
     fs::write(&path, body).map_err(|source| StorageError::Io { path, source })
 }

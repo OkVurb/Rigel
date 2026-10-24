@@ -5,8 +5,9 @@ use std::sync::Arc;
 use rigel_core::{
     AgentEvent, ApprovalScope, BudgetService, Cancels, CommandApprover, CommandDecision,
     CommandRequest, Coordinator, Deliberator, EventSink, Model, ModelDeliberator, NoDeliberation,
-    OpenRouterModel, OriginApprover, OriginDecision, OriginRequest, ScriptedModel, SessionService,
-    StopAt, StopReason, SubagentPolicy, Tools, credentials,
+    OpenRouterModel, OriginApprover, OriginDecision, OriginRequest, PlanApprover, PlanDecision,
+    PlanRequest, ScriptedModel, SessionService, StopAt, StopReason, SubagentPolicy, Tools,
+    credentials,
 };
 use serde_json::json;
 
@@ -155,6 +156,28 @@ impl EventSink for PrintSink {
                     cap_micros as f64 / 1_000_000.0
                 );
             }
+            AgentEvent::DailyBudgetWarning {
+                day,
+                spend_micros,
+                cap_micros,
+            } => {
+                println!(
+                    "\ndaily budget for {day}: ${:.4} of ${:.2} — raise the cap in the window's Safety settings",
+                    spend_micros as f64 / 1_000_000.0,
+                    cap_micros as f64 / 1_000_000.0
+                );
+            }
+            AgentEvent::DailyBudgetExceeded {
+                day,
+                spend_micros,
+                cap_micros,
+            } => {
+                println!(
+                    "\ndaily cap reached for {day}: ${:.4} of ${:.2}; every running agent was interrupted",
+                    spend_micros as f64 / 1_000_000.0,
+                    cap_micros as f64 / 1_000_000.0
+                );
+            }
             AgentEvent::Error { message, .. } => println!("\nerror: {message}"),
             _ => {}
         }
@@ -197,6 +220,69 @@ impl OriginApprover for CliApprover {
             acp::ApprovalChoice::Ask => ask_origin(request).await,
         }
     }
+}
+
+#[async_trait::async_trait]
+impl PlanApprover for CliApprover {
+    async fn approve_plan(&self, request: &PlanRequest) -> PlanDecision {
+        match self.mode {
+            // A pre-answered run consents to what it was asked to do; the plan is part of
+            // that request, not a second question.
+            acp::ApprovalChoice::Allow => PlanDecision::Approve,
+            acp::ApprovalChoice::Deny => PlanDecision::Deny,
+            acp::ApprovalChoice::Ask => ask_plan(request).await,
+        }
+    }
+}
+
+/// Show every writable child's plan before asking. End of input or an unreadable answer
+/// denies, the same rule the command prompt follows.
+async fn ask_plan(request: &PlanRequest) -> PlanDecision {
+    eprintln!(
+        "\n{} writable agent(s) want to start. They edit in their own worktree and land only after a review.",
+        request.agents.len()
+    );
+    for agent in &request.agents {
+        eprintln!(
+            "\n  {} — files: {}\n  task: {}\n  plan:\n{}",
+            agent.role,
+            agent.files.join(", "),
+            agent.task,
+            agent
+                .plan
+                .lines()
+                .map(|line| format!("    {line}"))
+                .collect::<Vec<_>>()
+                .join("\n")
+        );
+    }
+    eprintln!("\n[A]pprove  [s]kip plan check  [d]eny");
+    tokio::task::spawn_blocking(|| {
+        let mut line = String::new();
+        let stdin = std::io::stdin();
+        match std::io::BufRead::read_line(&mut stdin.lock(), &mut line) {
+            Ok(0) | Err(_) => PlanDecision::Deny,
+            Ok(_) => match line.trim().to_ascii_lowercase().as_str() {
+                "a" | "approve" | "y" | "yes" => PlanDecision::Approve,
+                "s" | "skip" => {
+                    eprintln!("reason for skipping (blank records \"no reason given\"):");
+                    let mut reason = String::new();
+                    let _ = std::io::BufRead::read_line(&mut stdin.lock(), &mut reason);
+                    let reason = reason.trim();
+                    PlanDecision::Skip {
+                        reason: if reason.is_empty() {
+                            "no reason given".to_string()
+                        } else {
+                            reason.chars().take(240).collect()
+                        },
+                    }
+                }
+                _ => PlanDecision::Deny,
+            },
+        }
+    })
+    .await
+    .unwrap_or(PlanDecision::Deny)
 }
 
 async fn ask_command(request: &CommandRequest) -> CommandDecision {
@@ -799,6 +885,7 @@ pub async fn run_agent(dir: &Path, command: AgentCommand) -> ExitCode {
             )
             .with_command_approval(Arc::new(CliApprover { mode: approval }))
             .with_origin_approval(Arc::new(CliApprover { mode: approval }))
+            .with_plan_approval(Arc::new(CliApprover { mode: approval }))
             .with_deliberation(deliberator);
             let coordinator = Coordinator {
                 session: service.clone(),
@@ -814,6 +901,7 @@ pub async fn run_agent(dir: &Path, command: AgentCommand) -> ExitCode {
                 subagents: SubagentPolicy::default(),
                 depth: 0,
                 parent_cancel: None,
+                worktree_dir: Some(dir.to_path_buf()),
                 chat_parent: None,
             };
 
