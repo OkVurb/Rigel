@@ -1555,11 +1555,14 @@ console_ok = (
     else 0
 )
 report = pathlib.Path(__file__).with_name("report.txt")
-report.write_text(
+staged = report.with_name("report.tmp")
+# Publish atomically: a reader must never see the empty file between create and write.
+staged.write_text(
     "hwnd=%d\nconsole_ok=%d\nargv=%s\n"
     % (kernel32.GetConsoleWindow(), console_ok, " ".join(sys.argv[1:])),
     encoding="utf-8",
 )
+staged.replace(report)
 time.sleep(30)
 "#,
         )
@@ -1592,7 +1595,10 @@ time.sleep(30)
         for _ in 0..100 {
             if let Ok(read) = std::fs::read_to_string(&report) {
                 text = read;
-                break;
+                // `argv=` is the last line, so its presence means the whole report is there.
+                if text.contains("argv=") {
+                    break;
+                }
             }
             std::thread::sleep(std::time::Duration::from_millis(100));
         }

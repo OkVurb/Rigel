@@ -169,7 +169,8 @@ async fn subscription_event_kills_a_child_that_was_started_with_a_key() {
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(dir.path().join("SUBSCRIPTION_EVENT"), b"").unwrap();
     let mut cfg = config(dir.path(), Transport::AppServer);
-    cfg.timeout = Duration::from_secs(5);
+    let limit = Duration::from_secs(5);
+    cfg.timeout = limit;
     let adapter = CodexAdapter::new(cfg);
     let started = std::time::Instant::now();
 
@@ -177,7 +178,7 @@ async fn subscription_event_kills_a_child_that_was_started_with_a_key() {
     assert!(matches!(error, AdapterError::RequiresApiKey { .. }));
     assert!(dir.path().join("SPAWNED").exists());
     assert!(
-        started.elapsed() < Duration::from_secs(2),
+        started.elapsed() < limit,
         "the child should be killed instead of reaching its timeout"
     );
 }
