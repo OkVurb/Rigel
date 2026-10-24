@@ -354,6 +354,7 @@ A model turn needs a key; the deterministic scripted model drives the tests with
 - `bash scripts/p6-exit-test.sh` — a missing tool, a shim package manager, approval and the queue
 - `bash scripts/p7-exit-test.sh` — doctor, licence files, installer config, updates and no network
 - `python scripts/sidecar/build-agentchat.py` — build the pinned Chat sidecar and its third-party notice for the installer (Windows x64)
+- `bash scripts/refresh-skills.sh` — re-index every repository in `scripts/skills-sources.txt`; `--dry-run`, `--limit` and `RIGEL_GITHUB_TOKEN` are supported
 - `scripts/fixtures/p4-subagents.json` — a scripted parent that delegates to two cheap readers; `rigel agent run --script` prints their bills
 
 ## 🤝 Contributing
