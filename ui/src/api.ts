@@ -90,6 +90,29 @@ export interface Usage {
   source: "provider" | "estimated";
 }
 
+/** One request to the cheap model that tightens a draft before it is sent. */
+export interface RefineRequest {
+  draft: string;
+  target: string;
+  channel?: string | null;
+  /** Recent room or turn messages, already flattened to `sender: text`. */
+  recent: string[];
+  /** The user's answers to the previous round's questions. */
+  answers: string[];
+  round: number;
+}
+
+/** Questions plus a proposed brief. Nothing here has been sent to an agent. */
+export interface PromptRefinement {
+  questions: string[];
+  refined: string;
+  reads: string[];
+  read_notes: string[];
+  notes: string[];
+  usage: Usage;
+  model: string;
+}
+
 export interface Turn {
   id: string;
   agent_id: string;
@@ -943,6 +966,17 @@ export const api = {
       return call<string>("chat_stop_agent", { name });
     },
   },
+
+  /**
+   * A cheap model reads the draft and returns questions and a tighter brief. It never sends
+   * anything: the card shows the result and the send button stays the user's.
+   */
+  refine: {
+    async run(project: string | null, request: RefineRequest): Promise<PromptRefinement> {
+      if (!isTauri()) return previewRefinement(request);
+      return call<PromptRefinement>("prompt_refine", { project, request });
+    },
+  },
 };
 
 /** The real shelf: SQLite FTS5 and the blob store, through the Rust core. */
@@ -968,6 +1002,33 @@ export class TauriSkillSource implements SkillSource {
   async indexRepo(repo: string): Promise<IngestReport> {
     return call<IngestReport>("skills_index", { repo, force: false });
   }
+}
+
+/** Browser preview only: a canned refinement, labelled as such so no one mistakes it for a call. */
+function previewRefinement(request: RefineRequest): PromptRefinement {
+  const draft = request.draft.trim();
+  const first = request.round === 0;
+  return {
+    questions: first
+      ? ["Which file or crate should this change land in?", "What must stay unchanged?"]
+      : [],
+    refined: first
+      ? draft
+      : `${draft}\n\nName the files you change, keep the existing tests passing, and run the relevant test before reporting back.`,
+    reads: [],
+    read_notes: [],
+    notes: ["Browser preview: no model was called and nothing was billed."],
+    model: "preview",
+    usage: {
+      input_tokens: 0,
+      cached_input_tokens: 0,
+      output_tokens: 0,
+      reasoning_tokens: 0,
+      cost_micros: 0,
+      provider_micros: null,
+      source: "estimated",
+    },
+  };
 }
 
 /** Timestamps are epoch milliseconds everywhere in Rigel; render them as UTC minutes. */

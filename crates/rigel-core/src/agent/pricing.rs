@@ -57,6 +57,15 @@ const TABLE: &[(&str, Price)] = &[
         },
     ),
     (
+        // The Gemini API names the same model without the OpenRouter vendor prefix.
+        "gemini-2.5-flash-lite",
+        Price {
+            input: 0.10,
+            cached_input: 0.01,
+            output: 0.40,
+        },
+    ),
+    (
         // Cached reads are free on this model, per the provider's listed rate.
         "deepseek/deepseek-v4.1-flash",
         Price {

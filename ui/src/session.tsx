@@ -20,6 +20,7 @@ import {
   type TurnTranscript,
 } from "./api";
 import { ModelControls } from "./modelpicker";
+import RefineCard from "./refine";
 import {
   previewAgents,
   previewApprovals,
@@ -93,6 +94,8 @@ export default function SessionView({
   const [shown, setShown] = useState<string[]>([]);
   const [raw, setRaw] = useState(false);
   const [text, setText] = useState("");
+  // The draft waiting in the review card. Non-null means Send paused before a turn.
+  const [review, setReview] = useState<string | null>(null);
   const [quote, setQuote] = useState<TurnQuote | null>(null);
   const [capInput, setCapInput] = useState("");
   const [keyPresent, setKeyPresent] = useState<boolean | null>(tauri ? null : true);
@@ -514,8 +517,8 @@ export default function SessionView({
     [tauri, project, session, selectSession, onNotice],
   );
 
-  const send = useCallback(async () => {
-    const prompt = text.trim();
+  /** The confirmed text starts the turn; a failure leaves it in the composer. */
+  const deliver = useCallback(async (prompt: string) => {
     if (!prompt || !session || busy) return;
     setText("");
     setError(null);
@@ -586,7 +589,14 @@ export default function SessionView({
     } finally {
       setBusy(false);
     }
-  }, [text, session, busy, tauri, agents, project, model, effort, target]);
+  }, [session, busy, tauri, agents, project, model, effort, target]);
+
+  /** Send now reviews first: the agent receives only what the user confirmed in the card. */
+  const send = useCallback(() => {
+    const prompt = text.trim();
+    if (!prompt || !session || busy || review) return;
+    setReview(prompt);
+  }, [text, session, busy, review]);
 
   /** Swarm, first press: freeze the task and ask the room who can take it. */
   const prepareSwarm = useCallback(async () => {
@@ -1000,6 +1010,25 @@ export default function SessionView({
 
         {session ? (
           <>
+            {review ? (
+              <RefineCard
+                key={review}
+                draft={review}
+                target={target === "claude" ? "Claude Code" : "Rigel native"}
+                channel={null}
+                recent={turns
+                  .slice(-4)
+                  .map((entry) => entry.turn.prompt)
+                  .filter((prompt): prompt is string => Boolean(prompt))
+                  .map((prompt) => `user: ${prompt.slice(0, 400)}`)}
+                project={project}
+                onSend={(refined) => {
+                  setReview(null);
+                  void deliver(refined);
+                }}
+                onDismiss={() => setReview(null)}
+              />
+            ) : null}
             <div className="composer">
               <textarea
                 value={text}
@@ -1010,16 +1039,22 @@ export default function SessionView({
                     void send();
                   }
                 }}
-                placeholder={live ? "A turn is running…" : "Ask the agent; Enter sends, Shift+Enter adds a line"}
+                placeholder={
+                  review
+                    ? "Review the brief above before it sends…"
+                    : live
+                      ? "A turn is running…"
+                      : "Ask the agent; Enter sends, Shift+Enter adds a line"
+                }
                 rows={2}
-                disabled={live}
+                disabled={live || review !== null}
               />
               <div className="composer-actions">
                 <label className="harness-pick" title="Which agent answers the next turn">
                   <select
                     value={target}
                     onChange={(event) => setTarget(event.target.value as "native" | "claude")}
-                    disabled={live}
+                    disabled={live || review !== null}
                     aria-label="Agent"
                   >
                     <option value="native">native</option>
@@ -1031,12 +1066,18 @@ export default function SessionView({
                     className="chip swarm"
                     title="Show which agents are online, then send to the ones you keep ticked"
                     onClick={() => void prepareSwarm()}
-                    disabled={live || preparing || !text.trim() || swarmTargets !== null}
+                    disabled={
+                      live || review !== null || preparing || !text.trim() || swarmTargets !== null
+                    }
                   >
                     {preparing ? "Waking…" : "Swarm"}
                   </button>
                 ) : null}
-                <button className="primary" onClick={() => void send()} disabled={live || !text.trim()}>
+                <button
+                  className="primary"
+                  onClick={() => void send()}
+                  disabled={live || review !== null || !text.trim()}
+                >
                   {live ? "Running…" : "Send"}
                 </button>
               </div>
@@ -1089,7 +1130,7 @@ export default function SessionView({
                 </div>
               </div>
             ) : null}
-            {text.trim() && quote ? (
+            {review === null && text.trim() && quote ? (
               <p
                 className={`composer-quote${quoteWarning ? " over" : ""}`}
                 role="status"

@@ -37,6 +37,32 @@
       }
     },
     {
+      "text": "Waiting for the two readers.\n",
+      "tool_calls": [
+        {
+          "name": "subagent_results",
+          "arguments": {
+            "timeout_secs": 30
+          }
+        }
+      ],
+      "usage": {
+        "input_tokens": 60,
+        "output_tokens": 10,
+        "cost_usd": 0.0001
+      }
+    },
+    {
+      "text": "Two nano subagents read the README and src/lib.rs. The crate is a three-file hello demo exporting add and sub. No edits and no tests were run.\n",
+      "usage": {
+        "input_tokens": 280,
+        "output_tokens": 45,
+        "cost_usd": 0.0004
+      }
+    }
+  ],
+  "subagent_steps": [
+    {
       "text": "Demo is a three-file Rust crate that says hello.\n",
       "usage": {
         "input_tokens": 90,
@@ -50,14 +76,6 @@
         "input_tokens": 110,
         "output_tokens": 30,
         "cost_usd": 0.0001
-      }
-    },
-    {
-      "text": "Two nano subagents read the README and src/lib.rs. The crate is a three-file hello demo exporting add and sub. No edits and no tests were run.\n",
-      "usage": {
-        "input_tokens": 280,
-        "output_tokens": 45,
-        "cost_usd": 0.0004
       }
     }
   ]

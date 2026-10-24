@@ -11,6 +11,7 @@
 //! | [`pricing`] | the local price fallback, marked `estimated` |
 //! | [`tools`] | read/list/edit/write, skills, budget — all path-checked |
 //! | [`coordinator`] | the turn loop, cancellation, checkpointing |
+//! | [`subagents`] | the background child registry and its terminal results |
 //! | [`team`] | the work board and file-scoped assignments |
 //!
 //! No adapter will speak this trait. Phase 4's harnesses have their own protocols and are
@@ -28,7 +29,9 @@ pub mod model;
 pub mod omniroute;
 pub mod openrouter;
 pub mod pricing;
+pub mod refine;
 pub mod scripted;
+pub mod subagents;
 pub mod team;
 pub mod tools;
 
@@ -50,5 +53,6 @@ pub use model::{
 };
 pub use omniroute::ServerStatus;
 pub use openrouter::{DEFAULT_BASE_URL, DEFAULT_MODEL, OpenRouterModel};
+pub use refine::{MAX_ROUNDS, PromptRefiner, RefineRequest, Refinement};
 pub use scripted::{Script, ScriptedModel};
 pub use tools::{ToolOutcome, Tools};

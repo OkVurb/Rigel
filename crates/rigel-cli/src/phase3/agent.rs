@@ -814,6 +814,7 @@ pub async fn run_agent(dir: &Path, command: AgentCommand) -> ExitCode {
                 subagents: SubagentPolicy::default(),
                 depth: 0,
                 parent_cancel: None,
+                chat_parent: None,
             };
 
             match coordinator.run(&session.id, &worker.id, &prompt).await {
