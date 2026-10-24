@@ -29,8 +29,10 @@ Thumbs.db
 screenshots/*.tmp.png
 
 # The built Chat sidecar: ~99 MB of pinned source and an embedded Python runtime,
-# produced by scripts/sidecar/build-agentchat.py. Never committed.
-crates/rigel-app/resources/sidecar/
+# produced by scripts/sidecar/build-agentchat.py. Never committed; the placeholder
+# keeps Tauri's resource path valid on a clean checkout, where the sidecar is optional.
+crates/rigel-app/resources/sidecar/*
+!crates/rigel-app/resources/sidecar/.gitkeep
 vendor/cache/
 __pycache__/
 *.pyc
