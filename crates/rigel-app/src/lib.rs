@@ -31,7 +31,7 @@ use rigel_core::{
     apply_review, credentials, diagnostics, skills::search::SearchHit,
 };
 use serde::{Deserialize, Serialize};
-use tauri::{Emitter, State};
+use tauri::{Emitter, Manager, State};
 
 mod claude;
 pub use claude::mcp_mode;
@@ -1992,6 +1992,27 @@ fn warm_router() {
         .ok();
 }
 
+/// Hand the bundled chat sidecar to the core: `$RESOURCE/sidecar` in an install, the repository's
+/// `resources/sidecar` in a dev build. The source is copied into app data on first launch, so the
+/// room can write while `python.exe` stays in the read-only install directory.
+///
+/// Absent is not an error: a developer without the sidecar keeps the `vendor/agentchattr` fallback,
+/// and the Chat tab explains that case.
+fn install_chat_sidecar(app: &tauri::AppHandle) -> Result<String, String> {
+    let packaged = app
+        .path()
+        .resource_dir()
+        .ok()
+        .map(|dir| dir.join("sidecar"))
+        .filter(|dir| dir.join("agentchattr/run.py").is_file());
+    let source =
+        packaged.unwrap_or_else(|| Path::new(env!("CARGO_MANIFEST_DIR")).join("resources/sidecar"));
+    if !source.join("agentchattr/run.py").is_file() {
+        return Ok(String::new());
+    }
+    rigel_core::agent::agentchat::install_sidecar(source, index_dir().join("agentchat"))
+}
+
 /// Launch the chat server when the open project carries its checkout and nothing is answering.
 /// Same contract as `warm_router`: a thread, a dropped error, and the Chat tab as the place the
 /// reason appears. `ensure_server` already returns without spawning when the checkout is not
@@ -2030,8 +2051,12 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
-            // The project is not known until the window restores it; `servers_start` runs
-            // again from there for the chat checkout. The router needs no project.
+            // The sidecar must be in place before `servers_start` looks for one. The project is
+            // not known until the window restores it; `servers_start` runs again from there, and
+            // the copied config is pointed at whichever project is open. The router needs none.
+            if let Err(problem) = install_chat_sidecar(app.handle()) {
+                eprintln!("rigel: chat sidecar not installed: {problem}");
+            }
             warm_router();
             spawn_conflict_watcher(app.handle().clone());
             Ok(())

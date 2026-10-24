@@ -117,6 +117,24 @@ cargo build --workspace
 cargo run -p rigel-app
 ```
 
+### Chat sidecar
+
+The Chat tab runs agentchattr. Development can point at a checkout under `vendor/agentchattr`, but
+the installer bundles a pinned copy and an embeddable Python 3.12 runtime, so a clean machine needs
+no Python at all. Build that sidecar once on Windows before packaging:
+
+```bash
+python scripts/sidecar/build-agentchat.py
+python scripts/sidecar/build-agentchat.py --force   # rebuild the runtime from scratch
+```
+
+The script downloads the commit and archive pinned in `scripts/sidecar/agentchattr.pin` (cached in
+`vendor/cache/`) and writes `crates/rigel-app/resources/sidecar/{agentchattr,python}` plus the
+consolidated `THIRD-PARTY-NOTICES.txt`. The directory is about 100 MB and gitignored. Tauri copies it
+to `$RESOURCE/sidecar`; first launch copies the writable source to `%APPDATA%\Rigel\agentchat` and
+points its agents at the open project. The script refuses to run off Windows x64. Without the
+sidecar the app still starts, and the Chat tab explains what is missing.
+
 The browser prototype is the visual reference and needs no Rust at all:
 
 ```bash
@@ -335,6 +353,7 @@ A model turn needs a key; the deterministic scripted model drives the tests with
 - `bash scripts/p5-exit-test.sh` — two agents on one file: conflict in two seconds, no "locked"
 - `bash scripts/p6-exit-test.sh` — a missing tool, a shim package manager, approval and the queue
 - `bash scripts/p7-exit-test.sh` — doctor, licence files, installer config, updates and no network
+- `python scripts/sidecar/build-agentchat.py` — build the pinned Chat sidecar and its third-party notice for the installer (Windows x64)
 - `scripts/fixtures/p4-subagents.json` — a scripted parent that delegates to two cheap readers; `rigel agent run --script` prints their bills
 
 ## 🤝 Contributing
@@ -411,6 +430,8 @@ or `ui/` reads those keys.
 
 MIT OR Apache-2.0, at your option. The workspace, every crate and the renderer carry the same
 expression; the texts are in [LICENSE-MIT](LICENSE-MIT) and [LICENSE-APACHE](LICENSE-APACHE).
+The installer's Chat sidecar also bundles agentchattr (MIT) and Python (PSF); the build writes their
+full texts to `resources/sidecar/THIRD-PARTY-NOTICES.txt`, which ships with the app.
 No contributor licence agreement, and no telemetry to opt out of.
 
 <p align="center">

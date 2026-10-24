@@ -28,6 +28,13 @@ Thumbs.db
 # generated screenshots stay out of history except the ones we reference
 screenshots/*.tmp.png
 
+# The built Chat sidecar: ~99 MB of pinned source and an embedded Python runtime,
+# produced by scripts/sidecar/build-agentchat.py. Never committed.
+crates/rigel-app/resources/sidecar/
+vendor/cache/
+__pycache__/
+*.pyc
+
 # Tauri build output
 crates/rigel-app/gen/
 vendor/
