@@ -143,6 +143,9 @@ pub enum AgentEvent {
         session_id: String,
         agent_id: String,
         turn_id: String,
+        /// Set when a subagent runs this turn for a parent turn, so the window can nest it
+        /// while it is still working instead of only after the next transcript refresh.
+        parent_turn_id: Option<String>,
         seq: i64,
         prompt: Option<String>,
     },

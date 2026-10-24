@@ -104,6 +104,12 @@ export default function SessionView({
   const [liveTurn, setLiveTurn] = useState<Turn | null>(null);
   // D40: one transcript, or two side by side. Never more than two, and never a grid.
   const [shown, setShown] = useState<string[]>([]);
+  // Manual spawn: one small form instead of a hidden command. The agent joins the roster
+  // immediately and the composer switches to it so a first task can follow at once.
+  const [spawnOpen, setSpawnOpen] = useState(false);
+  const [spawnRole, setSpawnRole] = useState("");
+  const [spawnHarness, setSpawnHarness] = useState<"native" | "claude">("native");
+  const [spawning, setSpawning] = useState(false);
   const [raw, setRaw] = useState(false);
   const [text, setText] = useState("");
   // Files for the next turn. The native picker copies them into .rigel/attachments; the
@@ -353,7 +359,7 @@ export default function SessionView({
   }, []);
 
   const applyModel = useCallback(
-    async (nextModel: string, nextEffort: string) => {
+    async (nextModel: string, nextEffort: string, nextProvider?: string) => {
       const base: Settings = defaults ?? {
         theme: "dark",
         default_budget_cents: 500,
@@ -365,7 +371,12 @@ export default function SessionView({
         notify_turn_done: true,
         notify_turn_failed: true,
       };
-      const next = { ...base, model: nextModel, effort: nextEffort };
+      const next = {
+        ...base,
+        model: nextModel,
+        effort: nextEffort,
+        ...(nextProvider ? { provider: nextProvider } : {}),
+      };
       setDefaults(next);
       try {
         setDefaults(await api.saveSettings(next));
@@ -397,7 +408,7 @@ export default function SessionView({
               const turn: Turn = {
                 id: payload.turn_id,
                 agent_id: payload.agent_id,
-                parent_turn_id: null,
+                parent_turn_id: payload.parent_turn_id ?? null,
                 seq: payload.seq,
                 status: "running",
                 prompt: payload.prompt ?? null,
@@ -411,7 +422,7 @@ export default function SessionView({
             setLiveTurn({
               id: payload.turn_id,
               agent_id: payload.agent_id,
-              parent_turn_id: null,
+              parent_turn_id: payload.parent_turn_id ?? null,
               seq: payload.seq,
               status: "running",
               prompt: payload.prompt ?? null,
@@ -421,6 +432,13 @@ export default function SessionView({
               stop_reason: null,
             });
             setStream((previous) => ({ ...previous, [payload.turn_id]: "" }));
+            // A subagent is registered and starts its turn in the same step. Refreshing here puts
+            // its roster row up while it works, so it can be watched instead of only being
+            // visible after the parent turn finishes.
+            void api
+              .listAgents(projectRef.current, current.id)
+              .then(setAgents)
+              .catch(() => {});
             break;
           }
           case "delta": {
@@ -702,7 +720,12 @@ export default function SessionView({
 
     setBusy(true);
     try {
-      let worker = agents.find((agent) => agent.harness === target);
+      // A watched agent is the one the next turn is for. Without a selection the harness picker
+      // keeps the old behaviour: the first agent of that harness answers.
+      const watched = shown.length === 1
+        ? agents.find((agent) => agent.id === shown[0] && !observedOnly(agent))
+        : undefined;
+      let worker = watched ?? agents.find((agent) => agent.harness === target);
       if (!worker) {
         const spawned = await api.spawnAgent(
           project,
@@ -730,7 +753,7 @@ export default function SessionView({
     } finally {
       setBusy(false);
     }
-  }, [session, busy, tauri, agents, project, model, effort, target, withAttachments]);
+  }, [session, busy, tauri, agents, shown, project, model, effort, target, withAttachments]);
 
   /** Copy files picked in the native dialog, then let the next turn name their paths. */
   const attachFiles = useCallback(async () => {
@@ -967,6 +990,27 @@ export default function SessionView({
     }
   };
 
+  const spawnAgent = async () => {
+    if (!session || !tauri || spawning) return;
+    setSpawning(true);
+    setError(null);
+    try {
+      const role = spawnRole.trim() || `agent-${agents.length + 1}`;
+      const spawned = await api.spawnAgent(project, session.id, spawnHarness, role, model);
+      setAgents((rows) => [...rows, spawned]);
+      setShown([spawned.id]);
+      setSpawnOpen(false);
+      setSpawnRole("");
+      onNotice(
+        `Spawned ${spawned.role ?? role}. The composer now sends to it; ask it for something small.`,
+      );
+    } catch (failure) {
+      setError(failure instanceof Error ? failure.message : String(failure));
+    } finally {
+      setSpawning(false);
+    }
+  };
+
   return (
     <>
       <aside className="list-pane roster">
@@ -983,6 +1027,14 @@ export default function SessionView({
             <div className="roster-actions">
               <button className={shown.length === 0 ? "chip on" : "chip"} onClick={() => setShown([])}>
                 all agents
+              </button>
+              <button
+                className="chip"
+                onClick={() => setSpawnOpen((open) => !open)}
+                disabled={!tauri || !session}
+                title="Start another native or Claude agent in this session"
+              >
+                + agent
               </button>
               {shown.length === 2 ? <span className="fine">two transcripts side by side</span> : null}
               {shown.length === 1 && rolePresets.length ? (
@@ -1017,7 +1069,54 @@ export default function SessionView({
               ) : null}
             </div>
           )}
+          {session ? (
+            <p className="fine roster-hint">
+              Click an agent to watch its transcript; two can sit side by side.
+            </p>
+          ) : null}
         </div>
+
+        {spawnOpen ? (
+          <form
+            className="agent-spawn"
+            aria-label="Spawn an agent"
+            onSubmit={(event) => {
+              event.preventDefault();
+              void spawnAgent();
+            }}
+          >
+            <input
+              autoFocus
+              value={spawnRole}
+              onChange={(event) => setSpawnRole(event.target.value)}
+              placeholder={`role, e.g. reviewer (agent-${agents.length + 1})`}
+              aria-label="New agent role"
+              disabled={spawning}
+            />
+            <div className="agent-spawn-actions">
+              <select
+                value={spawnHarness}
+                onChange={(event) => setSpawnHarness(event.target.value as "native" | "claude")}
+                aria-label="Agent harness"
+                disabled={spawning}
+              >
+                <option value="native">native</option>
+                <option value="claude">claude</option>
+              </select>
+              <button className="primary" type="submit" disabled={spawning}>
+                {spawning ? "Spawning…" : "Spawn"}
+              </button>
+              <button
+                className="ghost-btn"
+                type="button"
+                onClick={() => setSpawnOpen(false)}
+                disabled={spawning}
+              >
+                Cancel
+              </button>
+            </div>
+          </form>
+        ) : null}
 
         <div className="rows">
           {roster.map(({ agent, nested }) => {
@@ -1028,10 +1127,11 @@ export default function SessionView({
               key={agent.id}
               className={`row agent-row${nested ? " nested" : ""}${shown.includes(agent.id) ? " on" : ""}`}
               onClick={() => toggleShown(agent.id)}
+              aria-pressed={shown.includes(agent.id)}
               title={
                 nested
-                  ? "A subagent: spawned by the turn above it and billed to this row"
-                  : undefined
+                  ? "A subagent: click to watch its transcript in the main pane; up to two can be open."
+                  : "Click to watch this agent's transcript; up to two can be open."
               }
             >
               <span className={`status-dot ${agent.status}`} title={agent.status} />
@@ -1052,6 +1152,7 @@ export default function SessionView({
                       observed only
                     </span>
                   ) : null}
+                  {shown.includes(agent.id) ? <span className="tag watching">watching</span> : null}
                 </span>
                 <span className="row-desc" title={assignment?.task}>
                 {working ? `working on ${working}` : agent.model ?? "no model"}
@@ -1103,7 +1204,7 @@ export default function SessionView({
             <ModelControls
               model={model}
               effort={effort}
-              onModel={(next) => void applyModel(next, effort)}
+              onModel={(next, provider) => void applyModel(next, effort, provider)}
               onEffort={(next) => void applyModel(model, next)}
             />
             {keyPresent === false && onOpenSettings ? (
@@ -1276,7 +1377,13 @@ export default function SessionView({
               <RefineCard
                 key={review}
                 draft={review}
-                target={target === "claude" ? "Claude Code" : "Rigel native"}
+                target={
+                  shown.length === 1
+                    ? (agents.find((agent) => agent.id === shown[0])?.role ?? "watched agent")
+                    : target === "claude"
+                      ? "Claude Code"
+                      : "Rigel native"
+                }
                 channel={null}
                 recent={turns
                   .slice(-4)
@@ -1457,7 +1564,15 @@ export default function SessionView({
                 {onSwarmPrepare ? (
                   <button
                     className="chip swarm"
-                    title="Show which agents are online, then send to the ones you keep ticked"
+                    title={
+                      !text.trim()
+                        ? "Type the task first; Swarm sends it to the room"
+                        : live
+                          ? "Wait for the running turn to finish"
+                          : review !== null
+                            ? "Confirm or cancel the review card first"
+                            : "Show which agents are online, then send to the ones you keep ticked"
+                    }
                     onClick={() => void prepareSwarm()}
                     disabled={
                       live || review !== null || preparing || !text.trim() || swarmTargets !== null

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import {
   api,
@@ -6,6 +6,7 @@ import {
   isTauri,
   when,
   TauriSkillSource,
+  type AgentChatAgent,
   type KeyStatus,
   type ProjectInfo,
   type Session,
@@ -23,22 +24,27 @@ import SessionView from "./session";
 import SettingsView from "./settings";
 import Titlebar from "./titlebar";
 
+// xterm and its CSS are only needed once the terminal is opened; keep them out of the first paint.
+const TerminalView = lazy(() => import("./terminal"));
+
 const ICONS = {
   shelf: "M10 2.5 17 6.5v7l-7 4-7-4v-7l7-4ZM3 6.5l7 4 7-4M10 10.5v7",
   session: "M3 4.5h14M3 9.5h14M3 14.5h9",
   chat: "M6 3.5h8a2.5 2.5 0 0 1 2.5 2.5v5a2.5 2.5 0 0 1-2.5 2.5H9.5L6 16.5v-3H6a2.5 2.5 0 0 1-2.5-2.5V6A2.5 2.5 0 0 1 6 3.5ZM6.5 8.5h.01M10 8.5h.01M13.5 8.5h.01",
   diff: "M6 3v14M14 3v14M3 7h6M11 13h6",
+  terminal: "M3 4.5h14v11H3ZM5.5 8l2.5 2-2.5 2M10.5 12.5h4",
   settings:
     "M10 12.5a2.5 2.5 0 1 0 0-5 2.5 2.5 0 0 0 0 5ZM10 2.5v2M10 15.5v2M2.5 10h2M15.5 10h2",
 } as const;
 
-type View = "shelf" | "session" | "chat" | "diff" | "settings";
+type View = "shelf" | "session" | "chat" | "diff" | "terminal" | "settings";
 
 const VIEWS: { id: View; label: string; d: string; phase: string }[] = [
   { id: "shelf", label: "Shelf", d: ICONS.shelf, phase: "P2" },
   { id: "session", label: "Session", d: ICONS.session, phase: "P3" },
   { id: "chat", label: "Chat", d: ICONS.chat, phase: "P6" },
   { id: "diff", label: "Diff", d: ICONS.diff, phase: "P5" },
+  { id: "terminal", label: "Terminal", d: ICONS.terminal, phase: "P7" },
   { id: "settings", label: "Settings", d: ICONS.settings, phase: "P3" },
 ];
 
@@ -67,6 +73,9 @@ export default function App() {
   );
 
   const [view, setView] = useState<View>("shelf");
+  // Once visited, the terminal stays mounted (hidden) so switching tabs keeps its shell and
+  // scrollback. It is never started before the first visit.
+  const [terminalMounted, setTerminalMounted] = useState(false);
   const [project, setProject] = useState<ProjectInfo | null>(null);
   const [sessions, setSessions] = useState<Session[]>([]);
   const [total, setTotal] = useState<number | null>(null);
@@ -312,31 +321,48 @@ export default function App() {
 
   /** Swarm step one: boot the room and list who is online. Sends nothing yet. */
   const prepareSwarm = useCallback(async (): Promise<SwarmTarget[]> => {
+    // A refusal stays on the Session tab, in the composer's error line. Only a delivered swarm
+    // moves the window to Chat.
     const refuse = (message: string) => {
       setSwarmNotice(message);
-      setView("chat");
       return new Error(message);
     };
+    const online = (roster: Record<string, AgentChatAgent>): SwarmTarget[] =>
+      Object.entries(roster)
+        .filter(([, agent]) => agent.available)
+        .map(([name, agent]) => ({
+          name,
+          label: agent.label || name,
+          role: agent.role ?? null,
+        }));
     const target = project?.root ?? (isTauri() ? "" : "/preview/rigel");
     if (!target) throw refuse("Open a project before starting a swarm.");
     setSwarmNotice("Waking the room…");
     const status = await api.agentChat.start(target);
     if (!status.authed) {
       throw refuse(
-        "The room is running outside Rigel. Close that server, then restart it from the Chat tab to let a swarm in.",
+        "Rigel could not take over the chat room. Stop the server on that port, start it from the Chat tab, then press Swarm again.",
       );
     }
-    const roster = await api.agentChat.agents();
-    const targets = Object.entries(roster)
-      .filter(([, agent]) => agent.available)
-      .map(([name, agent]) => ({
-        name,
-        label: agent.label || name,
-        role: agent.role ?? null,
-      }));
+
+    let targets = online(await api.agentChat.agents());
+    if (targets.length === 0) {
+      // Swarm is the fan-out: an empty room is a step to finish, not a reason to send the user
+      // to another tab. Start the checkout's ready harnesses and give them a moment to join.
+      setSwarmNotice("Starting the room's configured agents…");
+      try {
+        await api.agentChat.startAgents(target);
+      } catch {
+        // Missing CLIs and keys are reported by the roster below; some agents may still join.
+      }
+      for (let attempt = 0; attempt < 24 && targets.length === 0; attempt += 1) {
+        await new Promise((resolve) => setTimeout(resolve, 500));
+        targets = online(await api.agentChat.agents());
+      }
+    }
     if (targets.length === 0) {
       throw refuse(
-        "No agent is online in the room yet. Start an agent so it joins, then press Swarm again.",
+        "No agent is online yet. Open Chat, start an agent there, then press Swarm again — or configure a harness in vendor/agentchattr/config.toml.",
       );
     }
     return targets;
@@ -493,6 +519,7 @@ ${task}`,
             aria-pressed={view === item.id}
             onClick={() => {
               if (item.id !== "chat") setSwarmNotice(null);
+              if (item.id === "terminal") setTerminalMounted(true);
               setView(item.id);
             }}
           >
@@ -545,7 +572,7 @@ ${task}`,
         </div>
       ) : null}
 
-      {view === "session" ? (
+      {view === "terminal" ? null : view === "session" ? (
         <SessionView
           project={sessionProject}
           onSessions={setSessions}
@@ -887,6 +914,14 @@ ${task}`,
       </main>
       </>
       )}
+
+      {terminalMounted ? (
+        <div className="terminal-surface" hidden={view !== "terminal"}>
+          <Suspense fallback={<p className="empty">Loading the terminal…</p>}>
+            <TerminalView project={project?.root ?? null} />
+          </Suspense>
+        </div>
+      ) : null}
 
       <footer className="status" aria-label="Status">
         <span className="status-model">

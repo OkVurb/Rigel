@@ -34,7 +34,8 @@ static SESSION_TOKEN: Mutex<Option<String>> = Mutex::new(None);
 pub struct ChatStatus {
     pub running: bool,
     /// True when Rigel holds a working session token for the server. The tab needs it for
-    /// everything past the landing page; an externally started server reports `false`.
+    /// everything past the landing page; a server Rigel can neither spawn nor take over reports
+    /// `false`.
     pub authed: bool,
     pub origin: String,
     /// The checkout the server would be spawned from, when it is on this machine.
@@ -96,6 +97,60 @@ fn set_token(new_value: String) {
     }
 }
 
+fn clear_token() {
+    if let Ok(mut guard) = SESSION_TOKEN.lock() {
+        *guard = None;
+    }
+}
+
+/// The token `run.py` injects into the landing page for the browser tab, taken from that same
+/// response. Kept as a function so the shape is testable without a server.
+fn landing_token(html: &str) -> Option<String> {
+    static PATTERN: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    let pattern = PATTERN.get_or_init(|| {
+        regex::Regex::new(r#"__SESSION_TOKEN__\s*=\s*"([0-9a-fA-F]{32,128})""#)
+            .expect("the landing token pattern is valid")
+    });
+    pattern.captures(html).map(|capture| capture[1].to_string())
+}
+
+/// Take over a room this launch did not spawn: a chat server left behind by a previous window
+/// (its child survives the app on Windows) or one started by hand from the same checkout. Its
+/// landing page carries the token for the browser tab, so reading it keeps the token in Rust and
+/// makes the existing room usable instead of asking the user to kill a working server.
+///
+/// The token is only accepted when `/api/settings` answers through it, and the page must look
+/// like agentchattr; anything else leaves the room unauthenticated.
+async fn adopt_token(client: &reqwest::Client) -> bool {
+    if token().is_some() {
+        return true;
+    }
+    let Ok(response) = client.get(format!("{}/", origin())).send().await else {
+        return false;
+    };
+    if !response.status().is_success() {
+        return false;
+    }
+    let Ok(html) = response.text().await else {
+        return false;
+    };
+    if !html.contains("agentchattr") {
+        return false;
+    }
+    let Some(found) = landing_token(&html) else {
+        return false;
+    };
+    set_token(found);
+    if api_call(reqwest::Method::GET, "/api/settings", None)
+        .await
+        .is_ok()
+    {
+        return true;
+    }
+    clear_token();
+    false
+}
+
 fn http_client() -> reqwest::Client {
     reqwest::Client::builder()
         .timeout(Duration::from_millis(2_500))
@@ -122,7 +177,7 @@ async fn api_call(
 ) -> Result<Value, String> {
     let url = format!("{}{}", origin(), path);
     let token = token().ok_or({
-        "the chat server is up but Rigel has no session token for it — restart it from the Chat tab"
+        "the chat server is up but exposed no session token — stop it and start the room from the Chat tab"
     })?;
     let mut request = http_client()
         .request(method, &url)
@@ -198,10 +253,21 @@ pub async fn status(project_root: Option<&str>) -> ChatStatus {
     let client = http_client();
     let running = healthy(&client).await;
 
-    let authed = running
-        && api_call(reqwest::Method::GET, "/api/settings", None)
+    let mut authed = false;
+    if running {
+        if token().is_none() {
+            adopt_token(&client).await;
+        }
+        authed = api_call(reqwest::Method::GET, "/api/settings", None)
             .await
             .is_ok();
+        // A room restarted outside Rigel keeps its data but mints a new token; an old token that
+        // no longer answers is replaced by the one the new landing page carries.
+        if !authed {
+            clear_token();
+            authed = adopt_token(&client).await;
+        }
+    }
 
     let dir = dir_for(project_root);
     ChatStatus {
@@ -242,7 +308,8 @@ fn start_lock() -> &'static tokio::sync::Mutex<()> {
 }
 
 /// Health first, launch second — the OmniRoute contract. Spawning is what earns Rigel the
-/// session token: `run.py` prints it, and an instance started outside Rigel stays unshared.
+/// session token; a room that is already up is taken over through its landing page, so a server
+/// orphaned by a previous window does not force the user to kill it by hand.
 pub async fn ensure_server(project_root: Option<&str>) -> Result<ChatStatus, String> {
     let _starting = start_lock().lock().await;
     let client = http_client();
@@ -317,6 +384,7 @@ fn spawn_server(dir: &std::path::Path) -> Result<(), String> {
         .stdout(Stdio::piped())
         .stderr(Stdio::null());
 
+    crate::process::hide(&mut command);
     let mut child = command
         .spawn()
         .map_err(|error| format!("could not start the chat server ({error})"))?;
@@ -449,7 +517,7 @@ pub async fn send_as(text: &str, channel: &str, sender: &str) -> Result<(), Stri
         return Err("a chat sender name is limited to 40 characters".to_string());
     }
     let token = token().ok_or({
-        "the chat server is up but Rigel has no session token for it — restart it from the Chat tab"
+        "the chat server is up but exposed no session token — stop it and start the room from the Chat tab"
     })?;
     let url = origin().replacen("http", "ws", 1);
     let ws_url = format!("{url}/ws?token={token}");
@@ -720,8 +788,10 @@ pub fn kill_tree(pid: u32) -> Result<(), String> {
     #[cfg(windows)]
     {
         // `/T` is the whole tree, `/F` is required for a console process that ignores WM_CLOSE.
-        let output = std::process::Command::new("taskkill")
-            .args(["/PID", &pid.to_string(), "/T", "/F"])
+        let mut command = std::process::Command::new("taskkill");
+        command.args(["/PID", &pid.to_string(), "/T", "/F"]);
+        crate::process::hide(&mut command);
+        let output = command
             .output()
             .map_err(|error| format!("could not run taskkill: {error}"))?;
         if output.status.success() {
@@ -737,8 +807,10 @@ pub fn kill_tree(pid: u32) -> Result<(), String> {
     }
     #[cfg(not(windows))]
     {
-        let output = std::process::Command::new("kill")
-            .args(["-TERM", &pid.to_string()])
+        let mut command = std::process::Command::new("kill");
+        command.args(["-TERM", &pid.to_string()]);
+        crate::process::hide(&mut command);
+        let output = command
             .output()
             .map_err(|error| format!("could not run kill: {error}"))?;
         if output.status.success() {
@@ -766,8 +838,10 @@ pub fn stop_all() -> usize {
 /// a live process, which keeps the liveness check locale-independent.
 #[cfg(windows)]
 fn pid_running(pid: u32) -> bool {
-    std::process::Command::new("tasklist")
-        .args(["/FI", &format!("PID eq {pid}"), "/NH"])
+    let mut command = std::process::Command::new("tasklist");
+    command.args(["/FI", &format!("PID eq {pid}"), "/NH"]);
+    crate::process::hide(&mut command);
+    command
         .output()
         .map(|output| String::from_utf8_lossy(&output.stdout).contains(&pid.to_string()))
         .unwrap_or(true)
@@ -1174,6 +1248,20 @@ time.sleep(30)
         assert_eq!(
             native_name_from(Some("a very long role name that should be cut"), "ffff"),
             "averylongrolenamethatsho-ffff"
+        );
+    }
+
+    #[test]
+    fn the_landing_page_token_is_read_only_from_the_script_it_injects() {
+        let html = r#"<html><head><script>window.__SESSION_TOKEN__="0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";</script></head></html>"#;
+        assert_eq!(
+            landing_token(html).as_deref(),
+            Some("0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef")
+        );
+        assert_eq!(landing_token("<html>no token here</html>"), None);
+        assert_eq!(
+            landing_token(r#"<script>window.__SESSION_TOKEN__="too-short";</script>"#),
+            None
         );
     }
 

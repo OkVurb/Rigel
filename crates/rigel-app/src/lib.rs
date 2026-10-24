@@ -34,6 +34,7 @@ use serde::{Deserialize, Serialize};
 use tauri::{Emitter, State};
 
 mod claude;
+mod terminal;
 pub use claude::mcp_mode;
 
 #[derive(Debug, Clone, Serialize)]
@@ -1765,9 +1766,38 @@ fn omniroute_start() -> Result<rigel_core::ServerStatus, String> {
     tauri::async_runtime::block_on(rigel_core::agent::omniroute::ensure_server())
 }
 
-/// The model picker's catalogue, read through the same provider the agent uses. The key is
-/// read in Rust and only becomes a bearer header; the window never sees it.
-async fn fetch_models(provider: &str) -> Result<Vec<String>, String> {
+/// One row in the model picker. The provider travels with the id so choosing a model also
+/// chooses where the turn goes; the window never has to know which key is configured.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct ModelOption {
+    pub id: String,
+    pub provider: String,
+    /// The provider's human name for the model, when it publishes one.
+    pub name: Option<String>,
+    /// OpenRouter marks zero-priced rows; free rows stay visible in the picker.
+    pub free: bool,
+}
+
+fn is_zero(value: Option<&serde_json::Value>) -> bool {
+    value
+        .and_then(serde_json::Value::as_str)
+        .map(|price| price.trim().parse::<f64>().is_ok_and(|price| price == 0.0))
+        .unwrap_or(false)
+}
+
+/// The catalogue for one provider. The key is read in Rust and only becomes a bearer header; the
+/// window never sees it. OpenRouter's public list is read even without a key so its full roster,
+/// including the free models, is visible to an OmniRoute install.
+async fn fetch_catalog(provider: &str) -> Result<Vec<ModelOption>, String> {
+    if provider == "gemini" {
+        return Ok(vec![ModelOption {
+            id: rigel_core::agent::gemini::DEFAULT_MODEL.to_string(),
+            provider: "gemini".to_string(),
+            name: Some("Gemini default".to_string()),
+            free: false,
+        }]);
+    }
+
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(20))
         .build()
@@ -1807,18 +1837,34 @@ async fn fetch_models(provider: &str) -> Result<Vec<String>, String> {
         .json()
         .await
         .map_err(|error| format!("the model catalogue returned unreadable data: {error}"))?;
-    let mut models: Vec<String> = value
+    let mut models: Vec<ModelOption> = value
         .get("data")
         .and_then(serde_json::Value::as_array)
         .map(|rows| {
             rows.iter()
-                .filter_map(|row| row.get("id").and_then(serde_json::Value::as_str))
-                .map(str::to_string)
+                .filter_map(|row| {
+                    let id = row.get("id").and_then(serde_json::Value::as_str)?;
+                    let name = row
+                        .get("name")
+                        .and_then(serde_json::Value::as_str)
+                        .map(str::to_string)
+                        .filter(|name| name != id);
+                    let pricing = row.get("pricing");
+                    let free = id.ends_with(":free")
+                        || (is_zero(pricing.and_then(|price| price.get("prompt")))
+                            && is_zero(pricing.and_then(|price| price.get("completion"))));
+                    Some(ModelOption {
+                        id: id.to_string(),
+                        provider: provider.to_string(),
+                        name,
+                        free,
+                    })
+                })
                 .collect()
         })
         .unwrap_or_default();
-    models.sort();
-    models.dedup();
+    models.sort_by(|one, other| one.id.cmp(&other.id));
+    models.dedup_by(|one, other| one.id == other.id);
     if models.is_empty() {
         return Err("the provider returned no models".to_string());
     }
@@ -1826,9 +1872,43 @@ async fn fetch_models(provider: &str) -> Result<Vec<String>, String> {
 }
 
 #[tauri::command]
-fn models_list() -> Result<Vec<String>, String> {
-    let provider = load_settings().provider;
-    tauri::async_runtime::block_on(fetch_models(&provider))
+fn models_list() -> Result<Vec<ModelOption>, String> {
+    let provider = load_settings().provider.trim().to_lowercase();
+    tauri::async_runtime::block_on(async move {
+        let mut catalog = Vec::new();
+        let mut problems = Vec::new();
+        match fetch_catalog(&provider).await {
+            Ok(rows) => catalog.extend(rows),
+            Err(error) => problems.push(error),
+        }
+        // The whole OpenRouter roster, free models included, is offered beside the current
+        // provider. Picking one switches the provider, so there is no separate switch to find.
+        if provider != "openrouter" && credentials::present(credentials::OPENROUTER) {
+            match fetch_catalog("openrouter").await {
+                Ok(rows) => catalog.extend(rows),
+                Err(error) => problems.push(error),
+            }
+        }
+        if catalog.is_empty() {
+            return Err(if problems.is_empty() {
+                "no provider catalogue was reachable".to_string()
+            } else {
+                problems.join("; ")
+            });
+        }
+
+        let mut seen = std::collections::HashSet::new();
+        catalog.retain(|option| seen.insert(option.id.clone()));
+        // Current provider first, then free rows, then name order: the useful end of a long
+        // roster stays reachable without typing a search first.
+        catalog.sort_by(|one, other| {
+            (one.provider != provider)
+                .cmp(&(other.provider != provider))
+                .then_with(|| other.free.cmp(&one.free))
+                .then_with(|| one.id.to_lowercase().cmp(&other.id.to_lowercase()))
+        });
+        Ok(catalog)
+    })
 }
 
 /// Effort is its own setting (D28). OmniRoute happens to encode the same value in the model
@@ -1859,8 +1939,8 @@ fn chat_status(
     ))
 }
 
-/// Boot the vendor chat server when it is down. Spawning is how Rigel earns the session
-/// token, so "already running externally" stays unauthenticated (`authed: false`).
+/// Boot the vendor chat server when it is down. A room already answering is taken over through
+/// its landing-page token, so one left behind by an earlier window stays usable.
 #[tauri::command]
 fn chat_start(project: Option<String>) -> Result<rigel_core::agent::agentchat::ChatStatus, String> {
     tauri::async_runtime::block_on(rigel_core::agent::agentchat::ensure_server(
@@ -1948,14 +2028,19 @@ fn prompt_refine(
 ) -> Result<rigel_core::agent::Refinement, String> {
     let settings = load_settings();
     let provider = settings.provider.trim().to_lowercase();
+    // Use the model the session already uses, on the same wire shape. The old hard-coded
+    // subagent model was often an OpenAI id on an OmniRoute install with no OpenAI credentials,
+    // so every send opened the review card with a 401 before the user could reach the agent.
+    let model_name = wire_model(
+        &configured_model(&settings, &provider),
+        &settings.effort,
+        &provider,
+    );
     let (model, model_name): (Arc<dyn Model>, String) = match provider.as_str() {
         "openrouter" => {
             let key = credentials::get(credentials::OPENROUTER)
                 .map_err(|error| format!("{error}. Add an OpenRouter key in Settings."))?;
-            (
-                Arc::new(OpenRouterModel::new(key)),
-                rigel_core::agent::DEFAULT_SUBAGENT_MODEL.to_string(),
-            )
+            (Arc::new(OpenRouterModel::new(key)), model_name)
         }
         "omniroute" => {
             let key = credentials::get(credentials::OMNIROUTE)
@@ -1964,16 +2049,13 @@ fn prompt_refine(
                 .map_err(|error| format!("{error} Start it from Settings."))?;
             (
                 Arc::new(rigel_core::agent::omniroute::model(key)),
-                rigel_core::agent::DEFAULT_SUBAGENT_MODEL.to_string(),
+                model_name,
             )
         }
         "gemini" => {
             let key = credentials::get(credentials::GEMINI)
                 .map_err(|error| format!("{error}. Add a Gemini key in Settings."))?;
-            (
-                Arc::new(rigel_core::agent::gemini::model(key)),
-                "gemini-2.5-flash-lite".to_string(),
-            )
+            (Arc::new(rigel_core::agent::gemini::model(key)), model_name)
         }
         other => {
             return Err(format!(
@@ -2188,6 +2270,10 @@ pub fn run() {
             chat_harnesses,
             chat_start_agent,
             chat_stop_agent,
+            terminal::terminal_open,
+            terminal::terminal_write,
+            terminal::terminal_resize,
+            terminal::terminal_close,
             prompt_refine,
             settings_get,
             settings_set,
@@ -2205,6 +2291,7 @@ pub fn run() {
             // wrappers holding room slots that the next launch cannot clean up.
             if matches!(event, tauri::RunEvent::Exit) {
                 rigel_core::agent::agentchat::stop_all();
+                terminal::close_all();
             }
         });
 }

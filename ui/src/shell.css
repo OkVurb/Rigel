@@ -708,7 +708,9 @@ input {
 }
 
 .model-row {
-  display: block;
+  display: flex;
+  align-items: center;
+  gap: 8px;
   width: 100%;
   overflow: hidden;
   padding: 6px 8px;
@@ -718,9 +720,42 @@ input {
   color: var(--muted);
   font-size: 11px;
   text-align: left;
-  text-overflow: ellipsis;
   white-space: nowrap;
   cursor: pointer;
+}
+
+.model-row-text {
+  display: flex;
+  flex: 1;
+  min-width: 0;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.model-row-text .mono {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.model-name {
+  overflow: hidden;
+  color: var(--faint);
+  font-size: 10px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.model-tags {
+  display: flex;
+  flex: 0 0 auto;
+  gap: 4px;
+}
+
+.tag.free {
+  border-color: rgba(76, 195, 138, 0.4);
+  color: var(--verified);
+  text-transform: lowercase;
 }
 
 .model-row:hover {
@@ -1185,6 +1220,67 @@ input {
   display: flex;
   flex-wrap: wrap;
   gap: 4px;
+}
+
+.roster-hint {
+  margin: 6px 0 0;
+  color: var(--faint);
+  font-size: 10px;
+  line-height: 1.4;
+}
+
+/* One inline form, not a modal: a new agent is a roster row as soon as it exists. */
+.agent-spawn {
+  display: grid;
+  gap: 6px;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--hairline);
+  background: var(--surface);
+}
+
+.agent-spawn input {
+  width: 100%;
+  height: 28px;
+  padding: 0 8px;
+  font-size: 12px;
+}
+
+.agent-spawn-actions {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+}
+
+.agent-spawn-actions select {
+  flex: 1;
+  min-width: 0;
+  height: 28px;
+  font-size: 11px;
+}
+
+.agent-spawn-actions .primary {
+  height: 28px;
+  padding: 0 10px;
+  font-size: 11px;
+}
+
+.agent-spawn-actions .ghost-btn {
+  height: 28px;
+  font-size: 11px;
+}
+
+.tag.watching {
+  border-color: rgba(233, 162, 59, 0.4);
+  color: var(--accent);
+  text-transform: lowercase;
+}
+
+.agent-row.on .row-name {
+  color: var(--text);
+}
+
+.agent-row.on .tag.watching {
+  border-color: rgba(233, 162, 59, 0.55);
 }
 
 .agent-row {
@@ -3403,4 +3499,67 @@ html.rigel-cursor-press .rigel-pointer-dot {
     opacity: 0.3;
     transform: translate(-50%, -50%) scale(1);
   }
+}
+
+/* ---------- terminal ---------- */
+
+/* The surface stays mounted after its first visit so switching tabs keeps the shell and its
+   scrollback. `display: contents` lets its aside/main sit in the shell grid as usual. */
+.terminal-surface {
+  display: contents;
+}
+
+.terminal-surface[hidden] {
+  display: none;
+}
+
+.terminal-main {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  padding: 0;
+  overflow: hidden;
+  background: var(--bg);
+}
+
+.terminal-host {
+  flex: 1;
+  min-height: 0;
+  padding: 10px 12px;
+  background: var(--bg);
+}
+
+.terminal-host .xterm {
+  height: 100%;
+}
+
+.terminal-host .xterm-viewport {
+  background: transparent !important;
+}
+
+.terminal-meta {
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--hairline);
+}
+
+.terminal-meta p {
+  margin: 0 0 4px;
+}
+
+.terminal-cwd {
+  color: var(--faint);
+  word-break: break-all;
+}
+
+.terminal-error {
+  margin: 6px 0 0;
+  color: var(--danger);
+  font-size: 11px;
+  line-height: 1.4;
+}
+
+.terminal-hint {
+  margin-top: auto;
+  padding: 10px 12px;
+  border-top: 1px solid var(--hairline);
 }

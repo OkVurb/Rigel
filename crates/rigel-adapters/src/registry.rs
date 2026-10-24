@@ -372,13 +372,21 @@ pub(crate) fn command_for(path: &Path) -> Command {
             .is_some_and(|extension| {
                 extension.eq_ignore_ascii_case("cmd") || extension.eq_ignore_ascii_case("bat")
             });
-        if batch {
+        let mut command = if batch {
             let mut command = Command::new("cmd");
             command.arg("/C").arg(path);
-            return command;
-        }
+            command
+        } else {
+            Command::new(path)
+        };
+        // A probe from the packaged GUI app must not flash a console window.
+        command.creation_flags(0x0800_0000);
+        command
     }
-    Command::new(path)
+    #[cfg(not(windows))]
+    {
+        Command::new(path)
+    }
 }
 
 fn at_least(version: &str, floor: [u64; 3]) -> bool {

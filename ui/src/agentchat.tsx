@@ -141,7 +141,7 @@ export default function ChatView({
       onNotice(
         next.authed
           ? `chat up at ${next.origin}`
-          : "chat is running, but it was started outside Rigel — restart it from here to get a session",
+          : `Rigel could not take over the room at ${next.origin}: its landing page exposed no session token. Stop that server, then start the room here.`
       );
     } catch (problem) {
       onNotice(problem instanceof Error ? problem.message : String(problem));
@@ -307,14 +307,15 @@ export default function ChatView({
         <main className="detail chat-main">
           {notice ? <p className="notice" role="status">{notice}</p> : null}
           <section className="chat-empty">
-            <h3>Another window owns this room</h3>
+            <h3>This room is not Rigel's</h3>
             <p>
               Something is listening at {status.origin} ({status.dir ?? "checkout unknown"}
-              ), but it was started outside Rigel, so Rigel holds no session token for it.
-              Close it and restart from here to take control.
+              ), but its landing page carried no session token Rigel could use. A room left by an
+              earlier Rigel window is taken over automatically; one behind a proxy or another
+              server needs to be closed, then started from here.
             </p>
             <button className="primary" onClick={() => void start()} disabled={booting}>
-              {booting ? "Booting…" : "Restart from Rigel"}
+              {booting ? "Booting…" : "Try again"}
             </button>
           </section>
         </main>
