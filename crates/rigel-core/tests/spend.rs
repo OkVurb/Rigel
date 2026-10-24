@@ -1,6 +1,6 @@
 //! D92: spend is attributable across sessions, and a task cap is narrower than a session cap.
 
-use rigel_core::{spend, BudgetError, BudgetService, SessionService, Usage};
+use rigel_core::{BudgetError, BudgetService, SessionService, Usage, spend};
 
 fn usage(micros: i64) -> Usage {
     Usage {

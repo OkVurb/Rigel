@@ -11,8 +11,8 @@
 use std::path::PathBuf;
 use std::time::Duration;
 
-use rigel_adapters::{write_mcp_config, ClaudeAdapter, ClaudeConfig, ClaudeEvent, Recorded};
-use rigel_core::{credentials, Agent, AgentEvent, ItemKind, SessionService, Turn};
+use rigel_adapters::{ClaudeAdapter, ClaudeConfig, ClaudeEvent, Recorded, write_mcp_config};
+use rigel_core::{Agent, AgentEvent, ItemKind, SessionService, Turn, credentials};
 use tauri::Emitter;
 use tokio::io::BufReader;
 

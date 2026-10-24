@@ -4,10 +4,10 @@ use std::sync::Arc;
 
 use rigel_core::{
     AgentEvent, ApprovalScope, BudgetService, Cancels, CommandApprover, CommandDecision,
-    PlanApprover, PlanDecision, PlanRequest,
     CommandRequest, Coordinator, Deliberator, EventSink, Model, ModelDeliberator, NoDeliberation,
-    OpenRouterModel, OriginApprover, OriginDecision, OriginRequest, ScriptedModel, SessionService,
-    StopAt, StopReason, SubagentPolicy, Tools, credentials,
+    OpenRouterModel, OriginApprover, OriginDecision, OriginRequest, PlanApprover, PlanDecision,
+    PlanRequest, ScriptedModel, SessionService, StopAt, StopReason, SubagentPolicy, Tools,
+    credentials,
 };
 use serde_json::json;
 

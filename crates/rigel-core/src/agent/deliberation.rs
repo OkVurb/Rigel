@@ -18,7 +18,7 @@ use serde::Serialize;
 use tokio_util::sync::CancellationToken;
 
 use super::destructive::Finding;
-use super::model::{usage_from_raw, ChatMessage, ChatRequest, Delta, Model};
+use super::model::{ChatMessage, ChatRequest, Delta, Model, usage_from_raw};
 use crate::budget::BudgetService;
 use crate::domain::Usage;
 use crate::session::SessionService;
@@ -276,9 +276,9 @@ impl Deliberator for ModelDeliberator {
 #[cfg(test)]
 mod tests {
     use super::{Deliberator, ModelDeliberator};
-    use crate::agent::destructive::{classify, Finding};
-    use crate::agent::model::{ChatRequest, Delta, DeltaSink, Model, ModelError};
     use crate::agent::ScriptedModel;
+    use crate::agent::destructive::{Finding, classify};
+    use crate::agent::model::{ChatRequest, Delta, DeltaSink, Model, ModelError};
     use crate::{BudgetService, Cancels, SessionService};
     use async_trait::async_trait;
     use std::path::Path;

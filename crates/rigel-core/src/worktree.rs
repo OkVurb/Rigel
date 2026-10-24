@@ -26,7 +26,7 @@ use std::process::Command;
 use serde::Serialize;
 use sqlx::SqlitePool;
 
-use crate::patches::{sha256_empty, sha256_hex, PatchPipeline};
+use crate::patches::{PatchPipeline, sha256_empty, sha256_hex};
 
 /// Where a worktree lives, under the per-user data directory rather than inside the project:
 /// a checkout inside the repository would appear in its own `status` and in every diff.
@@ -257,10 +257,7 @@ impl WorktreeService {
     /// the same hash. Deletions, renames and binary files are left out here exactly as
     /// `merge_back` leaves them out; the caller sees them in the merge report instead of a
     /// diff it cannot act on.
-    pub async fn diff(
-        &self,
-        agent_id: &str,
-    ) -> Result<(String, Vec<String>), WorktreeError> {
+    pub async fn diff(&self, agent_id: &str) -> Result<(String, Vec<String>), WorktreeError> {
         let worktree = self.get(agent_id).await?;
         let mut out = String::new();
         let mut files = Vec::new();

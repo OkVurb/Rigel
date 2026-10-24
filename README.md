@@ -346,14 +346,15 @@ change that violates one is a bug even if the tests pass. The checks are exactly
 cargo fmt --all -- --check
 cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
-(cd ui && npx tsc --noEmit && npm run build)
+(cd ui && npx tsc --noEmit && npm run build && npm run test:e2e)
 ```
 
 A schema change is a new numbered file in `migrations/` plus a `Migration` entry; an applied migration
-is never edited. `git config core.hooksPath .githooks` enables the pre-commit hook, which runs the same
-hygiene check as CI. Security reports go to `security@rigel.invalid`, as [SECURITY.md](SECURITY.md)
-describes, and not to the issue tracker. A failing test is fixed by fixing the cause: no `#[ignore]`,
-no weakened assertion, no lint silenced with an `allow` attribute.
+is never edited. `bash scripts/dev.sh` enables the pre-commit hook on first run, and
+`git config core.hooksPath .githooks` does it directly; the hook runs the same hygiene check as CI.
+Security reports go to `security@rigel.invalid`, as [SECURITY.md](SECURITY.md) describes, and not
+to the issue tracker. A failing test is fixed by fixing the cause: no `#[ignore]`, no weakened
+assertion, no lint silenced with an `allow` attribute.
 
 ## 🚧 Limits, stated plainly
 

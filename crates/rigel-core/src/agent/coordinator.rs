@@ -371,13 +371,9 @@ impl Coordinator {
 
     /// The worktree service for this project, or `None` when no base directory is configured.
     fn worktrees(&self) -> Option<WorktreeService> {
-        self.worktree_dir.as_ref().map(|base| {
-            WorktreeService::new(
-                &self.project_root,
-                base,
-                self.session.pool().clone(),
-            )
-        })
+        self.worktree_dir
+            .as_ref()
+            .map(|base| WorktreeService::new(&self.project_root, base, self.session.pool().clone()))
     }
 
     pub fn system_prompt(&self) -> String {
@@ -774,7 +770,8 @@ Plan mode is on (D98): inspect the project and propose a plan. You cannot edit o
                 } else if call.name == "assign_agents" {
                     self.assign_agents(session_id, &args).await
                 } else if call.name == "merge_subagent" {
-                    self.merge_subagent(session_id, agent_id, &turn.id, &args).await
+                    self.merge_subagent(session_id, agent_id, &turn.id, &args)
+                        .await
                 } else {
                     self.tools
                         .execute(session_id, agent_id, &call.name, args.clone())
@@ -878,9 +875,7 @@ Plan mode is on (D98): inspect the project and propose a plan. You cannot edit o
         let _ = self.session.set_agent_status(child_id, "failed").await;
         if mode.writable() {
             let claims = ClaimService::new(self.session.pool().clone(), &self.project_root);
-            let _ = claims
-                .release(child_id, files, "registration failed")
-                .await;
+            let _ = claims.release(child_id, files, "registration failed").await;
             if let Some(worktrees) = self.worktrees() {
                 let _ = worktrees.remove(child_id, true).await;
             }
@@ -948,7 +943,11 @@ Plan mode is on (D98): inspect the project and propose a plan. You cannot edit o
                     .take(400)
                     .collect();
                 if first.contains("APPROVE") {
-                    (Verdict::Approved, (!reason.is_empty()).then_some(reason), usage)
+                    (
+                        Verdict::Approved,
+                        (!reason.is_empty()).then_some(reason),
+                        usage,
+                    )
                 } else if first.contains("BLOCK") {
                     (
                         Verdict::Blocked,
@@ -1014,10 +1013,7 @@ Plan mode is on (D98): inspect the project and propose a plan. You cannot edit o
                 .map(str::trim)
                 .filter(|value| !value.is_empty())
             else {
-                return ToolOutcome::error(
-                    "BAD_ARGUMENTS",
-                    "agent_id or role is required",
-                );
+                return ToolOutcome::error("BAD_ARGUMENTS", "agent_id or role is required");
             };
             match self.session.agents(session_id).await {
                 Ok(agents) => match agents
@@ -1323,10 +1319,7 @@ Plan mode is on (D98): inspect the project and propose a plan. You cannot edit o
         // D113/D114: a writable fan-out is capped and approved before a single child exists.
         // The plan gate is here, not in the child, so a denial costs nothing and a skipped
         // gate is recorded next to the agent it belongs to.
-        let writable_requested = planned
-            .iter()
-            .filter(|child| child.mode.writable())
-            .count();
+        let writable_requested = planned.iter().filter(|child| child.mode.writable()).count();
         let mut plan_note = None;
         if writable_requested > 0 {
             if self.worktree_dir.is_none() {
@@ -1338,14 +1331,13 @@ Plan mode is on (D98): inspect the project and propose a plan. You cannot edit o
             let settings = match self.budget.safety_settings().await {
                 Ok(settings) => settings,
                 Err(error) => {
-                    return ToolOutcome::error("BUDGET", format!("could not read the safety settings: {error}"));
+                    return ToolOutcome::error(
+                        "BUDGET",
+                        format!("could not read the safety settings: {error}"),
+                    );
                 }
             };
-            let running = self
-                .session
-                .writable_running(session_id)
-                .await
-                .unwrap_or(0);
+            let running = self.session.writable_running(session_id).await.unwrap_or(0);
             if running + writable_requested as i64 > settings.writable_agents {
                 return ToolOutcome::error(
                     "WRITABLE_LIMIT",
@@ -1475,7 +1467,11 @@ Plan mode is on (D98): inspect the project and propose a plan. You cannot edit o
                 }
                 if let Err(error) = self
                     .session
-                    .mark_writable(&child.id, plan.as_deref().unwrap_or(""), plan_note.as_deref())
+                    .mark_writable(
+                        &child.id,
+                        plan.as_deref().unwrap_or(""),
+                        plan_note.as_deref(),
+                    )
                     .await
                 {
                     let _ = claims.release(&child.id, &[], "registration failed").await;

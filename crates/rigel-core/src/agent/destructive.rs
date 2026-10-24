@@ -369,7 +369,7 @@ fn is_absolute_text(target: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{classify, POLICIES};
+    use super::{POLICIES, classify};
     use std::path::Path;
 
     fn ids(command: &str) -> Vec<&'static str> {

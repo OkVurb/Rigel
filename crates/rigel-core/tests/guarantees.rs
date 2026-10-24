@@ -1,9 +1,10 @@
 //! The six guarantees from `docs/handoff.md` §12.
 //!
-//! They are `#[ignore]`d stubs until the phase that can satisfy them lands. Each carries the
-//! exact assertion it must make, so the test is a specification rather than a placeholder.
-//! Un-ignore one only when its phase's implementation is in the same commit.
+//! Each test states the guarantee it pins. The last two used to be `#[ignore]`d
+//! specifications; they are real checks now: the replay's fixture coverage (P4.7) and the
+//! public-copy scan for a lock claim (P5.8).
 
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -161,14 +162,93 @@ async fn resume_never_duplicates_patches() {
     assert!(strays.is_empty(), "orphan temp files: {strays:?}");
 }
 
-/// Phase 5, P5.8 — N1 as an executable check: the product never claims a lock.
-#[tokio::test]
-#[ignore = "P5.8: needs the claim surface and UI copy to scan"]
-async fn claim_never_reports_locked() {
-    todo!(
-        "scan docs, ui copy and the MCP tool descriptions for the word 'locked'; assert every \
-         hit is in a prohibition (N1), not in product copy"
+/// Phase 5, P5.8 — N1 as an executable check: public copy never claims a lock.
+///
+/// The scan covers what a user reads: the front-door documents, the renderer's strings and
+/// the MCP tool descriptions. The design record (`handoff.md`, the interview answers and the
+/// grilling/research notes) states the prohibition itself, so it is out of scope by
+/// construction. A hit is allowed only on a line that also states the prohibition, and
+/// cargo's `--locked` is a flag, not a claim.
+#[test]
+fn claim_never_reports_locked() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let mut files = vec![
+        root.join("README.md"),
+        root.join("CONTRIBUTING.md"),
+        root.join("SECURITY.md"),
+        root.join("ARCHITECTURE.md"),
+        root.join("docs/PLATFORMS.md"),
+        root.join("docs/what-works.md"),
+        root.join("docs/migrating-prototype-index.md"),
+        root.join("docs/design-prompt.md"),
+        root.join("docs/skill-intelligence.md"),
+    ];
+    for dir in ["ui/src", "crates/rigel-mcp/src"] {
+        collect_sources(&root.join(dir), &["ts", "tsx", "rs"], &mut files);
+    }
+    assert!(
+        files.len() >= 15,
+        "the scan found only {} files; the roots moved",
+        files.len()
     );
+
+    let mut hits = Vec::new();
+    for path in &files {
+        let text = std::fs::read_to_string(path)
+            .unwrap_or_else(|error| panic!("{}: {error}", path.display()));
+        // A Rust test module asserts about the word itself; it is not product copy. The MCP
+        // crate already checks its advertised descriptions the same way at runtime.
+        let text = text.split("#[cfg(test)]").next().unwrap_or(&text);
+        for (index, line) in text.lines().enumerate() {
+            if claims_lock(line) && !states_prohibition(line) {
+                hits.push(format!("{}:{}: {}", path.display(), index + 1, line.trim()));
+            }
+        }
+    }
+    assert!(
+        hits.is_empty(),
+        "public copy claims a lock (N1); say 'claimed by X, unverified':
+{}",
+        hits.join(
+            "
+"
+        )
+    );
+}
+
+/// `locked` as a word — not `blocked` or `unlocked` — and not cargo's `--locked`.
+fn claims_lock(line: &str) -> bool {
+    let lower = line.to_ascii_lowercase();
+    lower.match_indices("locked").any(|(index, _)| {
+        let before = lower[..index].chars().next_back();
+        let after = lower[index + "locked".len()..].chars().next();
+        before.is_none_or(|c| !c.is_alphanumeric() && c != '_' && c != '-')
+            && after.is_none_or(|c| !c.is_alphanumeric() && c != '_')
+    })
+}
+
+fn states_prohibition(line: &str) -> bool {
+    let lower = line.to_ascii_lowercase();
+    ["never", "not ", "no ", "cannot", "without"]
+        .iter()
+        .any(|marker| lower.contains(marker))
+}
+
+fn collect_sources(dir: &Path, extensions: &[&str], into: &mut Vec<PathBuf>) {
+    let entries =
+        std::fs::read_dir(dir).unwrap_or_else(|error| panic!("{}: {error}", dir.display()));
+    for entry in entries {
+        let path = entry.unwrap().path();
+        if path.is_dir() {
+            collect_sources(&path, extensions, into);
+        } else if path
+            .extension()
+            .and_then(|ext| ext.to_str())
+            .is_some_and(|ext| extensions.contains(&ext))
+        {
+            into.push(path);
+        }
+    }
 }
 
 struct CountingInterrupt(AtomicUsize);
@@ -312,12 +392,39 @@ async fn memory_rejects_paths() {
     assert!(matches!(error, MemoryError::InvalidTopic(_)));
 }
 
-/// Phase 4, P4.7 — recorded harness streams must normalise to the same items every time.
-#[tokio::test]
-#[ignore = "P4.7: needs adapter fixtures"]
-async fn fixture_replay_matches_normalisation() {
-    todo!(
-        "replay crates/rigel-adapters/tests/fixtures/*/*.jsonl and assert the normalised item \
-         kinds, statuses and unmapped flags match the expected snapshot"
-    );
+/// Phase 4, P4.7 — every recorded stream the replay suite consumes exists and is non-empty.
+///
+/// The replay itself lives in `crates/rigel-adapters/tests/replay.rs`, where the adapters are
+/// in scope; this pins the inputs it depends on. A harness or scenario the replay lists but
+/// the fixtures lack — or a fixture left behind by a rename — fails here, in the same suite
+/// as the other guarantees.
+#[test]
+fn fixture_replay_covers_every_harness_and_scenario() {
+    const HARNESSES: [&str; 3] = ["claude", "codex", "acp"];
+    const SCENARIOS: [&str; 5] = ["start", "tool_call", "approval", "error", "interrupt"];
+    let root =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../rigel-adapters/tests/fixtures/golden");
+
+    for harness in HARNESSES {
+        let dir = root.join(harness);
+        let mut found: Vec<String> = std::fs::read_dir(&dir)
+            .unwrap_or_else(|error| panic!("{}: {error}", dir.display()))
+            .filter_map(|entry| entry.ok())
+            .filter_map(|entry| {
+                let name = entry.file_name().to_string_lossy().to_string();
+                name.strip_suffix(".jsonl").map(str::to_string)
+            })
+            .collect();
+        found.sort();
+        let mut expected: Vec<String> = SCENARIOS.iter().map(|name| name.to_string()).collect();
+        expected.sort();
+        assert_eq!(found, expected, "{harness} fixtures");
+
+        for scenario in SCENARIOS {
+            let path = dir.join(format!("{scenario}.jsonl"));
+            let body = std::fs::read_to_string(&path)
+                .unwrap_or_else(|error| panic!("{}: {error}", path.display()));
+            assert!(!body.trim().is_empty(), "{} is empty", path.display());
+        }
+    }
 }

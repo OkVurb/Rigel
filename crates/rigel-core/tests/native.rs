@@ -1011,7 +1011,10 @@ async fn a_note_the_user_left_on_the_last_turn_reaches_the_next_prompt() {
         .filter(|system| system.contains("You are Rigel's native agent"))
         .collect();
     assert_eq!(
-        parents.iter().filter(|system| system.contains(NOTE)).count(),
+        parents
+            .iter()
+            .filter(|system| system.contains(NOTE))
+            .count(),
         1,
         "the note is stated once, in the turn that follows it: {parents:?}"
     );
@@ -1254,7 +1257,10 @@ async fn plan_mode_refuses_the_edit_until_the_plan_is_approved() {
     );
     let transcript = service.transcript(&session.id).await.unwrap();
     let body = serde_json::to_string(&transcript[0].items).unwrap();
-    assert!(body.contains("PLAN_MODE"), "the refusal is in the transcript");
+    assert!(
+        body.contains("PLAN_MODE"),
+        "the refusal is in the transcript"
+    );
 
     rigel_core::plan::set(service.pool(), &session.id, false)
         .await

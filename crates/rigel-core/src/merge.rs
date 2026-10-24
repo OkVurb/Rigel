@@ -41,7 +41,9 @@ pub struct MergeResult {
 
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
 pub enum MergeError {
-    #[error("a side has {0} lines, more than the {MAX_LINES} this merge will align; pick a side instead")]
+    #[error(
+        "a side has {0} lines, more than the {MAX_LINES} this merge will align; pick a side instead"
+    )]
     TooLarge(usize),
 }
 

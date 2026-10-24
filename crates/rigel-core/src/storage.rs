@@ -11,10 +11,10 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions, SqliteSynchronous};
 use sqlx::SqlitePool;
+use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions, SqliteSynchronous};
 
-use crate::migrate::{apply, MigrateError, Migration, INDEX_MIGRATIONS, PROJECT_MIGRATIONS};
+use crate::migrate::{INDEX_MIGRATIONS, MigrateError, Migration, PROJECT_MIGRATIONS, apply};
 
 #[derive(Debug, thiserror::Error)]
 pub enum StorageError {
@@ -159,8 +159,7 @@ fn write_gitignore(dir: &Path) -> Result<(), StorageError> {
     if path.exists() {
         return Ok(());
     }
-    let body =
-        "# Written by Rigel. Session logs are local: they contain prompts and machine paths.\n\
+    let body = "# Written by Rigel. Session logs are local: they contain prompts and machine paths.\n\
                 rigel.db\n\
                 rigel.db-wal\n\
                 rigel.db-shm\n\

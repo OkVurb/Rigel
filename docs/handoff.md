@@ -1870,25 +1870,27 @@ agent is missing today.
 | Golden fixtures | one recorded session per harness per scenario (start, tool call, approval, error, interrupt) | `crates/rigel-adapters/tests/fixtures` |
 | Fake harness binaries | small bins speaking ACP / app-server / NDJSON with scripted hangs and malformed lines | `crates/rigel-adapters/tests/bin` |
 | Integration | patch CAS, resume after kill, conflict detection on a real git repo, worktree merge-back | `crates/rigel-core/tests/it` |
-| UI | Playwright over the four surfaces' key states | `ui/e2e` |
+| UI | Playwright over the five surfaces' key states, in the browser preview | `ui/tests` |
 | Manual | per-phase script in `docs/qa/<phase>.md`, run before ticking the exit test | — |
 
 Non-negotiable tests, by name:
 
 1. `patch_apply_is_cas` — stale base returns `STALE_BASE` and writes nothing.
 2. `resume_never_duplicates_patches` — kill between journal write and rename; assert idempotence.
-3. `claim_never_reports_locked` — string scan over UI copy and MCP descriptions (N1 as a test).
+3. `claim_never_reports_locked` — scans the public copy (README and user-facing docs, `ui/src`, MCP descriptions) for a lock claim; a hit is allowed only in a prohibition (N1 as a test).
 4. `budget_stops_within_one_turn` — fake adapter emits usage above cap; assert interrupt called once.
 5. `memory_rejects_paths` — every pattern in §7.1.
-6. `fixture_replay_matches_normalisation` — recorded harness streams normalise to expected items.
+6. `fixture_replay_covers_every_harness_and_scenario` — every harness and scenario the replay suite consumes has a fixture, and it is not empty; `crates/rigel-adapters/tests/replay.rs` runs the streams themselves.
 
-As of 22 Oct 2026, `cargo test --workspace` covers 102 core unit tests plus the adapter, CLI and
-integration suites; `npx tsc --noEmit` and `npm --prefix ui run build` are part of the same gate.
+As of 23 Oct 2026, `cargo test --workspace` covers 419 tests across the core, adapter, CLI and
+app suites; `npx tsc --noEmit`, `npm --prefix ui run build` and the five-surface Playwright
+smoke (`npm --prefix ui run test:e2e`) are part of the same gate.
 The chat module's own tests pin the config parser, the harness argv (including the unattended
 flags), the API-key readiness rule and the checkout guess; the spawn call itself is still
 untested (§2.10, item 7).
 
-A failing test is fixed by fixing the cause. No suppressions, no `#[ignore]` above, no snapshot updates
+All six are live tests: the two that were specifications (`P4.7`, `P5.8`) were implemented when
+their surfaces landed. A failing test is fixed by fixing the cause. No suppressions, no `#[ignore]` above, no snapshot updates
 without reading the diff.
 
 ---

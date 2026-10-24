@@ -8,7 +8,7 @@
 //! `author` is who wrote the comment (`user`, or another agent reviewing the merge).
 
 use serde::Serialize;
-use sqlx::{sqlite::SqliteRow, Row, SqlitePool};
+use sqlx::{Row, SqlitePool, sqlite::SqliteRow};
 use uuid::Uuid;
 
 use crate::migrate::now_ms;

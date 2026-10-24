@@ -40,9 +40,9 @@ pub use agent::{
 };
 pub use attribute::{Attributed, ConflictWatcher, Observed, POLL_INTERVAL, Watcher};
 pub use budget::{
-    BudgetError, BudgetOutcome, BudgetService, BudgetSnapshot, DailyStatus, InterruptSink,
-    ReconcileReport, SafetySettings, TurnQuote, DEFAULT_DAILY_CAP_MICROS, DEFAULT_WRITABLE_AGENTS,
-    quote_turn, utc_day,
+    BudgetError, BudgetOutcome, BudgetService, BudgetSnapshot, DEFAULT_DAILY_CAP_MICROS,
+    DEFAULT_WRITABLE_AGENTS, DailyStatus, InterruptSink, ReconcileReport, SafetySettings,
+    TurnQuote, quote_turn, utc_day,
 };
 pub use claims::{
     CLAIM_TTL, Claim, ClaimConflict, ClaimError, ClaimResult, ClaimService, ConflictSides,

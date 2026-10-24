@@ -5,7 +5,7 @@
 //! resolution writes the merged file through the same compare-and-swap path as an agent patch.
 
 use rigel_core::{
-    ClaimError, ClaimService, PatchError, PatchPipeline, SessionService, MERGE_AUTHOR,
+    ClaimError, ClaimService, MERGE_AUTHOR, PatchError, PatchPipeline, SessionService,
 };
 
 const BASE: &str = "one\ntwo\nthree\nfour\nfive\n";

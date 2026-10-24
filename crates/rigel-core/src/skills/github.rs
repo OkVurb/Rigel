@@ -14,13 +14,13 @@ use async_trait::async_trait;
 use futures::StreamExt;
 use sqlx::SqlitePool;
 
-use super::blob::{sha256_hex, BlobStore};
+use super::blob::{BlobStore, sha256_hex};
 use super::frontmatter;
 use super::http::Http;
 use super::scan;
 use super::source::{FetchedSkill, RepoSnapshot, SkillRecord, Source, SourceStatus, SyncPolicy};
 use crate::migrate::now_ms;
-use crate::skills::{cluster, fmt_time, SkillsError};
+use crate::skills::{SkillsError, cluster, fmt_time};
 
 const API: &str = "https://api.github.com";
 const RAW: &str = "https://raw.githubusercontent.com";
@@ -134,11 +134,7 @@ fn parent_dir(path: &str) -> String {
 }
 
 fn non_empty(value: String) -> Option<String> {
-    if value.is_empty() {
-        None
-    } else {
-        Some(value)
-    }
+    if value.is_empty() { None } else { Some(value) }
 }
 
 fn encode_path(path: &str) -> String {
@@ -385,11 +381,7 @@ fn build_skill(
         .or_else(|| {
             let dir = parent_dir(path);
             let last = dir.rsplit('/').next().unwrap_or_default().to_string();
-            if last.is_empty() {
-                None
-            } else {
-                Some(last)
-            }
+            if last.is_empty() { None } else { Some(last) }
         })
         .unwrap_or_else(|| repo.to_string());
 
@@ -537,12 +529,14 @@ mod tests {
             Some(cluster::simhash(&frontmatter::parse(raw).body) as i64)
         );
         assert!(skill.record.body_sha.is_some());
-        assert!(skill
-            .record
-            .url
-            .as_deref()
-            .unwrap()
-            .ends_with("/pdf/SKILL.md"));
+        assert!(
+            skill
+                .record
+                .url
+                .as_deref()
+                .unwrap()
+                .ends_with("/pdf/SKILL.md")
+        );
         assert_eq!(skill.record.capabilities.len(), 1, "network access only");
     }
 }

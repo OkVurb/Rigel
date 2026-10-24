@@ -16,7 +16,7 @@ use serde::Serialize;
 use sqlx::SqlitePool;
 
 use crate::agent::pricing::{cost_micros, tokens_for};
-use crate::domain::{cents_to_micros, micros_to_cents, CostSource, Usage};
+use crate::domain::{CostSource, Usage, cents_to_micros, micros_to_cents};
 use crate::migrate::now_ms;
 
 /// The soft warning fires here, and the transcript shows an inline *Raise cap / Stop* prompt.

@@ -16,16 +16,16 @@ use sqlx::Row;
 
 use super::blob::BlobStore;
 use super::cluster;
-use super::evidence::{claims_from_description, Evidence, EvidenceSummary};
+use super::evidence::{Evidence, EvidenceSummary, claims_from_description};
 use super::github::GitHubSource;
 use super::hub::{SkillHubSource, SkillsMpSource};
 use super::scan::Capability;
-use super::search::{fts_query, SearchHit, SearchOrder};
+use super::search::{SearchHit, SearchOrder, fts_query};
 use super::source::{
-    load_status, RepoSnapshot, SkillRecord, Source, SourceState, SourceStatus, SyncPolicy,
+    RepoSnapshot, SkillRecord, Source, SourceState, SourceStatus, SyncPolicy, load_status,
 };
 use crate::migrate::now_ms;
-use crate::skills::{SkillsError, DEFAULT_TTL};
+use crate::skills::{DEFAULT_TTL, SkillsError};
 use crate::storage::Store;
 
 const GITHUB_BASE: &str = "https://api.github.com";

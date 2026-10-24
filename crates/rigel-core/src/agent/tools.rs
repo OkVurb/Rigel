@@ -16,7 +16,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use tokio::io::AsyncReadExt;
 use tokio::process::Command as ProcessCommand;
 
@@ -29,10 +29,10 @@ use super::egress::{DenyOrigins, Egress, OriginApprover};
 use super::model::ToolSpec;
 use crate::budget::BudgetService;
 use crate::domain::ItemKind;
-use crate::patches::{sha256_empty, sha256_hex, PatchError, PatchPipeline, StopAt};
+use crate::patches::{PatchError, PatchPipeline, StopAt, sha256_empty, sha256_hex};
 use crate::session::SessionService;
 use crate::skills::index::SkillIndex;
-use crate::skills::{blob::BlobStore, SkillsError};
+use crate::skills::{SkillsError, blob::BlobStore};
 use crate::snapshot::SnapshotService;
 
 const MAX_READ_LINES: usize = 2_000;

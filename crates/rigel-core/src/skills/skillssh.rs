@@ -21,7 +21,7 @@ use super::http::Http;
 use super::index::{IngestReport, SkillIndex};
 use super::source::SyncPolicy;
 use crate::migrate::now_ms;
-use crate::skills::{SkillsError, DEFAULT_TTL};
+use crate::skills::{DEFAULT_TTL, SkillsError};
 
 /// The directory's canonical host. Importers accept any origin so a fixture can stand in,
 /// but the prose and the tests use this one.

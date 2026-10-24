@@ -8,6 +8,10 @@ dist-ssr/
 *.tsbuildinfo
 target/
 
+# Playwright: the browser's traces and reports are local artifacts
+ui/test-results/
+ui/playwright-report/
+
 # Rust: session databases are local by design (see docs/handoff.md §6)
 .rigel/
 *.db-wal

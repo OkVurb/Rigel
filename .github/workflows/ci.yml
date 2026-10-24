@@ -56,7 +56,11 @@ jobs:
           cache: npm
           cache-dependency-path: ui/package-lock.json
       - run: npm ci
+      - name: Install Chromium
+        run: npx playwright install --with-deps chromium
       - run: npm run build
+      - name: Five surfaces smoke
+        run: npm run test:e2e
       - name: Handoff checklist
         run: node scripts/handoff-status.mjs
         working-directory: .

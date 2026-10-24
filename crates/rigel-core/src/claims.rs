@@ -17,7 +17,7 @@ use sqlx::{Row, SqlitePool};
 
 use crate::migrate::now_ms;
 use crate::patches::{
-    apply_patch_text, reverse_patch, sha256_hex, Patch, PatchError, PatchPipeline, StopAt,
+    Patch, PatchError, PatchPipeline, StopAt, apply_patch_text, reverse_patch, sha256_hex,
 };
 
 /// §8.1: a claim path is project-relative and at most 200 characters.

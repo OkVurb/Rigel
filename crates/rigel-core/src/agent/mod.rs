@@ -38,11 +38,11 @@ pub use approval::{
     PlanAgent, PlanApprover, PlanDecision, PlanRequest, Scopes,
 };
 pub use coordinator::{
-    fixed_context_chars, AgentError, Cancels, Coordinator, StopReason, SubagentPolicy, TurnRun,
-    DEFAULT_MAX_STEPS, DEFAULT_SUBAGENT_MODEL, MAX_PLAN_CHARS, REVIEW_MODEL, SUBAGENT_MODELS,
+    AgentError, Cancels, Coordinator, DEFAULT_MAX_STEPS, DEFAULT_SUBAGENT_MODEL, MAX_PLAN_CHARS,
+    REVIEW_MODEL, SUBAGENT_MODELS, StopReason, SubagentPolicy, TurnRun, fixed_context_chars,
 };
 pub use deliberation::{Deliberation, Deliberator, ModelDeliberator, NoDeliberation, Position};
-pub use destructive::{classify, Finding, Policy, POLICIES};
+pub use destructive::{Finding, POLICIES, Policy, classify};
 pub use egress::{
     DenyOrigins, Egress, EgressError, Fetched, OriginApprover, OriginDecision, OriginRequest,
 };
@@ -51,7 +51,7 @@ pub use model::{
     ToolCallBuilder, ToolSpec,
 };
 pub use omniroute::ServerStatus;
-pub use openrouter::{OpenRouterModel, DEFAULT_BASE_URL, DEFAULT_MODEL};
-pub use roles::{RolePreset, PRESETS as ROLE_PRESETS};
+pub use openrouter::{DEFAULT_BASE_URL, DEFAULT_MODEL, OpenRouterModel};
+pub use roles::{PRESETS as ROLE_PRESETS, RolePreset};
 pub use scripted::{Script, ScriptedModel};
 pub use tools::{ToolOutcome, Tools};

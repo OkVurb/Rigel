@@ -30,11 +30,7 @@ impl Frontmatter {
             .filter(|part| !part.is_empty())
             .map(ToOwned::to_owned)
             .collect();
-        if tools.is_empty() {
-            None
-        } else {
-            Some(tools)
-        }
+        if tools.is_empty() { None } else { Some(tools) }
     }
 }
 

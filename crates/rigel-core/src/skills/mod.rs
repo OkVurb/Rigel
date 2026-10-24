@@ -37,7 +37,7 @@ use std::time::Duration;
 
 pub use crate::storage::StorageError;
 pub use blob::BlobStore;
-pub use cluster::{simhash, HAMMING_THRESHOLD};
+pub use cluster::{HAMMING_THRESHOLD, simhash};
 pub use evidence::{Evidence, EvidenceSummary};
 pub use github::GitHubSource;
 pub use http::{Fetched, Http, HttpError};
