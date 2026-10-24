@@ -273,6 +273,9 @@ pub async fn check_latest(data_dir: &Path, current: &str) -> Result<UpdateCheck,
     if !settings.enabled {
         return Err(UpdateError::Disabled);
     }
+    // Do not make a request a build cannot verify: a development binary without the bundled
+    // key should fail here, before GitHub sees anything.
+    public_key(data_dir)?;
     let url = manifest_url(&settings).to_string();
     let manifest = fetch_manifest(&url).await?;
     check(data_dir, &manifest, current)
@@ -770,6 +773,24 @@ mod tests {
             saved.manifest_url.as_deref(),
             Some("https://example.test/latest.json")
         );
+    }
+
+    #[tokio::test]
+    async fn a_build_without_a_key_does_not_fetch_the_manifest() {
+        let dir = tempfile::tempdir().unwrap();
+        save_settings(
+            dir.path(),
+            &UpdateSettings {
+                enabled: true,
+                manifest_url: Some("https://127.0.0.1:1/latest.json".into()),
+                auto_install: false,
+            },
+        )
+        .unwrap();
+        assert!(matches!(
+            check_latest(dir.path(), "0.1.0").await,
+            Err(UpdateError::NoKey { .. })
+        ));
     }
 
     #[test]
