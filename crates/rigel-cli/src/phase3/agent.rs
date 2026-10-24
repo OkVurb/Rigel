@@ -902,6 +902,7 @@ pub async fn run_agent(dir: &Path, command: AgentCommand) -> ExitCode {
                 depth: 0,
                 parent_cancel: None,
                 worktree_dir: Some(dir.to_path_buf()),
+                chat_parent: None,
             };
 
             match coordinator.run(&session.id, &worker.id, &prompt).await {

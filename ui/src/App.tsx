@@ -21,6 +21,7 @@ import { PreviewSkillSource } from "./mock";
 import DiffView from "./diff";
 import SessionView from "./session";
 import SettingsView from "./settings";
+import Titlebar from "./titlebar";
 
 const ICONS = {
   shelf: "M10 2.5 17 6.5v7l-7 4-7-4v-7l7-4ZM3 6.5l7 4 7-4M10 10.5v7",
@@ -386,7 +387,8 @@ ${task}`,
   const neverIndexed = isTauri() && statuses.length === 0 && rows.length === 0;
   const stale = statuses.filter((s) => s.state === "stale" && s.last_sync_at);
 
-  const sessionProject = project?.root ?? (isTauri() ? "" : "/preview/rigel");
+  const native = isTauri();
+  const sessionProject = project?.root ?? (native ? "" : "/preview/rigel");
 
   const workspaceForm = newWorkspace ? (
     <form
@@ -428,10 +430,12 @@ ${task}`,
 
   return (
     <div
-      className={`shell${view === "session" ? " session" : ""}${
+      className={`shell${native ? " chrome" : ""}${view === "session" ? " session" : ""}${
         view === "settings" ? " settings" : ""
       }${view === "diff" ? " diff" : ""}`}
     >
+      {native ? <Titlebar project={project?.name ?? null} /> : null}
+
       <nav className="rail" aria-label="Primary">
         <div className="rail-brand" title="Rigel">
           <RigelMark />

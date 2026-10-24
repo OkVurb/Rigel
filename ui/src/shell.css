@@ -89,6 +89,95 @@ input {
   height: 100%;
 }
 
+/* The native frame is off; this row is the window's only title bar. */
+.shell.chrome {
+  grid-template-rows: 36px minmax(0, 1fr) 28px;
+}
+
+.titlebar {
+  grid-column: 1 / -1;
+  grid-row: 1;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding-left: 12px;
+  border-bottom: 1px solid var(--hairline);
+  background: var(--surface);
+  user-select: none;
+}
+
+.titlebar-brand {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  color: var(--accent);
+}
+
+.titlebar-brand span {
+  color: var(--text);
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.01em;
+}
+
+/* Keep the mark and wordmark from swallowing a drag: the brand wrapper owns the region. */
+.titlebar-brand > * {
+  pointer-events: none;
+}
+
+.titlebar-project {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  color: var(--faint);
+  font-family: var(--mono);
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.titlebar-controls {
+  align-self: stretch;
+  display: flex;
+  margin-left: auto;
+}
+
+.titlebar-btn {
+  display: grid;
+  place-items: center;
+  width: 46px;
+  border: 0;
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+}
+
+.titlebar-btn:hover {
+  background: var(--raised);
+  color: var(--text);
+}
+
+.titlebar-btn.close:hover {
+  background: var(--danger);
+  color: #fff;
+}
+
+.shell.chrome > .rail,
+.shell.chrome > .list-pane,
+.shell.chrome > .detail,
+.shell.chrome > .inspector {
+  grid-row: 2;
+}
+
+.shell.chrome > .status {
+  grid-row: 3;
+}
+
+/* The title bar takes the top strip the fixed key banner used to float over. */
+.shell.chrome .key-banner {
+  top: 44px;
+}
+
 /* ---------- rail ---------- */
 
 .rail {
@@ -2836,4 +2925,275 @@ input {
 
 .diff-spend {
   color: var(--faint);
+}
+
+/* Prompt refinement: the card between a draft and Send. One amber edge, hairline depth,
+   the same controls as the rest of the shell. */
+.refine-card {
+  flex: 0 0 auto;
+  display: grid;
+  gap: 10px;
+  margin: 8px 0 0;
+  padding: 12px 14px;
+  border: 1px solid rgba(233, 162, 59, 0.28);
+  border-radius: 8px;
+  background: var(--raised);
+}
+
+.chat-main .refine-card {
+  margin: 0 16px 8px;
+}
+
+.refine-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.refine-head .eyebrow {
+  margin: 0 0 2px;
+  color: var(--accent);
+}
+
+.refine-head strong {
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.refine-questions {
+  display: grid;
+  gap: 8px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.refine-questions li {
+  display: grid;
+  grid-template-columns: 16px minmax(0, 1fr);
+  gap: 8px;
+  align-items: start;
+}
+
+.refine-questions li > .mono {
+  padding-top: 7px;
+  color: var(--faint);
+  font-size: 11px;
+  text-align: right;
+}
+
+.refine-questions label {
+  display: grid;
+  gap: 4px;
+}
+
+.refine-questions label > span {
+  color: var(--muted);
+}
+
+.refine-card input[type="text"],
+.refine-card textarea {
+  width: 100%;
+  padding: 7px 9px;
+  border: 1px solid var(--hairline);
+  border-radius: 6px;
+  background: var(--bg);
+  color: var(--text);
+  font: inherit;
+}
+
+.refine-card textarea {
+  min-height: 64px;
+  font-family: var(--mono);
+  font-size: 12px;
+  line-height: 1.5;
+  resize: vertical;
+}
+
+.refine-card input[type="text"]:focus,
+.refine-card textarea:focus {
+  outline: none;
+  border-color: rgba(233, 162, 59, 0.45);
+}
+
+.refine-card input:disabled,
+.refine-card textarea:disabled {
+  color: var(--faint);
+}
+
+.refine-foot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.refine-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.refine-actions .primary {
+  height: 30px;
+}
+
+.refine-details summary {
+  color: var(--faint);
+  cursor: pointer;
+}
+
+.refine-details ul {
+  margin: 6px 0 0;
+  padding-left: 16px;
+  color: var(--muted);
+}
+
+.refine-details li {
+  font-size: 12px;
+}
+
+.refine-error p {
+  margin: 0 0 6px;
+  color: var(--danger);
+}
+
+.refine-error .fine {
+  color: var(--faint);
+}
+
+/* ---------- pointer ---------- */
+
+/* The native cursor is hidden only while the custom pointer is mounted. The `!important`
+   beats the per-control `cursor: pointer` rules without editing each one. */
+html.rigel-cursor,
+html.rigel-cursor * {
+  cursor: none !important;
+}
+
+.rigel-pointer {
+  position: fixed;
+  top: 0;
+  left: 0;
+  z-index: 9999;
+  width: 0;
+  height: 0;
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity 90ms ease-out;
+  will-change: transform;
+}
+
+.rigel-pointer[data-visible="true"] {
+  opacity: 1;
+}
+
+.rigel-pointer-dot,
+.rigel-pointer-ring {
+  position: absolute;
+  top: 0;
+  left: 0;
+  border-radius: 999px;
+  transform: translate(-50%, -50%);
+}
+
+.rigel-pointer-dot {
+  width: 7px;
+  height: 7px;
+  background: var(--accent);
+  box-shadow:
+    0 0 0 1px rgba(11, 12, 14, 0.7),
+    0 0 9px rgba(233, 162, 59, 0.55);
+  transition:
+    width 120ms ease-out,
+    height 120ms ease-out,
+    border-radius 120ms ease-out,
+    box-shadow 120ms ease-out,
+    transform 90ms ease-out;
+}
+
+.rigel-pointer-ring {
+  width: 16px;
+  height: 16px;
+  border: 1px solid rgba(233, 162, 59, 0.5);
+  transition:
+    width 140ms ease-out,
+    height 140ms ease-out,
+    border-color 140ms ease-out,
+    box-shadow 140ms ease-out;
+  animation: rigel-cursor-pulse 1.9s ease-out infinite;
+}
+
+/* A control is somewhere a click does something: widen both parts, without a jump. */
+.rigel-pointer[data-kind="control"] .rigel-pointer-dot {
+  width: 8px;
+  height: 8px;
+}
+
+.rigel-pointer[data-kind="control"] .rigel-pointer-ring {
+  width: 22px;
+  height: 22px;
+  border-color: rgba(233, 162, 59, 0.72);
+}
+
+/* A text field is somewhere typing does something: a thin vertical bar reads as an I-beam. */
+.rigel-pointer[data-kind="text"] .rigel-pointer-dot {
+  width: 2px;
+  height: 15px;
+  border-radius: 1px;
+  box-shadow: 0 0 7px rgba(233, 162, 59, 0.5);
+}
+
+.rigel-pointer[data-kind="text"] .rigel-pointer-ring {
+  opacity: 0;
+  animation: none;
+}
+
+html.rigel-cursor-press .rigel-pointer-dot {
+  transform: translate(-50%, -50%) scale(1.35);
+}
+
+/* A drag holds the pointer down past a small threshold: the pulse stops and a steady wider
+   ring takes over, so selecting text or moving a pane reads differently from a click. */
+.rigel-pointer[data-dragging="true"] .rigel-pointer-dot {
+  width: 5px;
+  height: 5px;
+  border-radius: 999px;
+  box-shadow:
+    0 0 0 1px rgba(11, 12, 14, 0.7),
+    0 0 12px rgba(233, 162, 59, 0.7);
+}
+
+.rigel-pointer[data-dragging="true"] .rigel-pointer-ring {
+  width: 30px;
+  height: 30px;
+  border-color: rgba(233, 162, 59, 0.8);
+  box-shadow: 0 0 0 5px rgba(233, 162, 59, 0.06);
+  opacity: 0.85;
+  animation: none;
+}
+
+@keyframes rigel-cursor-pulse {
+  0% {
+    opacity: 0.55;
+    transform: translate(-50%, -50%) scale(0.7);
+  }
+  70% {
+    opacity: 0;
+  }
+  100% {
+    opacity: 0;
+    transform: translate(-50%, -50%) scale(1.35);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .rigel-pointer-ring {
+    animation: none;
+    opacity: 0.3;
+    transform: translate(-50%, -50%) scale(1);
+  }
 }

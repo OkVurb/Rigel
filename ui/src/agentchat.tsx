@@ -10,6 +10,7 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 
+import RefineCard from "./refine";
 import {
   api,
   type AgentChatAgent,
@@ -31,6 +32,12 @@ function senderClass(sender: string): string {
   if (sender === "user") return "me";
   if (sender === "system") return "sys";
   return "agent";
+}
+
+/** Who the draft is addressed to, for the refiner's prompt. A bare mention is enough here. */
+function mentionTarget(text: string): string {
+  const found = text.match(/@([a-z0-9_-]+)/i);
+  return found ? `@${found[1]}` : "the room";
 }
 
 export default function ChatView({
@@ -57,6 +64,8 @@ export default function ChatView({
   const [messages, setMessages] = useState<AgentChatMessage[]>([]);
   const [draft, setDraft] = useState("");
   const [sending, setSending] = useState(false);
+  // The draft waiting in the review card. Non-null means Send paused before the room.
+  const [review, setReview] = useState<string | null>(null);
   const [starting, setStarting] = useState(false);
   const lastIdRef = useRef(0);
   const streamRef = useRef<HTMLDivElement | null>(null);
@@ -200,19 +209,30 @@ export default function ChatView({
     [onNotice],
   );
 
-  const send = useCallback(async () => {
+  /** The confirmed text goes to the room; a failure leaves it in the composer. */
+  const deliver = useCallback(
+    async (text: string) => {
+      if (!text || sending) return;
+      setSending(true);
+      try {
+        await api.agentChat.send(channel, text);
+        setDraft("");
+      } catch (problem) {
+        setDraft(text);
+        onNotice(problem instanceof Error ? problem.message : String(problem));
+      } finally {
+        setSending(false);
+      }
+    },
+    [sending, channel, onNotice],
+  );
+
+  /** Send now reviews first: the room sees only what the user confirmed in the card. */
+  const send = useCallback(() => {
     const text = draft.trim();
-    if (!text || sending) return;
-    setSending(true);
-    try {
-      await api.agentChat.send(channel, text);
-      setDraft("");
-    } catch (problem) {
-      onNotice(problem instanceof Error ? problem.message : String(problem));
-    } finally {
-      setSending(false);
-    }
-  }, [draft, sending, channel, onNotice]);
+    if (!text || sending || review) return;
+    setReview(text);
+  }, [draft, sending, review]);
 
   /* ------------------------------- empty ------------------------------- */
 
@@ -424,6 +444,25 @@ export default function ChatView({
           ))}
         </div>
 
+        {review ? (
+          <RefineCard
+            key={`${channel}:${review}`}
+            draft={review}
+            target={mentionTarget(review)}
+            channel={channel}
+            recent={messages
+              .filter((message) => message.kind === "chat")
+              .slice(-6)
+              .map((message) => `${message.sender}: ${message.text.slice(0, 400)}`)}
+            project={project}
+            onSend={(text) => {
+              setReview(null);
+              void deliver(text);
+            }}
+            onDismiss={() => setReview(null)}
+          />
+        ) : null}
+
         <div className="chat-composer">
           <input
             value={draft}
@@ -434,11 +473,18 @@ export default function ChatView({
                 void send();
               }
             }}
-            placeholder={`Message #${channel} — @claude, @codex…`}
+            placeholder={
+              review ? "Review the brief above before it sends…" : `Message #${channel} — @claude, @codex…`
+            }
             aria-label={`Message ${channel}`}
             spellCheck={false}
+            disabled={review !== null}
           />
-          <button className="primary" onClick={() => void send()} disabled={sending || !draft.trim()}>
+          <button
+            className="primary"
+            onClick={() => void send()}
+            disabled={sending || !draft.trim() || review !== null}
+          >
             Send
           </button>
         </div>

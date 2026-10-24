@@ -844,6 +844,7 @@ fn turn_send(
         depth: 0,
         parent_cancel: None,
         worktree_dir: Some(index_dir()),
+        chat_parent: None,
     };
 
     let returned = turn.clone();
@@ -1859,6 +1860,65 @@ fn chat_stop_agent(name: String) -> Result<String, String> {
     tauri::async_runtime::block_on(rigel_core::agent::agentchat::stop_agent(&name))
 }
 
+/* ------------------------------ prompt refine ----------------------------- */
+
+/// Tighten a composer draft before it is sent, on the cheap subagent model. It returns
+/// questions and a proposed brief and never sends anything: the window shows both as a review
+/// card and the send button stays the user's. This call is outside any session budget, so the
+/// card shows what it cost on its own.
+#[tauri::command]
+fn prompt_refine(
+    project: Option<String>,
+    request: rigel_core::agent::RefineRequest,
+) -> Result<rigel_core::agent::Refinement, String> {
+    let settings = load_settings();
+    let provider = settings.provider.trim().to_lowercase();
+    let (model, model_name): (Arc<dyn Model>, String) = match provider.as_str() {
+        "openrouter" => {
+            let key = credentials::get(credentials::OPENROUTER)
+                .map_err(|error| format!("{error}. Add an OpenRouter key in Settings."))?;
+            (
+                Arc::new(OpenRouterModel::new(key)),
+                rigel_core::agent::DEFAULT_SUBAGENT_MODEL.to_string(),
+            )
+        }
+        "omniroute" => {
+            let key = credentials::get(credentials::OMNIROUTE)
+                .map_err(|error| format!("{error}. Add an OmniRoute key in Settings."))?;
+            tauri::async_runtime::block_on(rigel_core::agent::omniroute::ensure_server())
+                .map_err(|error| format!("{error} Start it from Settings."))?;
+            (
+                Arc::new(rigel_core::agent::omniroute::model(key)),
+                rigel_core::agent::DEFAULT_SUBAGENT_MODEL.to_string(),
+            )
+        }
+        "gemini" => {
+            let key = credentials::get(credentials::GEMINI)
+                .map_err(|error| format!("{error}. Add a Gemini key in Settings."))?;
+            (
+                Arc::new(rigel_core::agent::gemini::model(key)),
+                "gemini-2.5-flash-lite".to_string(),
+            )
+        }
+        other => {
+            return Err(format!(
+                "unknown provider `{other}`; use omniroute, openrouter or gemini"
+            ));
+        }
+    };
+
+    let refiner = rigel_core::agent::PromptRefiner::new(model, model_name);
+    let root = project.map(PathBuf::from);
+    tauri::async_runtime::block_on(async move {
+        tokio::time::timeout(
+            std::time::Duration::from_secs(30),
+            refiner.refine(&request, root.as_deref()),
+        )
+        .await
+        .map_err(|_| "the refiner took too long; send the draft as it is".to_string())?
+    })
+}
+
 /* -------------------------------- settings ------------------------------- */
 
 #[tauri::command]
@@ -2052,6 +2112,7 @@ pub fn run() {
             chat_harnesses,
             chat_start_agent,
             chat_stop_agent,
+            prompt_refine,
             settings_get,
             settings_set,
             usage_summary,

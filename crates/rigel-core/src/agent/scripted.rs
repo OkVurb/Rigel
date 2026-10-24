@@ -18,6 +18,11 @@ use super::model::{ChatRequest, Delta, DeltaSink, Model, ModelError, RawUsage};
 pub struct Script {
     #[serde(default)]
     pub steps: Vec<ScriptStep>,
+    /// Answers for read-only child turns. Keeping them separate makes a scripted fan-out
+    /// deterministic now that children run in their own threads: the parent's queue is never
+    /// consumed by a child racing it.
+    #[serde(default)]
+    pub subagent_steps: Vec<ScriptStep>,
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]
@@ -59,6 +64,7 @@ pub struct ScriptUsage {
 
 pub struct ScriptedModel {
     steps: Mutex<VecDeque<ScriptStep>>,
+    subagent_steps: Mutex<VecDeque<ScriptStep>>,
     id: String,
 }
 
@@ -66,6 +72,7 @@ impl ScriptedModel {
     pub fn new(script: Script) -> Self {
         Self {
             steps: Mutex::new(script.steps.into()),
+            subagent_steps: Mutex::new(script.subagent_steps.into()),
             id: "script".to_string(),
         }
     }
@@ -100,15 +107,26 @@ impl Model for ScriptedModel {
 
     async fn chat(
         &self,
-        _request: ChatRequest,
+        request: ChatRequest,
         cancel: &CancellationToken,
         on_delta: &mut DeltaSink<'_>,
     ) -> Result<(), ModelError> {
         if cancel.is_cancelled() {
             return Err(ModelError::Cancelled);
         }
-        let step = self
-            .steps
+        let is_child = request.messages.iter().any(|message| {
+            message.role == "system"
+                && message
+                    .content
+                    .as_deref()
+                    .is_some_and(|content| content.contains("You are a read-only subagent"))
+        });
+        let queue = if is_child {
+            &self.subagent_steps
+        } else {
+            &self.steps
+        };
+        let step = queue
             .lock()
             .map_err(|_| ModelError::Other("script lock poisoned".to_string()))?
             .pop_front()
@@ -178,6 +196,34 @@ fn split_in_two(text: &str) -> [&str; 2] {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn a_child_has_its_own_queue_and_does_not_consume_the_parents() {
+        let model = ScriptedModel::from_json(
+            r#"{"steps":[{"text":"parent"}],"subagent_steps":[{"text":"child"}]}"#,
+        )
+        .unwrap();
+        let cancel = CancellationToken::new();
+        let request = ChatRequest {
+            model: "script".into(),
+            messages: vec![crate::agent::ChatMessage::system(
+                "You are a read-only subagent working in the project.",
+            )],
+            tools: vec![],
+            max_tokens: None,
+            temperature: 0.0,
+            effort: None,
+        };
+        let mut text = String::new();
+        let mut sink = |delta: Delta| {
+            if let Delta::Text(piece) = delta {
+                text.push_str(&piece);
+            }
+        };
+        model.chat(request, &cancel, &mut sink).await.unwrap();
+        assert_eq!(text, "child");
+        assert_eq!(model.remaining(), 1, "the parent queue is untouched");
+    }
 
     #[tokio::test]
     async fn a_script_emits_its_steps_in_order_and_then_stops() {

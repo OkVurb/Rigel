@@ -360,6 +360,12 @@ pub async fn agents() -> Result<Value, String> {
     api_call(reqwest::Method::GET, "/api/status", None).await
 }
 
+/// The names currently online in the room. Used to tell a native agent who else it can address,
+/// not just the agents that happen to have an assignment on the work board.
+pub async fn online() -> Result<Vec<String>, String> {
+    Ok(online_names(&agents().await?))
+}
+
 /// Recent history, or everything newer than `since_id` for the poller.
 pub async fn messages(
     channel: Option<&str>,
@@ -393,10 +399,55 @@ fn urlencoded(value: &str) -> Result<String, String> {
     Ok(encoded)
 }
 
+/// The room name a native agent posts under: its role plus the first characters of its agent
+/// id, e.g. `reader-9b1c`. The id suffix is what keeps two `reader` children in one session
+/// distinguishable; a room agent keeps its own registered name.
+pub fn native_name(agent: &crate::session::Agent) -> String {
+    native_name_from(agent.role.as_deref(), &agent.id)
+}
+
+pub fn native_name_from(role: Option<&str>, id: &str) -> String {
+    let role = role.unwrap_or("agent").trim().to_ascii_lowercase();
+    let role: String = role
+        .chars()
+        .filter(|ch| ch.is_ascii_alphanumeric() || *ch == '-')
+        .take(24)
+        .collect();
+    let role = if role.is_empty() {
+        "agent".to_string()
+    } else {
+        role
+    };
+    let short: String = id
+        .chars()
+        .filter(|ch| ch.is_ascii_alphanumeric())
+        .take(4)
+        .collect();
+    if short.is_empty() {
+        role
+    } else {
+        format!("{role}-{short}")
+    }
+}
+
 /// One websocket frame: the vendor browser sends user messages over `/ws`, there is no REST
 /// path for them (the REST send is per-agent-token only), so the core owns a short-lived
-/// socket per message. `sender: "user"` matches the vendor UI's default identity.
+/// socket per message. `sender: "user"` matches the vendor UI's default identity; native agents
+/// use [`send_as`] so the room shows who spoke.
 pub async fn send(text: &str, channel: &str) -> Result<(), String> {
+    send_as(text, channel, "user").await
+}
+
+/// Post as a native agent. The room accepts any sender string; the name is still validated here
+/// because a blank or `system` sender would be indistinguishable from the server's own notices.
+pub async fn send_as(text: &str, channel: &str, sender: &str) -> Result<(), String> {
+    let sender = sender.trim();
+    if sender.is_empty() || sender.eq_ignore_ascii_case("system") {
+        return Err("a chat sender must be a real name, not blank or `system`".to_string());
+    }
+    if sender.chars().count() > 40 {
+        return Err("a chat sender name is limited to 40 characters".to_string());
+    }
     let token = token().ok_or({
         "the chat server is up but Rigel has no session token for it — restart it from the Chat tab"
     })?;
@@ -409,7 +460,7 @@ pub async fn send(text: &str, channel: &str) -> Result<(), String> {
 
     let frame = serde_json::json!({
         "type": "message",
-        "sender": "user",
+        "sender": sender,
         "channel": channel,
         "text": text,
     });
@@ -1102,6 +1153,27 @@ time.sleep(30)
         assert!(
             text.contains("argv=claude --dangerously-skip-permissions"),
             "the launched argv lost the harness flags: {text}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_chat_sender_must_be_a_real_name() {
+        assert!(send_as("hello", "general", "").await.is_err());
+        assert!(send_as("hello", "general", "   ").await.is_err());
+        assert!(send_as("hello", "general", "system").await.is_err());
+        assert!(send_as("hello", "general", &"x".repeat(41)).await.is_err());
+    }
+
+    #[test]
+    fn native_names_are_readable_and_distinguishable() {
+        assert_eq!(native_name_from(Some("Reader"), "9b1c2d3e"), "reader-9b1c");
+        assert_eq!(native_name_from(Some("reader"), "9b1c2d3e"), "reader-9b1c");
+        assert_eq!(native_name_from(Some("reader"), "aa11bb22"), "reader-aa11");
+        assert_eq!(native_name_from(None, "child-1"), "agent-chil");
+        assert_eq!(native_name_from(Some("  "), ""), "agent");
+        assert_eq!(
+            native_name_from(Some("a very long role name that should be cut"), "ffff"),
+            "averylongrolenamethatsho-ffff"
         );
     }
 

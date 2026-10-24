@@ -110,6 +110,7 @@ fn coordinator(
         depth: 0,
         parent_cancel: None,
         worktree_dir,
+        chat_parent: None,
     }
 }
 

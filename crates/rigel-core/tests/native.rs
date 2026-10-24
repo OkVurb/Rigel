@@ -11,8 +11,8 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use rigel_core::agent::{
-    Cancels, ChatRequest, Coordinator, Delta, DeltaSink, Model, ModelError, ScriptedModel,
-    StopReason, Tools,
+    Cancels, ChatRequest, Coordinator, Delta, DeltaSink, Model, ModelError, RawUsage,
+    ScriptedModel, StopReason, Tools,
 };
 use rigel_core::{BudgetService, SessionService, StopAt, Usage};
 use tokio_util::sync::CancellationToken;
@@ -97,6 +97,7 @@ fn coordinator(
         depth: 0,
         parent_cancel: None,
         worktree_dir: None,
+        chat_parent: None,
     }
 }
 
@@ -212,6 +213,108 @@ async fn the_cap_stops_the_turn_and_refuses_the_next_one() {
     assert_eq!(usage.cost_micros, 310_000);
 }
 
+/// A parent that splits, collects and finishes, and children that answer by prompt. A single
+/// scripted model would race its own step queue now that children run in the background.
+#[derive(Default)]
+struct SubagentScriptModel {
+    parent_calls: AtomicUsize,
+}
+
+#[async_trait]
+impl Model for SubagentScriptModel {
+    fn id(&self) -> String {
+        "subagent-script".to_string()
+    }
+
+    async fn chat(
+        &self,
+        request: ChatRequest,
+        _cancel: &CancellationToken,
+        on_delta: &mut DeltaSink<'_>,
+    ) -> Result<(), ModelError> {
+        let system: String = request
+            .messages
+            .iter()
+            .filter(|message| message.role == "system")
+            .filter_map(|message| message.content.clone())
+            .collect::<Vec<_>>()
+            .join("\n");
+        let last_user = request
+            .messages
+            .iter()
+            .rev()
+            .find(|message| message.role == "user")
+            .and_then(|message| message.content.clone())
+            .unwrap_or_default();
+
+        if system.contains("You are a read-only subagent") {
+            let text = if last_user.contains("README") {
+                "README says Demo.\n"
+            } else {
+                "lib.rs adds and subtracts.\n"
+            };
+            on_delta(Delta::Text(text.to_string()));
+            on_delta(Delta::Usage(RawUsage {
+                input_tokens: 50,
+                cached_input_tokens: 0,
+                output_tokens: 10,
+                reasoning_tokens: 0,
+                cost_usd: Some(0.0003),
+            }));
+            on_delta(Delta::Finish("stop".to_string()));
+            return Ok(());
+        }
+
+        let call = self.parent_calls.fetch_add(1, Ordering::SeqCst);
+        if call == 0 {
+            on_delta(Delta::Text("Spawning two readers.\n".to_string()));
+            on_delta(Delta::ToolCall {
+                index: 0,
+                id: Some("call_0".to_string()),
+                name: Some("spawn_agents".to_string()),
+                arguments: serde_json::json!({
+                    "agents": [
+                        { "role": "looker", "files": ["README.md"], "prompt": "Read README.md and summarise it." },
+                        { "role": "looker-2", "files": ["src/lib.rs"], "prompt": "Read src/lib.rs and summarise it.", "model": "openai/gpt-5.4-nano" }
+                    ]
+                })
+                .to_string(),
+            });
+            on_delta(Delta::Usage(RawUsage {
+                input_tokens: 100,
+                cached_input_tokens: 0,
+                output_tokens: 20,
+                reasoning_tokens: 0,
+                cost_usd: Some(0.0004),
+            }));
+        } else if call == 1 {
+            on_delta(Delta::ToolCall {
+                index: 0,
+                id: Some("call_1".to_string()),
+                name: Some("subagent_results".to_string()),
+                arguments: serde_json::json!({ "timeout_secs": 10 }).to_string(),
+            });
+        } else {
+            on_delta(Delta::Text(
+                "Two subagents read the files; no tests were run.\n".to_string(),
+            ));
+            on_delta(Delta::Usage(RawUsage {
+                input_tokens: 80,
+                cached_input_tokens: 0,
+                output_tokens: 20,
+                reasoning_tokens: 0,
+                cost_usd: Some(0.0001),
+            }));
+        }
+        on_delta(Delta::Finish(if call == 1 {
+            "tool_calls".to_string()
+        } else {
+            "stop".to_string()
+        }));
+        Ok(())
+    }
+}
+
 #[tokio::test]
 async fn subagents_are_read_only_billed_separately_and_nested_under_the_parent() {
     let tmp = repo();
@@ -222,34 +325,45 @@ async fn subagents_are_read_only_billed_separately_and_nested_under_the_parent()
         .await
         .unwrap();
 
-    let script = r#"{
-      "steps": [
-        {
-          "text": "Spawning two readers.\n",
-          "tool_calls": [{
-            "name": "spawn_agents",
-            "arguments": { "agents": [
-              { "role": "looker", "files": ["README.md"], "prompt": "Read README.md and summarise it." },
-              { "role": "looker-2", "files": ["src/lib.rs"], "prompt": "Read src/lib.rs and summarise it.", "model": "openai/gpt-5.4-nano" }
-            ] }
-          }],
-          "usage": { "input_tokens": 100, "output_tokens": 20, "cost_usd": 0.0004 }
-        },
-        { "text": "README says Demo.\n", "usage": { "input_tokens": 50, "output_tokens": 10, "cost_usd": 0.0003 } },
-        { "text": "lib.rs adds and subtracts.\n", "usage": { "input_tokens": 50, "output_tokens": 10, "cost_usd": 0.0003 } },
-        { "text": "Two subagents read the files; no tests were run.\n", "usage": { "input_tokens": 80, "output_tokens": 20, "cost_usd": 0.0001 } }
-      ]
-    }"#;
-    let run = coordinator(tmp.path(), &service, script, StopAt::Never, 10)
-        .run(&session.id, &agent.id, "read the repo")
-        .await
-        .unwrap();
+    let cancels = Arc::new(Cancels::new());
+    let budget = Arc::new(BudgetService::new(
+        service.pool().clone(),
+        cancels.clone() as Arc<dyn rigel_core::InterruptSink>,
+    ));
+    let tools = Tools::new(
+        tmp.path().to_path_buf(),
+        service.clone(),
+        budget.clone(),
+        tmp.path().join("index"),
+        StopAt::Never,
+    );
+    let run = Coordinator {
+        session: service.clone(),
+        budget,
+        tools,
+        model: Arc::new(SubagentScriptModel::default()),
+        sink: Arc::new(rigel_core::NullSink),
+        cancels,
+        project_root: tmp.path().to_path_buf(),
+        model_name: "subagent-script".to_string(),
+        effort: None,
+        max_steps: 10,
+        subagents: rigel_core::agent::SubagentPolicy::default(),
+        depth: 0,
+        worktree_dir: None,
+        chat_parent: None,
+        parent_cancel: None,
+    }
+    .run(&session.id, &agent.id, "read the repo")
+    .await
+    .unwrap();
 
     assert_eq!(run.stop, StopReason::Completed);
     assert_eq!(
-        run.steps, 2,
-        "spawn is one step; the final answer is the second"
+        run.steps, 3,
+        "spawn, collect and final are three parent steps"
     );
+    assert_eq!(run.tool_calls, 2, "spawn and results are two tool calls");
     assert_eq!(
         run.usage.cost_micros, 500,
         "the parent pays only for its own steps"
@@ -290,7 +404,20 @@ async fn subagents_are_read_only_billed_separately_and_nested_under_the_parent()
         .iter()
         .find(|item| item.body.get("tool").and_then(|tool| tool.as_str()) == Some("spawn_agents"))
         .expect("the spawn call is in the parent transcript");
-    let returned = spawn.body["result"]["agents"].as_array().unwrap();
+    assert_eq!(
+        spawn.body["result"]["started"].as_array().unwrap().len(),
+        2,
+        "spawn returns the children it started, not their answers"
+    );
+    assert_eq!(spawn.body["result"]["pending"], 2);
+    let results = parent
+        .items
+        .iter()
+        .find(|item| {
+            item.body.get("tool").and_then(|tool| tool.as_str()) == Some("subagent_results")
+        })
+        .expect("the collect call is in the parent transcript");
+    let returned = results.body["result"]["agents"].as_array().unwrap();
     assert_eq!(returned[0]["role"], "looker");
     assert_eq!(returned[1]["role"], "looker-2");
     let mut texts: Vec<&str> = returned
@@ -302,7 +429,8 @@ async fn subagents_are_read_only_billed_separately_and_nested_under_the_parent()
         texts,
         ["README says Demo.\n", "lib.rs adds and subtracts.\n"]
     );
-    assert_eq!(spawn.body["result"]["spent_micros"], 600);
+    assert_eq!(results.body["result"]["spent_micros"], 600);
+    assert_eq!(results.body["result"]["pending"], false);
 
     let board = service.team(&session.id).await.unwrap();
     assert_eq!(board.len(), 2, "both children are on the work board");
@@ -406,6 +534,7 @@ async fn a_subagent_cannot_write_even_if_it_asks() {
     assert!(!names.contains(&"edit_file".to_string()));
     assert!(!names.contains(&"write_file".to_string()));
     assert!(!names.contains(&"spawn_agents".to_string()));
+    assert!(!names.contains(&"subagent_results".to_string()));
     assert!(!names.contains(&"assign_agents".to_string()));
     assert!(
         Tools::specs_all()
@@ -663,6 +792,8 @@ struct OverlapModel {
     active: AtomicUsize,
     peak: AtomicUsize,
     parent_calls: AtomicUsize,
+    /// How many child calls were inside the model when the parent made its second step.
+    parent_saw_active: AtomicUsize,
     /// When set, a child call stops the parent agent — the cancellation-propagation test.
     canceller: Option<(Arc<Cancels>, String)>,
 }
@@ -688,7 +819,8 @@ impl Model for OverlapModel {
             .unwrap_or_default();
 
         if last_user == "work" {
-            if self.parent_calls.fetch_add(1, Ordering::SeqCst) == 0 {
+            let call = self.parent_calls.fetch_add(1, Ordering::SeqCst);
+            if call == 0 {
                 on_delta(Delta::Text("Spawning two readers.\n".to_string()));
                 let arguments = serde_json::json!({
                     "agents": [
@@ -702,6 +834,24 @@ impl Model for OverlapModel {
                     id: Some("call_0".to_string()),
                     name: Some("spawn_agents".to_string()),
                     arguments,
+                });
+            } else if call == 1 {
+                // The point of the background fan-out: this parent step is running while the
+                // children are still inside their model calls, so it can talk to them.
+                for _ in 0..20 {
+                    if self.active.load(Ordering::SeqCst) > 0 {
+                        break;
+                    }
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+                self.parent_saw_active
+                    .store(self.active.load(Ordering::SeqCst), Ordering::SeqCst);
+                on_delta(Delta::Text("Collecting the readers.\n".to_string()));
+                on_delta(Delta::ToolCall {
+                    index: 0,
+                    id: Some("call_1".to_string()),
+                    name: Some("subagent_results".to_string()),
+                    arguments: serde_json::json!({ "timeout_secs": 10 }).to_string(),
                 });
             } else {
                 on_delta(Delta::Text("Both readers answered.\n".to_string()));
@@ -759,8 +909,9 @@ async fn sibling_subagents_overlap_their_model_calls() {
         max_steps: 10,
         subagents: rigel_core::agent::SubagentPolicy::default(),
         depth: 0,
-        parent_cancel: None,
         worktree_dir: None,
+        chat_parent: None,
+        parent_cancel: None,
     }
     .run(&session.id, &agent.id, "work")
     .await
@@ -772,6 +923,10 @@ async fn sibling_subagents_overlap_their_model_calls() {
         2,
         "both children were inside the model at the same time"
     );
+    assert!(
+        model.parent_saw_active.load(Ordering::SeqCst) >= 1,
+        "the parent took a step while the children were still working, so the room can be used"
+    );
     assert_eq!(model.active.load(Ordering::SeqCst), 0);
 
     let entry = service
@@ -781,18 +936,55 @@ async fn sibling_subagents_overlap_their_model_calls() {
         .into_iter()
         .find(|entry| entry.turn.id == run.turn.id)
         .unwrap();
-    let spawn = entry
+    let results = entry
         .items
         .iter()
-        .find(|item| item.body.get("tool").and_then(|tool| tool.as_str()) == Some("spawn_agents"))
-        .expect("the spawn call is in the parent transcript");
-    let agents = spawn.body["result"]["agents"].as_array().unwrap();
+        .find(|item| {
+            item.body.get("tool").and_then(|tool| tool.as_str()) == Some("subagent_results")
+        })
+        .expect("the result-collection call is in the parent transcript");
+    let agents = results.body["result"]["agents"].as_array().unwrap();
     assert_eq!(
         agents[0]["text"], "child-a done.\n",
         "asked order, not finish order: {agents:?}"
     );
     assert_eq!(agents[1]["text"], "child-b done.\n", "result: {agents:?}");
     assert!(agents.iter().all(|agent| agent["ok"] == true));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_scripted_subagent_fixture_uses_the_child_queue_and_results_tool() {
+    let tmp = repo();
+    let service = SessionService::open(tmp.path()).await.unwrap();
+    let session = service.start(Some("fixture"), Some(25)).await.unwrap();
+    let agent = service
+        .register_agent(&session.id, "native", Some("worker"))
+        .await
+        .unwrap();
+    let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../scripts/fixtures/p4-subagents.json");
+    let script = std::fs::read_to_string(fixture).unwrap();
+
+    let run = coordinator(tmp.path(), &service, &script, StopAt::Never, 10)
+        .run(&session.id, &agent.id, "summarise the repo")
+        .await
+        .unwrap();
+
+    assert_eq!(run.stop, StopReason::Completed);
+    assert_eq!(run.steps, 3, "spawn, collect, answer");
+    assert_eq!(run.usage.cost_micros, 1_000);
+    let turns = service.transcript(&session.id).await.unwrap();
+    assert_eq!(turns.len(), 3, "parent plus two children");
+    let children: Vec<_> = turns
+        .iter()
+        .filter(|entry| entry.turn.parent_turn_id.as_deref() == Some(run.turn.id.as_str()))
+        .collect();
+    assert_eq!(children.len(), 2);
+    assert!(
+        children
+            .iter()
+            .all(|entry| entry.turn.status == "completed")
+    );
 }
 
 #[derive(Default)]
@@ -826,7 +1018,8 @@ impl Model for RecordingModel {
         self.systems.lock().unwrap().push(system.clone());
 
         if system.contains("You are Rigel's native agent") {
-            if self.parent_calls.fetch_add(1, Ordering::SeqCst) == 0 {
+            let call = self.parent_calls.fetch_add(1, Ordering::SeqCst);
+            if call == 0 {
                 on_delta(Delta::Text(
                     "Spawning two readers.
 "
@@ -844,6 +1037,14 @@ impl Model for RecordingModel {
                     id: Some("call_0".to_string()),
                     name: Some("spawn_agents".to_string()),
                     arguments,
+                });
+            } else if call == 1 {
+                on_delta(Delta::Text("Collecting the readers.\n".to_string()));
+                on_delta(Delta::ToolCall {
+                    index: 0,
+                    id: Some("call_1".to_string()),
+                    name: Some("subagent_results".to_string()),
+                    arguments: serde_json::json!({ "timeout_secs": 10 }).to_string(),
                 });
             } else {
                 on_delta(Delta::Text(
@@ -900,8 +1101,9 @@ async fn children_see_their_files_and_the_shared_board() {
         max_steps: 10,
         subagents: rigel_core::agent::SubagentPolicy::default(),
         depth: 0,
-        parent_cancel: None,
         worktree_dir: None,
+        chat_parent: None,
+        parent_cancel: None,
     }
     .run(&session.id, &agent.id, "work")
     .await
@@ -909,6 +1111,20 @@ async fn children_see_their_files_and_the_shared_board() {
 
     assert_eq!(run.stop, StopReason::Completed);
     let systems = model.systems.lock().unwrap();
+    let parent = systems
+        .iter()
+        .find(|system| system.contains("You are Rigel's native agent"))
+        .expect("the coordinator was prompted");
+    assert!(
+        parent.contains("Session chat: you are @worker-"),
+        "the coordinator is told its own room name: {parent}"
+    );
+    assert!(
+        parent.contains("chat_read")
+            && parent.contains("chat_send")
+            && parent.contains("chat_wait"),
+        "the coordinator is given the chat tools in its prompt"
+    );
     let children: Vec<&String> = systems
         .iter()
         .filter(|system| system.contains("You are a read-only subagent"))
@@ -918,6 +1134,14 @@ async fn children_see_their_files_and_the_shared_board() {
         assert!(
             child.contains("Your assignment from the coordinator:"),
             "a child is told what it owns: {child}"
+        );
+        assert!(
+            child.contains("Your parent is @worker-"),
+            "a child is told who to answer: {child}"
+        );
+        assert!(
+            child.contains("Teammates:") && child.contains("chat_wait"),
+            "a child is told how to talk to its peers: {child}"
         );
         assert!(child.contains("Working on:"), "the answer format is stated");
         assert!(
@@ -978,8 +1202,9 @@ async fn a_note_the_user_left_on_the_last_turn_reaches_the_next_prompt() {
         max_steps: 10,
         subagents: rigel_core::agent::SubagentPolicy::default(),
         depth: 0,
-        parent_cancel: None,
         worktree_dir: None,
+        chat_parent: None,
+        parent_cancel: None,
     };
     let first = coordinator
         .run(&session.id, &agent.id, "split the work")
@@ -1064,8 +1289,9 @@ async fn stopping_a_parent_stops_the_children_it_spawned() {
         max_steps: 10,
         subagents: rigel_core::agent::SubagentPolicy::default(),
         depth: 0,
-        parent_cancel: None,
         worktree_dir: None,
+        chat_parent: None,
+        parent_cancel: None,
     }
     .run(&session.id, &agent.id, "work")
     .await
@@ -1199,8 +1425,9 @@ async fn the_coordinators_effort_reaches_every_step_request() {
         max_steps: 3,
         subagents: rigel_core::agent::SubagentPolicy::default(),
         depth: 0,
-        parent_cancel: None,
         worktree_dir: None,
+        chat_parent: None,
+        parent_cancel: None,
     }
     .run(&session.id, &agent.id, "say done")
     .await
