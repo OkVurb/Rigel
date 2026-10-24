@@ -1684,9 +1684,8 @@ mod tests {
         let directory = outside.path().join("folder");
         fs::create_dir_all(&directory).unwrap();
 
-        let error =
-            attachment_import(path_string(project.path()), vec![path_string(&directory)])
-                .expect_err("a directory must be refused");
+        let error = attachment_import(path_string(project.path()), vec![path_string(&directory)])
+            .expect_err("a directory must be refused");
 
         assert!(error.contains("is not a file"), "{error}");
     }
