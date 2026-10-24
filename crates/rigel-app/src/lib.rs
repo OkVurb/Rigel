@@ -17,6 +17,7 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use rigel_core::agent::approval::{ApprovalBus, PendingApproval};
 use rigel_core::agent::{Cancels, Coordinator, DEFAULT_MAX_STEPS, fixed_context_chars};
@@ -31,6 +32,8 @@ use rigel_core::{
     apply_review, credentials, diagnostics, skills::search::SearchHit,
 };
 use serde::{Deserialize, Serialize};
+use tauri::menu::{Menu, MenuItem};
+use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
 use tauri::{Emitter, Manager, State};
 
 mod claude;
@@ -2195,7 +2198,7 @@ async fn update_install(app: tauri::AppHandle) -> Result<String, String> {
     let handle = app.clone();
     std::thread::spawn(move || {
         std::thread::sleep(std::time::Duration::from_secs(1));
-        handle.exit(0);
+        quit(&handle);
     });
     Ok(format!(
         "Installing {} — Rigel will close while the installer runs.",
@@ -2342,6 +2345,63 @@ fn servers_start(project: Option<String>) {
     warm_chat(project);
 }
 
+/// A close request hides the window rather than quitting while the tray exists. The flag flips
+/// only when the tray was built, so a platform that refuses a tray keeps a working close button
+/// instead of stranding a hidden process with no way back.
+static TRAY_READY: AtomicBool = AtomicBool::new(false);
+/// Set by the tray's Quit item and by an update that needs the executable replaced. A close
+/// request is allowed through once this is true, so shutdown is never trapped by the hide.
+static SHUTTING_DOWN: AtomicBool = AtomicBool::new(false);
+
+fn show_main_window(app: &tauri::AppHandle) {
+    if let Some(window) = app.get_webview_window("main") {
+        let _ = window.show();
+        let _ = window.unminimize();
+        let _ = window.set_focus();
+    }
+}
+
+/// Quit through the same path the tray uses, so an updater-triggered exit is not swallowed by
+/// the close-to-tray handler.
+fn quit(app: &tauri::AppHandle) {
+    SHUTTING_DOWN.store(true, Ordering::SeqCst);
+    app.exit(0);
+}
+
+/// The tray is the way back to a hidden window and the only way to stop the agents while the
+/// window is closed. Its menu is deliberately two items: reopen, or really quit.
+fn install_tray(app: &tauri::AppHandle) -> tauri::Result<()> {
+    let open = MenuItem::with_id(app, "open", "Open Rigel", true, None::<&str>)?;
+    let quit_item = MenuItem::with_id(app, "quit", "Quit Rigel", true, None::<&str>)?;
+    let menu = Menu::with_items(app, &[&open, &quit_item])?;
+
+    let mut builder = TrayIconBuilder::with_id("rigel")
+        .tooltip("Rigel — closing the window keeps agents running")
+        .menu(&menu)
+        .show_menu_on_left_click(false)
+        .on_menu_event(|app, event| match event.id.as_ref() {
+            "open" => show_main_window(app),
+            "quit" => quit(app),
+            _ => {}
+        })
+        .on_tray_icon_event(|tray, event| {
+            if let TrayIconEvent::Click {
+                button: MouseButton::Left,
+                button_state: MouseButtonState::Up,
+                ..
+            } = event
+            {
+                show_main_window(tray.app_handle());
+            }
+        });
+    if let Some(icon) = app.default_window_icon() {
+        builder = builder.icon(icon.clone());
+    }
+    builder.build(app)?;
+    TRAY_READY.store(true, Ordering::SeqCst);
+    Ok(())
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     // D82: a panic writes a redacted record beside the app data before the window disappears.
@@ -2358,12 +2418,23 @@ pub fn run() {
             if let Err(problem) = install_update_pubkey(app.handle()) {
                 eprintln!("rigel: update public key not installed: {problem}");
             }
+            if let Err(problem) = install_tray(app.handle()) {
+                eprintln!("rigel: tray icon not installed: {problem}");
+            }
             warm_router();
             spawn_conflict_watcher(app.handle().clone());
             Ok(())
         })
         .manage(AppRuntime {
             cancels: Arc::new(Cancels::new()),
+        })
+        .on_window_event(|window, event| {
+            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                if TRAY_READY.load(Ordering::SeqCst) && !SHUTTING_DOWN.load(Ordering::SeqCst) {
+                    api.prevent_close();
+                    let _ = window.hide();
+                }
+            }
         })
         .invoke_handler(tauri::generate_handler![
             project_open,

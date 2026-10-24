@@ -611,6 +611,32 @@ fn bundled_python(source: &Path) -> Option<PathBuf> {
     candidate.is_file().then_some(candidate)
 }
 
+/// `pythonw.exe` is the same interpreter with a GUI subsystem: Windows cannot give it a console
+/// window, even if the parent's launch flags would allow one. The chat server never needs a
+/// console; the harness wrappers still use `python.exe` because they inject keystrokes through
+/// their hidden console.
+#[cfg(windows)]
+fn bundled_python_windowless(source: &Path) -> Option<PathBuf> {
+    let candidate = source.join("python/pythonw.exe");
+    candidate.is_file().then_some(candidate)
+}
+
+#[cfg(not(windows))]
+fn bundled_python_windowless(source: &Path) -> Option<PathBuf> {
+    bundled_python(source)
+}
+
+/// The interpreter for the server itself. A bundled sidecar has `pythonw.exe`; a developer
+/// checkout falls back to the ordinary interpreter.
+fn server_python(dir: &Path) -> Option<PathBuf> {
+    if let Some(sidecar) = sidecar().filter(|sidecar| sidecar.dir == dir) {
+        if let Some(python) = bundled_python_windowless(&sidecar.source) {
+            return Some(python);
+        }
+    }
+    chat_python(dir)
+}
+
 /// A developer checkout's `.venv` first, then the runtime that ships with the app, then PATH.
 /// The bundled interpreter only runs the bundled copy: a foreign checkout has its own pins.
 fn chat_python(dir: &Path) -> Option<PathBuf> {
@@ -657,11 +683,14 @@ fn which(program: &str) -> Option<std::path::PathBuf> {
 }
 
 fn spawn_server(dir: &std::path::Path) -> Result<(), String> {
-    let python = chat_python(dir).ok_or("no python found on PATH to boot the chat server")?;
+    let python = server_python(dir).ok_or("no python found on PATH to boot the chat server")?;
     let mut command = std::process::Command::new(python);
     command
         .arg("run.py")
         .current_dir(dir)
+        // The token is one printed line. pythonw is a GUI process, so keep stdout unbuffered
+        // long enough for the reader thread to see that line.
+        .env("PYTHONUNBUFFERED", "1")
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::null());
@@ -1495,6 +1524,25 @@ label = "Phi4 (local)"
         std::fs::write(root.join("python/bin/python3"), "").expect("python");
         assert!(bundled_python(&root).is_some());
         assert!(bundled_python(&root.join("elsewhere")).is_none());
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn the_server_prefers_the_windowless_interpreter() {
+        let root = std::env::temp_dir().join(format!(
+            "rigel-pythonw-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        std::fs::create_dir_all(root.join("python")).expect("python dir");
+        std::fs::write(root.join("python/python.exe"), "").expect("python");
+        assert!(bundled_python_windowless(&root).is_none());
+        std::fs::write(root.join("python/pythonw.exe"), "").expect("pythonw");
+        assert_eq!(
+            bundled_python_windowless(&root),
+            Some(root.join("python/pythonw.exe"))
+        );
         std::fs::remove_dir_all(&root).ok();
     }
 

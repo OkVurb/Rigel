@@ -83,6 +83,16 @@ exact command, runs only after approval, records decision, exit code and duratio
 it never runs a network install. Actions that need root are printed and refused, because Rigel never
 runs an elevation tool.
 
+## The window and the tray
+
+Closing the window hides it instead of ending the process: agents, chat wrappers and open PTYs
+keep running, and a tray icon opens the same window or quits. The tray is built before the close
+handler starts hiding anything; a machine where the tray cannot be created keeps Close as Quit so
+the app can never become an invisible orphan. The explicit Quit path sets the shutdown flag first,
+which is also how an update install is allowed to close the window it is replacing. On Windows the
+chat server starts under `pythonw.exe` with unbuffered stdout, so the sidecar's console never
+appears while its session-token line is still read normally.
+
 ## Updates
 
 `update.rs` is the only update code. Updates are on by default: the window checks
