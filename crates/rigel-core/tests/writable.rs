@@ -129,6 +129,25 @@ fn spawn_item<'a>(
         .body["result"]
 }
 
+/// What `subagent_results` returned: the collected answers, which is where a background
+/// child's changed files and review flag appear now that `spawn_agents` returns early.
+fn results_item<'a>(
+    transcript: &'a [rigel_core::TurnTranscript],
+    turn_id: &str,
+) -> &'a serde_json::Value {
+    &transcript
+        .iter()
+        .find(|entry| entry.turn.id == turn_id)
+        .expect("the parent turn is in the transcript")
+        .items
+        .iter()
+        .find(|item| {
+            item.body.get("tool").and_then(|tool| tool.as_str()) == Some("subagent_results")
+        })
+        .expect("the collection call is in the transcript")
+        .body["result"]
+}
+
 #[tokio::test]
 async fn a_writable_child_edits_its_worktree_and_lands_only_through_review() {
     let tmp = repo();
@@ -141,49 +160,119 @@ async fn a_writable_child_edits_its_worktree_and_lands_only_through_review() {
         .unwrap();
 
     let script = r#"{
-      "steps": [
+  "steps": [
+    {
+      "text": "Spawning a writer.\n",
+      "tool_calls": [
         {
-          "text": "Spawning a writer.\n",
-          "tool_calls": [{ "name": "spawn_agents", "arguments": { "agents": [
-            { "role": "writer", "files": ["src/lib.rs", "src/notes.rs"],
-              "prompt": "Add a doc comment to add() and a short notes file.",
-              "task": "document add", "mode": "write",
-              "plan": "1. add one doc comment above add()\n2. change nothing else" }
-          ] } }],
-          "usage": { "input_tokens": 100, "output_tokens": 20, "cost_usd": 0.0002 }
-        },
+          "name": "spawn_agents",
+          "arguments": {
+            "agents": [
+              {
+                "role": "writer",
+                "files": [
+                  "src/lib.rs",
+                  "src/notes.rs"
+                ],
+                "prompt": "Add a doc comment to add() and a short notes file.",
+                "task": "document add",
+                "mode": "write",
+                "plan": "1. add one doc comment above add()\n2. change nothing else"
+              }
+            ]
+          }
+        }
+      ],
+      "usage": {
+        "input_tokens": 100,
+        "output_tokens": 20,
+        "cost_usd": 0.0002
+      }
+    },
+    {
+      "tool_calls": [
         {
-          "tool_calls": [
-            { "name": "read_file", "arguments": { "path": "src/lib.rs" } },
-            { "name": "edit_file", "arguments": {
-              "path": "src/lib.rs",
-              "old_string": "pub fn add(a: i32, b: i32) -> i32 {",
-              "new_string": "/// Adds two numbers.\npub fn add(a: i32, b: i32) -> i32 {" } },
-            { "name": "write_file", "arguments": {
-              "path": "src/notes.rs",
-              "content": "//! Why the add helper is documented.\n" } }
-          ],
-          "usage": { "input_tokens": 80, "output_tokens": 20, "cost_usd": 0.0001 }
-        },
-        {
-          "text": "Working on: src/lib.rs\nAdded the doc comment.\n",
-          "usage": { "input_tokens": 40, "output_tokens": 10, "cost_usd": 0.0001 }
-        },
-        {
-          "text": "The writer is done; merging.\n",
-          "tool_calls": [{ "name": "merge_subagent", "arguments": { "role": "writer" } }],
-          "usage": { "input_tokens": 100, "output_tokens": 20, "cost_usd": 0.0002 }
-        },
-        {
-          "text": "APPROVE\nOne doc comment, one file, no behavior change.\n",
-          "usage": { "input_tokens": 300, "output_tokens": 20, "cost_usd": 0.0001 }
-        },
-        {
-          "text": "Merged the writer's change; the main tree now has the comment.\n",
-          "usage": { "input_tokens": 40, "output_tokens": 10, "cost_usd": 0.0001 }
+          "name": "subagent_results",
+          "arguments": {
+            "timeout_secs": 30
+          }
         }
       ]
-    }"#;
+    },
+    {
+      "text": "The writer is done; merging.\n",
+      "tool_calls": [
+        {
+          "name": "merge_subagent",
+          "arguments": {
+            "role": "writer"
+          }
+        }
+      ],
+      "usage": {
+        "input_tokens": 100,
+        "output_tokens": 20,
+        "cost_usd": 0.0002
+      }
+    },
+    {
+      "text": "APPROVE\nOne doc comment, one file, no behavior change.\n",
+      "usage": {
+        "input_tokens": 300,
+        "output_tokens": 20,
+        "cost_usd": 0.0001
+      }
+    },
+    {
+      "text": "Merged the writer's change; the main tree now has the comment.\n",
+      "usage": {
+        "input_tokens": 40,
+        "output_tokens": 10,
+        "cost_usd": 0.0001
+      }
+    }
+  ],
+  "subagent_steps": [
+    {
+      "tool_calls": [
+        {
+          "name": "read_file",
+          "arguments": {
+            "path": "src/lib.rs"
+          }
+        },
+        {
+          "name": "edit_file",
+          "arguments": {
+            "path": "src/lib.rs",
+            "old_string": "pub fn add(a: i32, b: i32) -> i32 {",
+            "new_string": "/// Adds two numbers.\npub fn add(a: i32, b: i32) -> i32 {"
+          }
+        },
+        {
+          "name": "write_file",
+          "arguments": {
+            "path": "src/notes.rs",
+            "content": "//! Why the add helper is documented.\n"
+          }
+        }
+      ],
+      "usage": {
+        "input_tokens": 80,
+        "output_tokens": 20,
+        "cost_usd": 0.0001
+      }
+    },
+    {
+      "text": "Working on: src/lib.rs\nAdded the doc comment.\n",
+      "usage": {
+        "input_tokens": 40,
+        "output_tokens": 10,
+        "cost_usd": 0.0001
+      }
+    }
+  ]
+}"#;
 
     let run = coordinator(
         tmp.path(),
@@ -221,8 +310,8 @@ async fn a_writable_child_edits_its_worktree_and_lands_only_through_review() {
     );
 
     let transcript = service.transcript(&session.id).await.unwrap();
-    let spawn = spawn_item(&transcript, &run.turn.id);
-    let returned = spawn["agents"].as_array().unwrap();
+    let collected = results_item(&transcript, &run.turn.id);
+    let returned = collected["agents"].as_array().unwrap();
     assert_eq!(returned[0]["mode"], "write");
     let mut changed: Vec<&str> = returned[0]["changed"]
         .as_array()
@@ -386,48 +475,135 @@ async fn a_blocked_review_needs_a_recorded_override_to_merge() {
         .unwrap();
 
     let script = r#"{
-      "steps": [
+  "steps": [
+    {
+      "text": "Spawning a writer.\n",
+      "tool_calls": [
         {
-          "text": "Spawning a writer.\n",
-          "tool_calls": [{ "name": "spawn_agents", "arguments": { "agents": [
-            { "role": "writer", "files": ["src/lib.rs"], "prompt": "Add a comment.",
-              "mode": "write", "plan": "1. add a comment" }
-          ] } }],
-          "usage": { "input_tokens": 100, "output_tokens": 20, "cost_usd": 0.0002 }
-        },
+          "name": "spawn_agents",
+          "arguments": {
+            "agents": [
+              {
+                "role": "writer",
+                "files": [
+                  "src/lib.rs"
+                ],
+                "prompt": "Add a comment.",
+                "mode": "write",
+                "plan": "1. add a comment"
+              }
+            ]
+          }
+        }
+      ],
+      "usage": {
+        "input_tokens": 100,
+        "output_tokens": 20,
+        "cost_usd": 0.0002
+      }
+    },
+    {
+      "tool_calls": [
         {
-          "tool_calls": [
-            { "name": "read_file", "arguments": { "path": "src/lib.rs" } },
-            { "name": "edit_file", "arguments": {
-              "path": "src/lib.rs",
-              "old_string": "pub fn add(a: i32, b: i32) -> i32 {",
-              "new_string": "/// Adds two numbers.\npub fn add(a: i32, b: i32) -> i32 {" } }
-          ],
-          "usage": { "input_tokens": 80, "output_tokens": 20, "cost_usd": 0.0001 }
-        },
-        { "text": "Working on: src/lib.rs\nDone.\n",
-          "usage": { "input_tokens": 40, "output_tokens": 10, "cost_usd": 0.0001 } },
+          "name": "subagent_results",
+          "arguments": {
+            "timeout_secs": 30
+          }
+        }
+      ]
+    },
+    {
+      "text": "Trying to merge.\n",
+      "tool_calls": [
         {
-          "text": "Trying to merge.\n",
-          "tool_calls": [{ "name": "merge_subagent", "arguments": { "role": "writer" } }],
-          "usage": { "input_tokens": 100, "output_tokens": 20, "cost_usd": 0.0002 }
-        },
-        { "text": "BLOCK\nA new public doc comment with no test of the documented claim.\n",
-          "usage": { "input_tokens": 300, "output_tokens": 20, "cost_usd": 0.0001 } },
+          "name": "merge_subagent",
+          "arguments": {
+            "role": "writer"
+          }
+        }
+      ],
+      "usage": {
+        "input_tokens": 100,
+        "output_tokens": 20,
+        "cost_usd": 0.0002
+      }
+    },
+    {
+      "text": "BLOCK\nA new public doc comment with no test of the documented claim.\n",
+      "usage": {
+        "input_tokens": 300,
+        "output_tokens": 20,
+        "cost_usd": 0.0001
+      }
+    },
+    {
+      "text": "Overriding with a reason.\n",
+      "tool_calls": [
         {
-          "text": "Overriding with a reason.\n",
-          "tool_calls": [{ "name": "merge_subagent", "arguments": {
+          "name": "merge_subagent",
+          "arguments": {
             "role": "writer",
             "override_reason": "the change is one comment and the caller asked for exactly this"
-          } }],
-          "usage": { "input_tokens": 100, "output_tokens": 20, "cost_usd": 0.0002 }
+          }
+        }
+      ],
+      "usage": {
+        "input_tokens": 100,
+        "output_tokens": 20,
+        "cost_usd": 0.0002
+      }
+    },
+    {
+      "text": "BLOCK\nStill only a comment.\n",
+      "usage": {
+        "input_tokens": 300,
+        "output_tokens": 20,
+        "cost_usd": 0.0001
+      }
+    },
+    {
+      "text": "Merged under the recorded override.\n",
+      "usage": {
+        "input_tokens": 40,
+        "output_tokens": 10,
+        "cost_usd": 0.0001
+      }
+    }
+  ],
+  "subagent_steps": [
+    {
+      "tool_calls": [
+        {
+          "name": "read_file",
+          "arguments": {
+            "path": "src/lib.rs"
+          }
         },
-        { "text": "BLOCK\nStill only a comment.\n",
-          "usage": { "input_tokens": 300, "output_tokens": 20, "cost_usd": 0.0001 } },
-        { "text": "Merged under the recorded override.\n",
-          "usage": { "input_tokens": 40, "output_tokens": 10, "cost_usd": 0.0001 } }
-      ]
-    }"#;
+        {
+          "name": "edit_file",
+          "arguments": {
+            "path": "src/lib.rs",
+            "old_string": "pub fn add(a: i32, b: i32) -> i32 {",
+            "new_string": "/// Adds two numbers.\npub fn add(a: i32, b: i32) -> i32 {"
+          }
+        }
+      ],
+      "usage": {
+        "input_tokens": 80,
+        "output_tokens": 20,
+        "cost_usd": 0.0001
+      }
+    },
+    {
+      "text": "Working on: src/lib.rs\nDone.\n",
+      "usage": {
+        "input_tokens": 40,
+        "output_tokens": 10,
+        "cost_usd": 0.0001
+      }
+    }
+  ]
+}"#;
 
     let run = coordinator(
         tmp.path(),
@@ -501,31 +677,86 @@ async fn a_pending_worktree_diff_reads_without_writing_the_main_tree() {
         .unwrap();
 
     let script = r#"{
-      "steps": [
+  "steps": [
+    {
+      "text": "Spawning a writer.\n",
+      "tool_calls": [
         {
-          "text": "Spawning a writer.\n",
-          "tool_calls": [{ "name": "spawn_agents", "arguments": { "agents": [
-            { "role": "writer", "files": ["src/lib.rs"], "prompt": "Add a comment.",
-              "mode": "write", "plan": "1. add one doc comment above add()" }
-          ] } }],
-          "usage": { "input_tokens": 100, "output_tokens": 20, "cost_usd": 0.0002 }
-        },
+          "name": "spawn_agents",
+          "arguments": {
+            "agents": [
+              {
+                "role": "writer",
+                "files": [
+                  "src/lib.rs"
+                ],
+                "prompt": "Add a comment.",
+                "mode": "write",
+                "plan": "1. add one doc comment above add()"
+              }
+            ]
+          }
+        }
+      ],
+      "usage": {
+        "input_tokens": 100,
+        "output_tokens": 20,
+        "cost_usd": 0.0002
+      }
+    },
+    {
+      "tool_calls": [
         {
-          "tool_calls": [
-            { "name": "read_file", "arguments": { "path": "src/lib.rs" } },
-            { "name": "edit_file", "arguments": {
-              "path": "src/lib.rs",
-              "old_string": "pub fn add(a: i32, b: i32) -> i32 {",
-              "new_string": "/// Adds two numbers.\npub fn add(a: i32, b: i32) -> i32 {" } }
-          ],
-          "usage": { "input_tokens": 80, "output_tokens": 20, "cost_usd": 0.0001 }
-        },
-        { "text": "I left the change in its worktree.\n",
-          "usage": { "input_tokens": 40, "output_tokens": 10, "cost_usd": 0.0001 } },
-        { "text": "Waiting for the merge decision.\n",
-          "usage": { "input_tokens": 40, "output_tokens": 10, "cost_usd": 0.0001 } }
+          "name": "subagent_results",
+          "arguments": {
+            "timeout_secs": 30
+          }
+        }
       ]
-    }"#;
+    },
+    {
+      "text": "Waiting for the merge decision.\n",
+      "usage": {
+        "input_tokens": 40,
+        "output_tokens": 10,
+        "cost_usd": 0.0001
+      }
+    }
+  ],
+  "subagent_steps": [
+    {
+      "tool_calls": [
+        {
+          "name": "read_file",
+          "arguments": {
+            "path": "src/lib.rs"
+          }
+        },
+        {
+          "name": "edit_file",
+          "arguments": {
+            "path": "src/lib.rs",
+            "old_string": "pub fn add(a: i32, b: i32) -> i32 {",
+            "new_string": "/// Adds two numbers.\npub fn add(a: i32, b: i32) -> i32 {"
+          }
+        }
+      ],
+      "usage": {
+        "input_tokens": 80,
+        "output_tokens": 20,
+        "cost_usd": 0.0001
+      }
+    },
+    {
+      "text": "I left the change in its worktree.\n",
+      "usage": {
+        "input_tokens": 40,
+        "output_tokens": 10,
+        "cost_usd": 0.0001
+      }
+    }
+  ]
+}"#;
 
     let run = coordinator(
         tmp.path(),
@@ -669,26 +900,81 @@ const PENDING_SCRIPT: &str = r#"{
   "steps": [
     {
       "text": "Spawning a writer.\n",
-      "tool_calls": [{ "name": "spawn_agents", "arguments": { "agents": [
-        { "role": "writer", "files": ["src/lib.rs"], "prompt": "Add a comment.",
-          "mode": "write", "plan": "1. add one doc comment above add()" }
-      ] } }],
-      "usage": { "input_tokens": 100, "output_tokens": 20, "cost_usd": 0.0002 }
+      "tool_calls": [
+        {
+          "name": "spawn_agents",
+          "arguments": {
+            "agents": [
+              {
+                "role": "writer",
+                "files": [
+                  "src/lib.rs"
+                ],
+                "prompt": "Add a comment.",
+                "mode": "write",
+                "plan": "1. add one doc comment above add()"
+              }
+            ]
+          }
+        }
+      ],
+      "usage": {
+        "input_tokens": 100,
+        "output_tokens": 20,
+        "cost_usd": 0.0002
+      }
     },
     {
       "tool_calls": [
-        { "name": "read_file", "arguments": { "path": "src/lib.rs" } },
-        { "name": "edit_file", "arguments": {
-          "path": "src/lib.rs",
-          "old_string": "pub fn add(a: i32, b: i32) -> i32 {",
-          "new_string": "/// Adds two numbers.\npub fn add(a: i32, b: i32) -> i32 {" } }
-      ],
-      "usage": { "input_tokens": 80, "output_tokens": 20, "cost_usd": 0.0001 }
+        {
+          "name": "subagent_results",
+          "arguments": {
+            "timeout_secs": 30
+          }
+        }
+      ]
     },
-    { "text": "I left the change in its worktree.\n",
-      "usage": { "input_tokens": 40, "output_tokens": 10, "cost_usd": 0.0001 } },
-    { "text": "Waiting for the merge decision.\n",
-      "usage": { "input_tokens": 40, "output_tokens": 10, "cost_usd": 0.0001 } }
+    {
+      "text": "Waiting for the merge decision.\n",
+      "usage": {
+        "input_tokens": 40,
+        "output_tokens": 10,
+        "cost_usd": 0.0001
+      }
+    }
+  ],
+  "subagent_steps": [
+    {
+      "tool_calls": [
+        {
+          "name": "read_file",
+          "arguments": {
+            "path": "src/lib.rs"
+          }
+        },
+        {
+          "name": "edit_file",
+          "arguments": {
+            "path": "src/lib.rs",
+            "old_string": "pub fn add(a: i32, b: i32) -> i32 {",
+            "new_string": "/// Adds two numbers.\npub fn add(a: i32, b: i32) -> i32 {"
+          }
+        }
+      ],
+      "usage": {
+        "input_tokens": 80,
+        "output_tokens": 20,
+        "cost_usd": 0.0001
+      }
+    },
+    {
+      "text": "I left the change in its worktree.\n",
+      "usage": {
+        "input_tokens": 40,
+        "output_tokens": 10,
+        "cost_usd": 0.0001
+      }
+    }
   ]
 }"#;
 
