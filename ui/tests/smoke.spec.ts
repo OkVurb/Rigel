@@ -24,6 +24,10 @@ test("every surface renders from the rail", async ({ page }) => {
   await expect(page.getByRole("region", { name: "Conflicts" })).toBeVisible();
   await expect(page.getByText("SUBAGENT WORKTREES")).toBeVisible();
 
+  await page.getByRole("button", { name: "Terminal" }).click();
+  await expect(page.getByRole("heading", { name: "Terminal", exact: true }).first()).toBeVisible();
+  await expect(page.getByText("The browser preview has no PTY.")).toBeVisible();
+
   await page.getByRole("button", { name: "Settings" }).click();
   await expect(page.getByRole("heading", { name: "Providers and keys" })).toBeVisible();
   await expect(page.getByRole("heading", { name: "MODEL AND EFFORT" })).toBeVisible();

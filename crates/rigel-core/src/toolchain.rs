@@ -468,13 +468,13 @@ impl Environment for SystemEnvironment {
     async fn version(&self, exe: &Path, args: &[&str]) -> Option<String> {
         // A version probe is a promise the tool keeps quickly or not at all. Two seconds is
         // the same budget the harness probe uses.
-        let output = tokio::time::timeout(
-            Duration::from_secs(2),
-            tokio::process::Command::new(exe).args(args).output(),
-        )
-        .await
-        .ok()?
-        .ok()?;
+        let mut probe = tokio::process::Command::new(exe);
+        probe.args(args);
+        crate::process::hide_tokio(&mut probe);
+        let output = tokio::time::timeout(Duration::from_secs(2), probe.output())
+            .await
+            .ok()?
+            .ok()?;
         let text = if output.stdout.is_empty() {
             String::from_utf8_lossy(&output.stderr).to_string()
         } else {
@@ -1695,6 +1695,7 @@ impl Runner for SystemRunner {
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
             .kill_on_drop(true);
+        crate::process::hide_tokio(&mut process);
 
         let started = Instant::now();
         let child = match process.spawn() {

@@ -412,13 +412,15 @@ export default function SettingsView({ keys, project, session, onKeys, onNotice 
     }
   };
 
-  const saveModel = async (model: string, effort: string) => {
+  const saveModel = async (model: string, effort: string, provider?: string) => {
     if (!settings) return;
-    const next = { ...settings, model, effort };
+    const next = { ...settings, model, effort, ...(provider ? { provider } : {}) };
     setSettings(next);
     try {
       setSettings(await api.saveSettings(next));
-      onNotice(`Default model: ${model} · ${effort} effort.`);
+      onNotice(
+        `Default model: ${model} · ${effort} effort${provider ? ` · ${provider}` : ""}.`,
+      );
     } catch (problem) {
       setError(problem instanceof Error ? problem.message : String(problem));
     }
@@ -900,11 +902,14 @@ export default function SettingsView({ keys, project, session, onKeys, onNotice 
             model={settings?.model ?? "gpt-5.6-sol-medium"}
             effort={settings?.effort ?? "medium"}
             disabled={!settings}
-            onModel={(model) => void saveModel(model, settings?.effort ?? "medium")}
+            onModel={(model, provider) =>
+              void saveModel(model, settings?.effort ?? "medium", provider)
+            }
             onEffort={(effort) => void saveModel(settings?.model ?? "gpt-5.6-sol-medium", effort)}
           />
           <p className="fine">
-            Saved as the default for native turns. Effort is sent separately as
+            Saved as the default for native turns. Picking a model also switches to the provider
+            that serves it, including OpenRouter's free roster. Effort is sent separately as
             <code> reasoning_effort</code>; it is not baked into the model id. Subagents stay on
             the cheap allowlist and cannot be pointed at an expensive model.
           </p>

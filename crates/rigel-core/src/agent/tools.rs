@@ -1150,6 +1150,7 @@ impl Tools {
             process.env_remove(name);
         }
 
+        crate::process::hide_tokio(&mut process);
         let started = Instant::now();
         let mut child = match process.spawn() {
             Ok(child) => child,

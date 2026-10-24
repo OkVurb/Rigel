@@ -604,6 +604,7 @@ impl Coordinator {
             session_id: session_id.to_string(),
             agent_id: agent_id.to_string(),
             turn_id: turn.id.clone(),
+            parent_turn_id: turn.parent_turn_id.clone(),
             seq: turn.seq,
             prompt: Some(prompt.to_string()),
         });

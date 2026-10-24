@@ -184,6 +184,26 @@ export interface PromptRefinement {
   model: string;
 }
 
+export interface ModelOption {
+  id: string;
+  provider: "openrouter" | "omniroute" | "gemini" | string;
+  name?: string | null;
+  free: boolean;
+}
+
+export interface TerminalInfo {
+  id: string;
+  shell: string;
+  cwd: string;
+}
+
+/** One chunk from the PTY, base64 so escape sequences and raw bytes survive the event. */
+export interface TerminalOutput {
+  id: string;
+  data: string;
+  exit: boolean;
+}
+
 export interface Turn {
   id: string;
   agent_id: string;
@@ -497,7 +517,15 @@ const PREVIEW_HARNESSES: HarnessInfo[] = [
 
 /** The serialised `AgentEvent`; `type` is the discriminator. */
 export type AgentEvent =
-  | { type: "turn_started"; session_id: string; agent_id: string; turn_id: string; seq: number; prompt: string | null }
+  | {
+      type: "turn_started";
+      session_id: string;
+      agent_id: string;
+      turn_id: string;
+      parent_turn_id: string | null;
+      seq: number;
+      prompt: string | null;
+    }
   | { type: "delta"; turn_id: string; kind: string; text: string }
   | { type: "item"; item: Item }
   | { type: "turn_finished"; turn_id: string; status: string; stop: string; usage: Usage; session_spend_micros: number; cap_micros: number | null }
@@ -816,6 +844,12 @@ export const api = {
     const { open } = await import("@tauri-apps/plugin-dialog");
     const picked = await open({ directory: true, multiple: false, title: "Open a project folder" });
     return typeof picked === "string" ? picked : null;
+  },
+
+  /** Copy files chosen in the native picker into `.rigel/attachments`, returning relative paths. */
+  async importAttachments(project: string, paths: string[]): Promise<string[]> {
+    if (!isTauri()) return [];
+    return call<string[]>("attachment_import", { project, paths });
   },
 
   /** Create a folder under the workspace root and open it. */
@@ -1252,18 +1286,17 @@ export const api = {
     return call<DiagnosticsBundle>("diagnostics_export", { project, session });
   },
 
-  /** The provider's live model catalogue for the picker. */
-  async listModels(): Promise<string[]> {
+  /** The merged model catalogue for the picker: the current provider first, then OpenRouter. */
+  async listModels(): Promise<ModelOption[]> {
     if (!isTauri()) {
       return [
-        "gpt-5.6-sol-low",
-        "gpt-5.6-sol-medium",
-        "gpt-5.6-sol-high",
-        "openai/gpt-4.1-mini",
-        "anthropic/claude-sonnet-4.5",
+        { id: "gpt-5.6-sol-medium", provider: "omniroute", free: false },
+        { id: "openai/gpt-4.1-mini", provider: "openrouter", free: false },
+        { id: "baseten/mammoth-1:free", provider: "openrouter", free: true },
+        { id: "anthropic/claude-sonnet-4.5", provider: "openrouter", free: false },
       ];
     }
-    return call<string[]>("models_list");
+    return call<ModelOption[]>("models_list");
   },
 
   /** The vendor chat server the Chat tab fronts. Same boundary as the router above. */
@@ -1346,6 +1379,33 @@ export const api = {
     async stopAgent(name: string): Promise<string> {
       if (!isTauri()) throw new Error("Stop agents from the desktop app, not the browser preview.");
       return call<string>("chat_stop_agent", { name });
+    },
+  },
+
+  /** The integrated terminal: a real PTY owned by Rust, streamed to xterm.js. */
+  terminal: {
+    async open(
+      project: string | null,
+      cols: number,
+      rows: number,
+    ): Promise<TerminalInfo> {
+      if (!isTauri()) throw new Error("The terminal runs in the desktop app, not the browser preview.");
+      return call<TerminalInfo>("terminal_open", { project, cols, rows });
+    },
+
+    async write(id: string, data: string): Promise<void> {
+      if (!isTauri()) return;
+      return call<void>("terminal_write", { id, data });
+    },
+
+    async resize(id: string, cols: number, rows: number): Promise<void> {
+      if (!isTauri()) return;
+      return call<void>("terminal_resize", { id, cols, rows });
+    },
+
+    async close(id: string): Promise<void> {
+      if (!isTauri()) return;
+      return call<void>("terminal_close", { id });
     },
   },
 
