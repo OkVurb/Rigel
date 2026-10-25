@@ -20,7 +20,7 @@
  */
 
 import { spawnSync } from "node:child_process";
-import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -46,16 +46,6 @@ function git(args, allowFailure = false) {
     fail(`git ${args.join(" ")} failed${detail ? `:\n${detail}` : ""}`);
   }
   return result;
-}
-
-function run(command, args) {
-  const result = spawnSync(command, args, { cwd: ROOT, encoding: "utf8" });
-  if (result.error) fail(`could not run ${command}: ${result.error.message}`);
-  if (result.status !== 0) {
-    const detail = (result.stderr || result.stdout || "").trim();
-    fail(`${command} ${args.join(" ")} failed${detail ? `:\n${detail}` : ""}`);
-  }
-  return result.stdout;
 }
 
 /* ------------------------------------------------------------------ version */
@@ -146,9 +136,22 @@ function write_changelog(entry) {
 /* --------------------------------------------------------------- the other files */
 
 /// `set-release-version.mjs` is the single place that rewrites the three manifests, so the
-/// workflow's stamp and this script cannot disagree about what a release version touches.
+/// workflow's stamp and this script cannot disagree about what a release version touches. It
+/// throws rather than exits: this runs inside the bump's try, where a failure has to reach the
+/// rollback before the process ends, and the child's stack trace is noise next to its message.
 function stamp_manifests(version) {
-  run(process.execPath, [path.join(ROOT, "scripts", "set-release-version.mjs"), version]);
+  const script = path.join(ROOT, "scripts", "set-release-version.mjs");
+  const result = spawnSync(process.execPath, [script, version], {
+    cwd: ROOT,
+    encoding: "utf8",
+  });
+  if (result.error) throw new Error(`could not run ${script}: ${result.error.message}`);
+  if (result.status !== 0) {
+    const detail = (result.stderr || result.stdout || "").trim();
+    const reason =
+      /^Error:.*$/m.exec(detail)?.[0] ?? detail.split(/\r?\n/).slice(-6).join("\n");
+    throw new Error(`scripts/set-release-version.mjs failed${reason ? `: ${reason}` : ""}`);
+  }
 }
 
 /// npm records the package version in the lock's root and again under `packages[""]`. Editing
@@ -165,20 +168,41 @@ function stamp_package_lock(version) {
 }
 
 /// A workspace version bump makes Cargo.lock stale. `cargo metadata` refreshes just the lock,
-/// without building anything or resolving a new dependency.
+/// without building anything or resolving a new dependency. A failure throws so the bump can
+/// be rolled back instead of leaving the tree half-stamped.
 function stamp_cargo_lock() {
   const result = spawnSync("cargo", ["metadata", "--format-version", "1"], {
     cwd: ROOT,
-    stdio: "ignore",
+    stdio: ["ignore", "ignore", "pipe"],
+    encoding: "utf8",
     timeout: 180_000,
   });
   if (result.error || result.status !== 0) {
-    fail(
-      "could not refresh Cargo.lock with `cargo metadata`; the version files are already bumped, " +
-        "so fix cargo and rerun, or discard the bump with `git checkout -- Cargo.toml " +
-        "crates/rigel-app/tauri.conf.json ui/package.json`",
-    );
+    const detail = (result.stderr || "").trim();
+    throw new Error(`\`cargo metadata\` could not refresh Cargo.lock${detail ? `:\n${detail}` : ""}`);
   }
+}
+
+/// Undo every write a failed bump made. The tree was clean when the release started, so restoring
+/// the tracked files and removing (or restoring) CHANGELOG.md returns it exactly to that state.
+/// Telling the reader to run five checkouts by hand is how a half-bumped tree becomes a broken
+/// release; a rollback that cannot complete names every path it could not restore.
+function restore_bump(had_changelog) {
+  const tracked = [
+    "Cargo.toml",
+    "Cargo.lock",
+    "crates/rigel-app/tauri.conf.json",
+    "ui/package.json",
+    "ui/package-lock.json",
+  ];
+  git(["checkout", "--", ...tracked], true);
+  if (had_changelog) {
+    git(["checkout", "--", "CHANGELOG.md"], true);
+  } else {
+    rmSync(path.join(ROOT, "CHANGELOG.md"), { force: true });
+  }
+  const status = git(["status", "--porcelain"], true);
+  return status.status === 0 && status.stdout.trim() === "";
 }
 
 /* ---------------------------------------------------------------------- main */
@@ -257,10 +281,24 @@ if (spawnSync("cargo", ["--version"], { cwd: ROOT, stdio: "ignore" }).status !==
   fail("cargo is not on PATH; the workspace version cannot be stamped");
 }
 
-stamp_manifests(version);
-stamp_package_lock(version);
-stamp_cargo_lock();
-write_changelog(entry);
+const hadChangelog = existsSync(path.join(ROOT, "CHANGELOG.md"));
+try {
+  stamp_manifests(version);
+  stamp_package_lock(version);
+  stamp_cargo_lock();
+  write_changelog(entry);
+} catch (error) {
+  const restored = restore_bump(hadChangelog);
+  const reason = error instanceof Error ? error.message : String(error);
+  fail(
+    `${reason}\nrelease: ${
+      restored
+        ? "the version bump was rolled back; the tree is clean, so fix the cause and rerun"
+        : "the version bump could not be rolled back; restore Cargo.toml, Cargo.lock, " +
+          "crates/rigel-app/tauri.conf.json, ui/package.json, ui/package-lock.json and CHANGELOG.md"
+    }`,
+  );
+}
 
 const tracked = [
   "Cargo.toml",
