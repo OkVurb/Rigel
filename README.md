@@ -269,6 +269,7 @@ each surface and the evidence for it.
 | **Doctor** | One row per check and an exit code: `0` clear, `1` warnings, `2` failures |
 | **MCP** | A stdio host scoped to one session and one agent, sharing the same tools |
 | **Updates** | One signed check of the latest GitHub release, an artifact SHA-256 and Ed25519 check, and auto-install — both switches in Settings → Updates |
+| **Window** | Closing hides to the tray while agents and terminals keep running; the tray menu reopens or quits |
 
 The full table, including what is deliberately unfinished, is [docs/what-works.md](docs/what-works.md).
 

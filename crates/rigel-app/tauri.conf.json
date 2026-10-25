@@ -1,7 +1,7 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "Rigel",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "identifier": "dev.rigel.desktop",
   "build": {
     "frontendDist": "../../ui/dist",
@@ -49,7 +49,7 @@
     "copyright": "© 2026 Rigel contributors",
     "category": "DeveloperTool",
     "shortDescription": "One window for several coding agents on one project.",
-    "longDescription": "Rigel runs Codex, Claude Code, Cursor, Cline and its own coordinator against one working tree, and keeps the transcript, the claims, the merged diff and the bill in one place. Session logs stay local. Installs show their exact command first. Updates are off until you turn them on.",
+    "longDescription": "Rigel runs Codex, Claude Code, Cursor, Cline and its own coordinator against one working tree, and keeps the transcript, the claims, the merged diff and the bill in one place. Session logs stay local. Installs show their exact command first. Closing the window keeps the agents running in the tray. Updates check GitHub at launch and can be turned off in Settings.",
     "windows": {
       "webviewInstallMode": {
         "type": "downloadBootstrapper",
