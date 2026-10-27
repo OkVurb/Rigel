@@ -121,10 +121,15 @@ development build. Do not put the private seed in a tracked file. `scripts/sign-
 signs exactly the bytes `rigel-core::update::UpdateManifest::signed_bytes` verifies.
 
 ```bash
-# bump the version in the same commit as the feature, then tag it
-git tag v0.1.1
-git push origin v0.1.1
+# bump every manifest, write the changelog, commit, tag and push
+node scripts/release.mjs patch
 ```
+
+The script refuses a dirty tree, a branch other than `main`, a tag that already exists, and a
+release with no commits since the previous tag. `--dry-run` prints the version and the changelog
+bullets without changing anything; `--no-push` stops after the local commit and tag. A hand-written
+`git tag v1.2.3 && git push origin v1.2.3` still publishes a build, but skips the version bump and
+the changelog entry, so the tree no longer matches the tag.
 
 The release workflow publishes the tag. The app's next launch offers the update (or installs it if
 the second switch is on); the NSIS installer restarts the new build, and a per-machine MSI update
