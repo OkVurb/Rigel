@@ -1588,30 +1588,41 @@ label = "Phi4 (local)"
         std::fs::write(
             dir.join("wrapper.py"),
             r#"
-import ctypes, pathlib, sys, time
+import ctypes, pathlib, sys, time, traceback
 
-kernel32 = ctypes.windll.kernel32
-kernel32.CreateFileW.restype = ctypes.c_void_p
-# CONIN$ names the console the child owns, whatever handles it inherited. A writable console
-# input buffer with a console mode is exactly what the wrapper's WriteConsoleInput needs.
-conin = kernel32.CreateFileW("CONIN$", 0xC0000000, 3, None, 3, 0, None)
-mode = ctypes.c_uint(0)
-console_ok = (
-    1
-    if conin not in (None, 0, ctypes.c_void_p(-1).value)
-    and kernel32.GetConsoleMode(ctypes.c_void_p(conin), ctypes.byref(mode))
-    else 0
-)
-report = pathlib.Path(__file__).with_name("report.txt")
-staged = report.with_name("report.tmp")
-# Publish atomically: a reader must never see the empty file between create and write.
-staged.write_text(
-    "hwnd=%d\nconsole_ok=%d\nargv=%s\n"
-    % (kernel32.GetConsoleWindow(), console_ok, " ".join(sys.argv[1:])),
-    encoding="utf-8",
-)
-staged.replace(report)
-time.sleep(30)
+here = pathlib.Path(__file__).resolve().parent
+
+def publish(name, text):
+    # Publish atomically: a reader must never see the empty file between create and write.
+    target = here / name
+    staged = here / (name + ".tmp")
+    staged.write_text(text, encoding="utf-8")
+    staged.replace(target)
+
+try:
+    kernel32 = ctypes.windll.kernel32
+    kernel32.CreateFileW.restype = ctypes.c_void_p
+    # CONIN$ names the console the child owns, whatever handles it inherited. A writable console
+    # input buffer with a console mode is exactly what the wrapper's WriteConsoleInput needs.
+    conin = kernel32.CreateFileW("CONIN$", 0xC0000000, 3, None, 3, 0, None)
+    mode = ctypes.c_uint(0)
+    console_ok = (
+        1
+        if conin not in (None, 0, ctypes.c_void_p(-1).value)
+        and kernel32.GetConsoleMode(ctypes.c_void_p(conin), ctypes.byref(mode))
+        else 0
+    )
+    publish(
+        "report.txt",
+        "hwnd=%d\nconsole_ok=%d\nargv=%s\n"
+        % (kernel32.GetConsoleWindow(), console_ok, " ".join(sys.argv[1:])),
+    )
+    time.sleep(30)
+except BaseException:
+    # A stub that dies leaves the test no report to read. Its status and traceback go in
+    # `error.txt`, so the failure names a cause instead of only saying the report is missing.
+    publish("error.txt", "exit=1\n" + traceback.format_exc())
+    sys.exit(1)
 "#,
         )
         .expect("stub wrapper");
@@ -1639,8 +1650,12 @@ time.sleep(30)
         let process = launch_hidden(&python, &argv, &dir, "claude", "Claude")
             .expect("the stub wrapper starts");
         let report = dir.join("report.txt");
+        let failure = dir.join("error.txt");
         let mut text = String::new();
-        for _ in 0..100 {
+        let mut stub_error = String::new();
+        let mut exited = false;
+        let mut missing = 0;
+        for tick in 0..100 {
             if let Ok(read) = std::fs::read_to_string(&report) {
                 text = read;
                 // `argv=` is the last line, so its presence means the whole report is there.
@@ -1648,12 +1663,59 @@ time.sleep(30)
                     break;
                 }
             }
+            // The stub records its own status and traceback: `launch_hidden` hands the child to
+            // the reaper that keeps the roster honest, so its `ExitStatus` never comes back here.
+            if let Ok(read) = std::fs::read_to_string(&failure) {
+                stub_error = read;
+                break;
+            }
+            // A stub that died without writing used to burn the whole budget and then say
+            // nothing. `tasklist` is a process of its own, so ask it every fourth tick, and only
+            // call it an exit once two answers agree — a single miss would fake a failure.
+            if tick % 4 == 0 && tick >= 4 {
+                missing = if pid_running(process.pid) {
+                    0
+                } else {
+                    missing + 1
+                };
+                if missing == 2 {
+                    exited = true;
+                    break;
+                }
+            }
             std::thread::sleep(std::time::Duration::from_millis(100));
         }
         let _ = kill_tree(process.pid);
+        // The kill can land after the last poll; a report already on disk still counts.
+        if text.is_empty() {
+            text = std::fs::read_to_string(&report).unwrap_or_default();
+        }
+        if stub_error.is_empty() {
+            stub_error = std::fs::read_to_string(&failure).unwrap_or_default();
+        }
         let _ = std::fs::remove_dir_all(&dir);
 
-        assert!(!text.is_empty(), "the stub wrapper never reported back");
+        assert!(
+            !text.is_empty(),
+            "the stub wrapper left no report in {}; python={}, argv={:?}, {}; stub reported: {}",
+            dir.display(),
+            python.display(),
+            argv,
+            if stub_error.is_empty() {
+                if exited {
+                    "it exited without writing"
+                } else {
+                    "it was still running when the budget ran out"
+                }
+            } else {
+                "it recorded its own failure"
+            },
+            if stub_error.is_empty() {
+                "<nothing>"
+            } else {
+                stub_error.as_str()
+            },
+        );
         assert!(text.contains("hwnd=0"), "a console window leaked: {text}");
         assert!(
             text.contains("console_ok=1"),
