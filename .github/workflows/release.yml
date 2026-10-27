@@ -13,7 +13,8 @@ jobs:
   # A tag is pushed together with the branch it names, so CI for the tagged commit is usually still
   # running when this workflow starts. The gate waits for it rather than trusting the tag name: a
   # release is the one thing that must never happen for a commit the checks have not cleared. A run
-  # that fails ends the gate immediately, before twenty minutes of building a doomed installer.
+  # that fails ends the gate immediately, before twenty minutes of building a doomed installer, and
+  # a pass does not end it while a sibling run for the same commit is still going.
   gate:
     runs-on: ubuntu-latest
     timeout-minutes: 60
@@ -43,15 +44,22 @@ jobs:
               printf 'failing run: %s\n' "$failed"
               exit 1
             fi
-            if [ "$passed" -gt 0 ]; then
+            # A success alone is not enough. The branch run and the tag run overlap, and the
+            # branch one can pass while the tag one is still queued; exiting here would let the
+            # installer build for a commit whose other run later fails. Every matching run has to
+            # finish, none may have failed, and at least one must have succeeded.
+            unfinished=$(printf '%s\n' "$runs" | awk -F'\t' '
+              NF == 0 { next } $1 != "completed" { n++ } END { print n + 0 }')
+
+            if [ "$unfinished" -eq 0 ] && [ "$passed" -gt 0 ]; then
               echo "CI passed for $SHA."
               exit 0
             fi
             if [ "$(date +%s)" -ge "$deadline" ]; then
-              echo "::error::No successful CI run for $SHA within 45 minutes."
+              echo "::error::CI did not clear $SHA within 45 minutes ($unfinished run(s) still unfinished)."
               exit 1
             fi
-            echo "Waiting for CI on $SHA..."
+            echo "Waiting for CI on $SHA ($unfinished run(s) still unfinished)..."
             sleep 20
           done
 

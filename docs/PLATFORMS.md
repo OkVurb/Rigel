@@ -107,13 +107,14 @@ $env:RIGEL_CERT_THUMBPRINT = $cert.Thumbprint
 
 The app checks the newest GitHub release's `latest.json` at launch; Settings → Updates can turn
 that check and auto-install off. A tag starting with `v` runs `.github/workflows/release.yml`,
-which first waits for the `ci` workflow to finish on the tagged commit: the tag is pushed with the
-branch, so that run is normally still going. A failed run stops the release before anything is
-built or uploaded, and a commit with no successful run in 45 minutes stops it too — the workflow
-never publishes a tag the checks have not cleared. It then stamps that version into the build,
-builds the sidecar and both installers, signs the manifest, verifies that signature against the
-committed public key, and uploads the MSI, NSIS setup and `latest.json` to the release. The
-workflow needs one repository secret:
+which first waits for every `ci` run on the tagged commit: the tag is pushed with the branch, so
+the branch run is normally still going, and the tag pushes one of its own. A failed run stops the
+release before anything is built or uploaded, and a pass does not end the wait while another run
+for that commit is still queued. A commit whose runs have not all finished and succeeded within 45
+minutes stops it too — the workflow never publishes a tag the checks have not cleared. It then
+stamps that version into the build, builds the sidecar and both installers, signs the manifest,
+verifies that signature against the committed public key, and uploads the MSI, NSIS setup and
+`latest.json` to the release. The workflow needs one repository secret:
 
 | secret | value |
 | --- | --- |
