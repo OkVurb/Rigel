@@ -7,9 +7,56 @@ on:
 
 permissions:
   contents: write
+  actions: read
 
 jobs:
+  # A tag is pushed together with the branch it names, so CI for the tagged commit is usually still
+  # running when this workflow starts. The gate waits for it rather than trusting the tag name: a
+  # release is the one thing that must never happen for a commit the checks have not cleared. A run
+  # that fails ends the gate immediately, before twenty minutes of building a doomed installer.
+  gate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - name: Wait for CI on the tagged commit
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          deadline=$(( $(date +%s) + 45 * 60 ))
+          while :; do
+            # Every run of the ci workflow for this exact commit, from any ref. A tag push starts
+            # its own run beside the branch one, and both have to clear.
+            runs=$(gh api \
+              "repos/$GITHUB_REPOSITORY/actions/workflows/ci.yml/runs?head_sha=$SHA&per_page=100" \
+              --jq '.workflow_runs[] | [.status, .conclusion, .html_url] | @tsv' || true)
+
+            failed=$(printf '%s\n' "$runs" | awk -F'\t' '
+              $1 == "completed" && ($2 == "failure" || $2 == "timed_out" ||
+                $2 == "startup_failure" || $2 == "action_required") { print $3 }')
+            passed=$(printf '%s\n' "$runs" | awk -F'\t' '
+              $1 == "completed" && $2 == "success" { n++ } END { print n + 0 }')
+
+            if [ -n "$failed" ]; then
+              echo "::error::CI failed for $SHA, so this tag will not publish."
+              printf 'failing run: %s\n' "$failed"
+              exit 1
+            fi
+            if [ "$passed" -gt 0 ]; then
+              echo "CI passed for $SHA."
+              exit 0
+            fi
+            if [ "$(date +%s)" -ge "$deadline" ]; then
+              echo "::error::No successful CI run for $SHA within 45 minutes."
+              exit 1
+            fi
+            echo "Waiting for CI on $SHA..."
+            sleep 20
+          done
+
   windows:
+    needs: gate
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
