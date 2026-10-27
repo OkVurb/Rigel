@@ -7,9 +7,64 @@ on:
 
 permissions:
   contents: write
+  actions: read
 
 jobs:
+  # A tag is pushed together with the branch it names, so CI for the tagged commit is usually still
+  # running when this workflow starts. The gate waits for it rather than trusting the tag name: a
+  # release is the one thing that must never happen for a commit the checks have not cleared. A run
+  # that fails ends the gate immediately, before twenty minutes of building a doomed installer, and
+  # a pass does not end it while a sibling run for the same commit is still going.
+  gate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - name: Wait for CI on the tagged commit
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          deadline=$(( $(date +%s) + 45 * 60 ))
+          while :; do
+            # Every run of the ci workflow for this exact commit, from any ref. A tag push starts
+            # its own run beside the branch one, and both have to clear.
+            runs=$(gh api \
+              "repos/$GITHUB_REPOSITORY/actions/workflows/ci.yml/runs?head_sha=$SHA&per_page=100" \
+              --jq '.workflow_runs[] | [.status, .conclusion, .html_url] | @tsv' || true)
+
+            failed=$(printf '%s\n' "$runs" | awk -F'\t' '
+              $1 == "completed" && ($2 == "failure" || $2 == "timed_out" ||
+                $2 == "startup_failure" || $2 == "action_required") { print $3 }')
+            passed=$(printf '%s\n' "$runs" | awk -F'\t' '
+              $1 == "completed" && $2 == "success" { n++ } END { print n + 0 }')
+
+            if [ -n "$failed" ]; then
+              echo "::error::CI failed for $SHA, so this tag will not publish."
+              printf 'failing run: %s\n' "$failed"
+              exit 1
+            fi
+            # A success alone is not enough. The branch run and the tag run overlap, and the
+            # branch one can pass while the tag one is still queued; exiting here would let the
+            # installer build for a commit whose other run later fails. Every matching run has to
+            # finish, none may have failed, and at least one must have succeeded.
+            unfinished=$(printf '%s\n' "$runs" | awk -F'\t' '
+              NF == 0 { next } $1 != "completed" { n++ } END { print n + 0 }')
+
+            if [ "$unfinished" -eq 0 ] && [ "$passed" -gt 0 ]; then
+              echo "CI passed for $SHA."
+              exit 0
+            fi
+            if [ "$(date +%s)" -ge "$deadline" ]; then
+              echo "::error::CI did not clear $SHA within 45 minutes ($unfinished run(s) still unfinished)."
+              exit 1
+            fi
+            echo "Waiting for CI on $SHA ($unfinished run(s) still unfinished)..."
+            sleep 20
+          done
+
   windows:
+    needs: gate
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
