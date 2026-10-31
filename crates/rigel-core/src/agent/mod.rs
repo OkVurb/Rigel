@@ -4,7 +4,11 @@
 //! |---|---|
 //! | [`model`] | the `Model` trait, streamed deltas, tool-call assembly, SSE decoding |
 //! | [`openrouter`] | one real provider, retries and `Retry-After` |
+//! | [`anthropic`] | Claude's Messages API: its own request shape and event stream |
 //! | [`gemini`] | Google's OpenAI-compatible endpoint and its request profile |
+//! | [`vertex`] | Gemini on Vertex: project, location and an OAuth access token |
+//! | [`providers`] | the table of adapters, and which model id each one may be sent |
+//! | [`catalog`] | the model rosters every provider with a credential offers |
 //! | [`omniroute`] | the local router, its health probe and autostart |
 //! | [`agentchat`] | the vendor chat server behind the Chat tab, its health and token |
 //! | [`scripted`] | a deterministic model for tests and the offline QA run |
@@ -19,7 +23,9 @@
 //! itself (D19).
 
 pub mod agentchat;
+pub mod anthropic;
 pub mod approval;
+pub mod catalog;
 pub mod coordinator;
 pub mod deliberation;
 pub mod destructive;
@@ -29,17 +35,21 @@ pub mod model;
 pub mod omniroute;
 pub mod openrouter;
 pub mod pricing;
+pub mod providers;
 pub mod refine;
 pub mod roles;
 pub mod scripted;
 pub mod subagents;
 pub mod team;
 pub mod tools;
+pub mod vertex;
 
 pub use approval::{
-    ApprovalScope, CommandApprover, CommandDecision, CommandRequest, DenyCommands, DenyPlans,
-    PlanAgent, PlanApprover, PlanDecision, PlanRequest, Scopes,
+    ApprovalScope, CommandApprover, CommandDecision, CommandRequest, DenyCommands, DenyMail,
+    DenyPlans, MailApprover, MailDecision, MailRequest, PlanAgent, PlanApprover, PlanDecision,
+    PlanRequest, Scopes,
 };
+pub use catalog::{MAX_CATALOGS, ModelOption};
 pub use coordinator::{
     AgentError, Cancels, Coordinator, DEFAULT_MAX_STEPS, DEFAULT_SUBAGENT_MODEL, MAX_PLAN_CHARS,
     REVIEW_MODEL, SUBAGENT_MODELS, StopReason, SubagentPolicy, TurnRun, fixed_context_chars,
@@ -55,6 +65,7 @@ pub use model::{
 };
 pub use omniroute::ServerStatus;
 pub use openrouter::{DEFAULT_BASE_URL, DEFAULT_MODEL, OpenRouterModel};
+pub use providers::{PROVIDERS as PROVIDER_SPECS, ProviderSpec};
 pub use refine::{MAX_ROUNDS, PromptRefiner, RefineRequest, Refinement};
 pub use roles::{PRESETS as ROLE_PRESETS, RolePreset};
 pub use scripted::{Script, ScriptedModel};

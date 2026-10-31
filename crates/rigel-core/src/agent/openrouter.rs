@@ -76,7 +76,9 @@ impl OpenRouterModel {
 
     fn body(&self, request: &ChatRequest) -> Value {
         let mut body = json!({
-            "model": request.model,
+            // Never a batch-only id: the provider would route it to its batch adapter and answer
+            // 404 instead of streaming a turn.
+            "model": super::model::chat_model_id(&request.model),
             "messages": request.messages,
             "stream": true,
             "temperature": request.temperature,
@@ -455,5 +457,32 @@ mod tests {
         let body = calls.last().expect("a request body");
         assert!(body.contains("\"reasoning_effort\":\"high\""), "{body}");
         assert!(body.contains("\"model\":\"openai/gpt-4.1-mini\""), "{body}");
+    }
+
+    /// The refiner's 404: an id a gateway published for its batch endpoint reached
+    /// `/chat/completions`. The turn goes to the interactive twin instead.
+    #[tokio::test]
+    async fn a_batch_id_is_sent_without_its_suffix() {
+        let (base, seen) = fake_provider().await;
+        let model = OpenRouterModel::with_base_url("test-key", base);
+        let request = ChatRequest {
+            model: "google/gemini-4-argon:batch".to_string(),
+            messages: vec![ChatMessage::user("hi")],
+            tools: vec![],
+            max_tokens: None,
+            temperature: 0.0,
+            effort: None,
+        };
+        let cancel = CancellationToken::new();
+        let mut sink = |_: Delta| {};
+        model.chat(request, &cancel, &mut sink).await.unwrap();
+
+        let calls = seen.lock().unwrap();
+        let body = calls.last().expect("a request body");
+        assert!(
+            body.contains("\"model\":\"google/gemini-4-argon\""),
+            "{body}"
+        );
+        assert!(!body.contains(":batch"), "{body}");
     }
 }

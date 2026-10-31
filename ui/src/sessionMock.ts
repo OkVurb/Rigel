@@ -31,6 +31,8 @@ export const previewSession: Session = {
   tasks_done: 2,
   created_at: ago(90),
   ended_at: null,
+  pinned_at: null,
+  archived_at: null,
 };
 
 export const previewAgents: Agent[] = [

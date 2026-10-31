@@ -15,15 +15,63 @@ import {
   isTauri,
   type AppliedMerge,
   type AttributedHunk,
+  type Bookmark,
   type ClaimConflict,
   type ConflictSides,
   type CoordinationView,
   type HunkComment,
   type MergedConflict,
   type Patch,
+  type Provenance,
   type WritableAgentView,
   type WritableDiffView,
 } from "./api";
+
+/** One rendered line of a hunk, with the number the reader would find in the new file. */
+interface DiffLine {
+  kind: "add" | "del" | "ctx" | "meta";
+  number: number | null;
+  text: string;
+}
+
+/**
+ * D156: the line rows are what a provenance click starts from. Numbers are computed from the
+ * `@@` header, so a row can say exactly which line in the new file it is; the header itself is
+ * the hunk boundary the core recorded. A body without a parseable header still renders, with
+ * no line numbers — the panel then says "unknown" rather than inventing one.
+ */
+function diffLineRows(header: string, body: string): DiffLine[] {
+  const match = /@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@/.exec(header);
+  let oldLine = match ? Number(match[1]) : 0;
+  let newLine = match ? Number(match[2]) : 0;
+  const rows: DiffLine[] = [];
+  for (const text of body.split("\n")) {
+    if (text.startsWith("\\")) {
+      rows.push({ kind: "meta", number: null, text });
+    } else if (text.startsWith("+")) {
+      rows.push({ kind: "add", number: match ? newLine : null, text });
+      newLine += 1;
+    } else if (text.startsWith("-")) {
+      rows.push({ kind: "del", number: match ? oldLine : null, text });
+      oldLine += 1;
+    } else {
+      rows.push({ kind: "ctx", number: match ? newLine : null, text });
+      oldLine += 1;
+      newLine += 1;
+    }
+  }
+  return rows;
+}
+
+/** D156: one loaded chain, addressed to the hunk it was asked from. */
+interface ChainView {
+  patchId: string;
+  hunkId: string | null;
+  line: number | null;
+  data: Provenance | null;
+  error: string | null;
+  busy: boolean;
+}
 
 /** Split a stored diff into its blocks, keeping each `@@` header with its body. */
 function diffBlocks(diff: string): { header: string; body: string }[] {
@@ -52,6 +100,11 @@ function PatchBody({
   busy,
   onComment,
   onDeliver,
+  bookmarks,
+  onBookmark,
+  chain,
+  onProvenance,
+  onCloseChain,
 }: {
   patch: Patch;
   hunks: AttributedHunk[];
@@ -60,6 +113,11 @@ function PatchBody({
   busy: string | null;
   onComment: (hunkId: string, body: string) => Promise<void>;
   onDeliver: (comment: HunkComment) => Promise<void>;
+  bookmarks: Bookmark[];
+  onBookmark: (hunkId: string, label: string) => void;
+  chain: ChainView | null;
+  onProvenance: (hunkId: string | null, line: number | null) => void;
+  onCloseChain: () => void;
 }) {
   const [drafts, setDrafts] = useState<Record<string, string>>({});
   const blocks = diffBlocks(patch.diff);
@@ -75,8 +133,15 @@ function PatchBody({
         const draft = hunk ? drafts[hunk.id] ?? "" : "";
         // A merge hunk is the human's own text (`user`); there is nobody to send a comment to.
         const own = (hunk?.agent_id ?? patch.agent_id) === "user";
+        const marked =
+          hunk !== undefined &&
+          bookmarks.some((row) => row.kind === "hunk" && row.target_id === hunk.id);
         return (
-          <div className="hunk" key={`${patch.id}-${index}`}>
+          <div
+            className="hunk"
+            key={`${patch.id}-${index}`}
+            id={hunk ? `hunk-${hunk.id}` : undefined}
+          >
             <div className="hunk-head">
               <span className="hunk-agent" title={hunk ? hunk.agent_id : patch.agent_id}>
                 {agent}
@@ -85,8 +150,50 @@ function PatchBody({
               {hunk && hunk.status !== "applied" ? (
                 <span className={`pill ${hunk.status}`}>{hunk.status}</span>
               ) : null}
+              <button
+                type="button"
+                className="chip chain-open"
+                title="Show where these lines came from — hunk, patch, turn, tool, model"
+                onClick={() => onProvenance(hunk?.id ?? null, null)}
+              >
+                where from
+              </button>
+              {hunk ? (
+                <button
+                  type="button"
+                  className={`bookmark-star in-head${marked ? " on" : ""}`}
+                  aria-pressed={marked}
+                  aria-label={marked ? "Remove hunk bookmark" : "Bookmark this hunk"}
+                  title={marked ? "Remove bookmark" : "Keep this hunk in the session list"}
+                  onClick={() =>
+                    onBookmark(hunk.id, `${patch.path} · ${block.header}`.slice(0, 160))
+                  }
+                >
+                  {marked ? "★" : "☆"}
+                </button>
+              ) : null}
             </div>
-            <pre className="patch-diff">{block.body}</pre>
+            <div className="patch-diff">
+              {diffLineRows(block.header, block.body).map((row, lineIndex) => (
+                <div
+                  key={`${patch.id}-${index}-${lineIndex}`}
+                  className={`diff-line ${row.kind}`}
+                  title="Show where this line came from"
+                  onClick={() => onProvenance(hunk?.id ?? null, row.number)}
+                >
+                  <span className="diff-no">{row.number ?? ""}</span>
+                  <span className="diff-text">{row.text || " "}</span>
+                </div>
+              ))}
+            </div>
+            {chain && chain.hunkId === (hunk?.id ?? null) ? (
+              <ProvenancePanel
+                chain={chain}
+                hunk={hunk ?? null}
+                patch={patch}
+                onClose={onCloseChain}
+              />
+            ) : null}
             {hunk && !own ? (
               <div className="hunk-comments">
                 {thread.map((row) => (
@@ -137,6 +244,74 @@ function PatchBody({
           </div>
         );
       })}
+    </div>
+  );
+}
+
+/** D156: the chain, printed link by link. A missing link says "unknown". */
+function ProvenancePanel({
+  chain,
+  hunk,
+  onClose,
+}: {
+  chain: ChainView;
+  hunk: AttributedHunk | null;
+  patch: Patch;
+  onClose: () => void;
+}) {
+  const data = chain.data;
+  const range = hunk
+    ? `old ${hunk.old_start}–${hunk.old_start + hunk.old_lines - 1} → new ${hunk.new_start}–${
+        hunk.new_start + hunk.new_lines - 1
+      }`
+    : null;
+  return (
+    <div className="provenance" role="status">
+      <div className="provenance-head">
+        <strong>Where this came from</strong>
+        <span className="grow" />
+        <button type="button" className="link" onClick={onClose}>
+          close
+        </button>
+      </div>
+      {chain.busy ? (
+        <p className="fine">Reading the journal…</p>
+      ) : chain.error ? (
+        <p className="fine">{chain.error}</p>
+      ) : data ? (
+        <dl>
+          <dt>line</dt>
+          <dd>
+            {chain.line !== null ? `new line ${chain.line} · ` : ""}
+            {range ? `${hunk?.header} · ${range}` : "unknown — no patch_hunks row for this block"}
+          </dd>
+          <dt>patch</dt>
+          <dd className="mono">
+            {data.patch_id.slice(0, 8)} · {data.path} · {data.status}
+          </dd>
+          <dt>turn</dt>
+          <dd>
+            {data.turn_id !== null
+              ? `turn ${data.turn_seq} · ${data.turn_status}`
+              : "unknown — no recorded item names this patch"}
+          </dd>
+          <dt>tool</dt>
+          <dd>
+            {data.tool ?? "unknown"}
+            {data.item_kind ? ` · ${data.item_kind}` : ""}
+          </dd>
+          <dt>agent</dt>
+          <dd>
+            {data.agent_role ?? data.agent_id.slice(0, 8)}
+            {data.harness ? ` · ${data.harness}` : ""} · {" "}
+            {data.model ?? "model unknown"}
+          </dd>
+        </dl>
+      ) : null}
+      <p className="fine">
+        Read-only. Every link is a recorded row; a missing one is “unknown”, never inferred, and
+        nothing is re-run.
+      </p>
     </div>
   );
 }
@@ -230,6 +405,25 @@ const PREVIEW_PATCHES: Patch[] = [
   },
 ];
 
+// D150: a hunk row gives the preview a star to exercise; without it the sample patch has
+// rendered blocks but no `patch_hunks` identity to bookmark.
+const PREVIEW_HUNKS: AttributedHunk[] = [
+  {
+    id: "hunk-preview-1",
+    patch_id: "patch-preview-1",
+    path: "ui/src/session.tsx",
+    ordinal: 0,
+    agent_id: "agent-worker",
+    header: "@@ -1,2 +1,2 @@",
+    old_start: 1,
+    old_lines: 2,
+    new_start: 1,
+    new_lines: 2,
+    created_at: Date.now() - 120_000,
+    status: "applied",
+  },
+];
+
 const PREVIEW_OPEN_REVIEW: WritableAgentView = {
   agent_id: "c4d18e77-2b90-4a51-8f0e-6d3a9b5c7e21",
   role: "writer",
@@ -316,14 +510,30 @@ function ago(at: number): string {
   return `${Math.round(minutes / 60)}h ago`;
 }
 
-export default function DiffView({ project, session }: { project: string; session: string | null }) {
+export default function DiffView({
+  project,
+  session,
+  focus,
+  onFocusHandled,
+}: {
+  project: string;
+  session: string | null;
+  /** D147: the patch the palette asked for, if any. */
+  focus?: { sessionId: string; patchId?: string; hunkId?: string } | null;
+  onFocusHandled?: () => void;
+}) {
   const tauri = isTauri();
   const [view, setView] = useState<CoordinationView>(() => (tauri ? { claims: [], unverified_changes: [], conflicts: [] } : PREVIEW));
   const [prBusy, setPrBusy] = useState(false);
   const [prResult, setPrResult] = useState<string | null>(null);
   const [patches, setPatches] = useState<Patch[]>(() => (tauri ? [] : PREVIEW_PATCHES));
-  const [hunks, setHunks] = useState<AttributedHunk[]>([]);
+  const [hunks, setHunks] = useState<AttributedHunk[]>(() =>
+    tauri ? [] : PREVIEW_HUNKS,
+  );
   const [comments, setComments] = useState<HunkComment[]>([]);
+  const [bookmarks, setBookmarks] = useState<Bookmark[]>([]);
+  // D156: one chain panel at a time, keyed to the patch and hunk it was asked from.
+  const [chain, setChain] = useState<ChainView | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
   const [opened, setOpened] = useState<string | null>(null);
@@ -338,28 +548,39 @@ export default function DiffView({ project, session }: { project: string; sessio
   const [reasons, setReasons] = useState<Record<string, string>>({});
   const [merging, setMerging] = useState<string | null>(null);
   const [applied, setApplied] = useState<Record<string, AppliedMerge>>({});
+  // The first read gates a palette jump: scrolling before the patch list exists would miss.
+  const [loaded, setLoaded] = useState(!tauri);
+
+  useEffect(() => {
+    if (tauri) setLoaded(false);
+  }, [project, session, tauri]);
 
   useEffect(() => {
     let alive = true;
     const load = async () => {
       if (!tauri) return;
       try {
-        const [next, nextPatches, nextHunks, nextComments, nextWritable] = await Promise.all([
-          api.claimList(project),
-          session ? api.listPatches(project, session) : Promise.resolve([]),
-          session ? api.patchHunks(project, session) : Promise.resolve([]),
-          session ? api.hunkComments(project, session) : Promise.resolve([]),
-          session ? api.writableList(project, session) : Promise.resolve([]),
-        ]);
+        const [next, nextPatches, nextHunks, nextComments, nextWritable, nextBookmarks] =
+          await Promise.all([
+            api.claimList(project),
+            session ? api.listPatches(project, session) : Promise.resolve([]),
+            session ? api.patchHunks(project, session) : Promise.resolve([]),
+            session ? api.hunkComments(project, session) : Promise.resolve([]),
+            session ? api.writableList(project, session) : Promise.resolve([]),
+            session ? api.listBookmarks(project, session) : Promise.resolve([]),
+          ]);
         if (alive) {
           setView(next);
           setPatches(nextPatches);
           setHunks(nextHunks);
           setComments(nextComments);
           setWritable(nextWritable);
+          setBookmarks(nextBookmarks);
         }
       } catch (problem) {
         if (alive) setError(problem instanceof Error ? problem.message : String(problem));
+      } finally {
+        if (alive) setLoaded(true);
       }
     };
     void load();
@@ -369,6 +590,78 @@ export default function DiffView({ project, session }: { project: string; sessio
       window.clearInterval(timer);
     };
   }, [project, session, tauri]);
+
+  // D147/D150: land on the patch the palette named, or the hunk a bookmark named. The rows
+  // arrive just after the view mounts, so wait a paint and clear the request even when gone.
+  useEffect(() => {
+    if (!focus || !loaded) return;
+    const target = focus.hunkId
+      ? `hunk-${focus.hunkId}`
+      : focus.patchId
+        ? `patch-${focus.patchId}`
+        : null;
+    if (!target) return;
+    const timer = window.setTimeout(() => {
+      const row = document.getElementById(target);
+      if (row) {
+        row.scrollIntoView({ block: "center" });
+        row.classList.add("jump");
+        window.setTimeout(() => row.classList.remove("jump"), 1800);
+      }
+      onFocusHandled?.();
+    }, 200);
+    return () => window.clearTimeout(timer);
+  }, [focus, loaded, patches.length, hunks.length, onFocusHandled]);
+
+  const openChain = async (patchId: string, hunkId: string | null, line: number | null) => {
+    setChain({ patchId, hunkId, line, data: null, error: null, busy: true });
+    try {
+      const data = await api.provenance(project, patchId);
+      setChain((current) =>
+        current && current.patchId === patchId && current.busy
+          ? { ...current, data, busy: false }
+          : current,
+      );
+    } catch (problem) {
+      const message = problem instanceof Error ? problem.message : String(problem);
+      setChain((current) =>
+        current && current.patchId === patchId && current.busy
+          ? { ...current, error: message, busy: false }
+          : current,
+      );
+    }
+  };
+
+  const toggleHunkBookmark = async (hunkId: string, label: string) => {
+    if (!session) return;
+    const marked = bookmarks.some(
+      (row) => row.kind === "hunk" && row.target_id === hunkId,
+    );
+    try {
+      const next = tauri
+        ? await api.toggleBookmark(project, session, "hunk", hunkId, label)
+        : marked
+          ? null
+          : {
+              id: `preview-${hunkId}`,
+              session_id: session,
+              kind: "hunk" as const,
+              target_id: hunkId,
+              label,
+              created_at: Date.now(),
+            };
+      setBookmarks((rows) =>
+        next
+          ? [
+              next,
+              ...rows.filter((row) => !(row.kind === "hunk" && row.target_id === hunkId)),
+            ]
+          : rows.filter((row) => !(row.kind === "hunk" && row.target_id === hunkId)),
+      );
+    } catch (problem) {
+      setError(problem instanceof Error ? problem.message : String(problem));
+    }
+  };
 
   // Claims name most writers, but a merged subagent has already released its claim: its patch
   // would otherwise show a bare id. The writable rows carry the role it was registered under.
@@ -593,7 +886,7 @@ export default function DiffView({ project, session }: { project: string; sessio
   const total = patches.reduce((sum, patch) => sum + (patch.status === "applied" ? 1 : 0), 0);
 
   return (
-    <main className="detail diff-view">
+    <main id="main" tabIndex={-1} className="detail diff-view">
       <header className="detail-head">
         <div>
           <p className="eyebrow">{project.split(/[\\/]/).pop() || project} · merged diff</p>
@@ -1020,7 +1313,7 @@ Open this pull request from ${plan.branch} into ${plan.base} with gh?`,
           <p className="empty">No patch has been applied in this session.</p>
         ) : (
           patches.map((patch) => (
-            <article className="patch" key={patch.id}>
+            <article className="patch" key={patch.id} id={`patch-${patch.id}`}>
               <header>
                 <span className={`pill ${patch.status}`}>{patch.status}</span>
                 <span className="mono patch-path">{patch.path}</span>
@@ -1042,6 +1335,11 @@ Open this pull request from ${plan.branch} into ${plan.base} with gh?`,
                 busy={busy}
                 onComment={comment}
                 onDeliver={deliver}
+                bookmarks={bookmarks}
+                onBookmark={(hunkId, label) => void toggleHunkBookmark(hunkId, label)}
+                chain={chain?.patchId === patch.id ? chain : null}
+                onProvenance={(hunkId, line) => void openChain(patch.id, hunkId, line)}
+                onCloseChain={() => setChain(null)}
               />
             </article>
           ))

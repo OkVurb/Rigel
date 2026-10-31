@@ -61,6 +61,10 @@ pub struct Session {
     pub tasks_done: i64,
     pub created_at: i64,
     pub ended_at: Option<i64>,
+    /// D148: pinned sessions sort first in the window's list.
+    pub pinned_at: Option<i64>,
+    /// D148: hidden from the default list, still searchable and still resumable.
+    pub archived_at: Option<i64>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -78,6 +82,18 @@ pub struct Agent {
     pub spend_micros: i64,
     pub tokens_in: i64,
     pub tokens_out: i64,
+}
+
+/// D150: a kept line. `label` is the snapshot the inspector draws; `target_id` is what a jump
+/// resolves against (`item-…` in the transcript, `hunk-…` in Diff).
+#[derive(Debug, Clone, Serialize)]
+pub struct Bookmark {
+    pub id: String,
+    pub session_id: String,
+    pub kind: String,
+    pub target_id: String,
+    pub label: String,
+    pub created_at: i64,
 }
 
 /// A writable subagent as the Diff view lists it (D80/D114/D115): who it is, what it was
@@ -171,6 +187,9 @@ pub enum SessionError {
     #[error("invalid turn status: {0}")]
     InvalidTurnStatus(String),
 
+    #[error("bookmark kind `{0}` is not one of item or hunk")]
+    InvalidBookmarkKind(String),
+
     #[error("json error: {0}")]
     Json(#[from] serde_json::Error),
 
@@ -200,6 +219,8 @@ type SessionRow = (
     i64,
     i64,
     i64,
+    Option<i64>,
+    Option<i64>,
     Option<i64>,
 );
 
@@ -256,7 +277,7 @@ impl SessionService {
     pub async fn get(&self, id: &str) -> Result<Session, SessionError> {
         let row: Option<SessionRow> = sqlx::query_as(
             "SELECT id, project_root, title, status, budget_cents, spend_cents, spend_micros,
-                    interventions, tasks_done, created_at, ended_at
+                    interventions, tasks_done, created_at, ended_at, pinned_at, archived_at
              FROM sessions WHERE id = ?",
         )
         .bind(id)
@@ -269,17 +290,163 @@ impl SessionService {
         }
     }
 
-    /// Newest first: the session list is a log, not an alphabet.
+    /// Pinned first, then newest: the session list is a log with a favourites shelf.
+    ///
+    /// Archived sessions are still returned — the window hides them behind a toggle, and the
+    /// palette searches them — because a flag must not make a transcript unreachable.
     pub async fn list(&self) -> Result<Vec<Session>, SessionError> {
         let rows: Vec<SessionRow> = sqlx::query_as(
             "SELECT id, project_root, title, status, budget_cents, spend_cents, spend_micros,
-                    interventions, tasks_done, created_at, ended_at
-             FROM sessions ORDER BY created_at DESC, id DESC",
+                    interventions, tasks_done, created_at, ended_at, pinned_at, archived_at
+             FROM sessions
+             ORDER BY (pinned_at IS NULL), pinned_at DESC, created_at DESC, id DESC",
         )
         .fetch_all(&self.pool)
         .await?;
 
         rows.into_iter().map(session_from_row).collect()
+    }
+
+    /// D148: name a session, or clear the name so the automatic title takes over again.
+    ///
+    /// The list is one line per row, so the name is the first line and at most 120 characters;
+    /// silently clipping is still better than a row that breaks the pane it is drawn in.
+    pub async fn rename(&self, id: &str, title: Option<&str>) -> Result<Session, SessionError> {
+        let title = title
+            .map(|value| value.lines().next().unwrap_or("").trim())
+            .filter(|value| !value.is_empty())
+            .map(|value| value.chars().take(120).collect::<String>());
+
+        let result = sqlx::query("UPDATE sessions SET title = ? WHERE id = ?")
+            .bind(title)
+            .bind(id)
+            .execute(&self.pool)
+            .await?;
+
+        if result.rows_affected() == 0 {
+            return Err(SessionError::SessionNotFound(id.to_string()));
+        }
+        self.get(id).await
+    }
+
+    /// D148: pin or unpin. Pinning is a timestamp, not a boolean, so the pinned block keeps its
+    /// own order when it is re-sorted by recency of the pin.
+    pub async fn set_pinned(&self, id: &str, pinned: bool) -> Result<Session, SessionError> {
+        let result = sqlx::query("UPDATE sessions SET pinned_at = ? WHERE id = ?")
+            .bind(pinned.then(now_ms))
+            .bind(id)
+            .execute(&self.pool)
+            .await?;
+
+        if result.rows_affected() == 0 {
+            return Err(SessionError::SessionNotFound(id.to_string()));
+        }
+        self.get(id).await
+    }
+
+    /// D148: archive or restore. Nothing is deleted, so the transcript, patches and checkpoints
+    /// stay resumable while the session is out of the default list.
+    pub async fn set_archived(&self, id: &str, archived: bool) -> Result<Session, SessionError> {
+        let result = sqlx::query("UPDATE sessions SET archived_at = ? WHERE id = ?")
+            .bind(archived.then(now_ms))
+            .bind(id)
+            .execute(&self.pool)
+            .await?;
+
+        if result.rows_affected() == 0 {
+            return Err(SessionError::SessionNotFound(id.to_string()));
+        }
+        self.get(id).await
+    }
+
+    /// D150: newest first. A star is a note to the reader, so the list is read like one.
+    pub async fn bookmarks(&self, session_id: &str) -> Result<Vec<Bookmark>, SessionError> {
+        let rows: Vec<(String, String, String, String, String, i64)> = sqlx::query_as(
+            "SELECT id, session_id, kind, target_id, label, created_at
+             FROM bookmarks WHERE session_id = ? ORDER BY created_at DESC, id DESC",
+        )
+        .bind(session_id)
+        .fetch_all(&self.pool)
+        .await?;
+
+        Ok(rows
+            .into_iter()
+            .map(
+                |(id, session_id, kind, target_id, label, created_at)| Bookmark {
+                    id,
+                    session_id,
+                    kind,
+                    target_id,
+                    label,
+                    created_at,
+                },
+            )
+            .collect())
+    }
+
+    /// D150: starring twice clears the star. `Some` means the star is now on, `None` means off.
+    /// The label keeps one line and 160 characters; the target is the row the jump resolves.
+    pub async fn toggle_bookmark(
+        &self,
+        session_id: &str,
+        kind: &str,
+        target_id: &str,
+        label: &str,
+    ) -> Result<Option<Bookmark>, SessionError> {
+        if !matches!(kind, "item" | "hunk") {
+            return Err(SessionError::InvalidBookmarkKind(kind.to_string()));
+        }
+        // A star on a missing session would fail the foreign key with a database error; name
+        // the real problem instead.
+        self.get(session_id).await?;
+
+        let existing: Option<String> = sqlx::query_scalar(
+            "SELECT id FROM bookmarks WHERE session_id = ? AND kind = ? AND target_id = ?",
+        )
+        .bind(session_id)
+        .bind(kind)
+        .bind(target_id)
+        .fetch_optional(&self.pool)
+        .await?;
+
+        if let Some(id) = existing {
+            sqlx::query("DELETE FROM bookmarks WHERE id = ?")
+                .bind(id)
+                .execute(&self.pool)
+                .await?;
+            return Ok(None);
+        }
+
+        let label = label
+            .lines()
+            .next()
+            .unwrap_or("")
+            .trim()
+            .chars()
+            .take(160)
+            .collect::<String>();
+        let bookmark = Bookmark {
+            id: Uuid::new_v4().to_string(),
+            session_id: session_id.to_string(),
+            kind: kind.to_string(),
+            target_id: target_id.to_string(),
+            label,
+            created_at: now_ms(),
+        };
+        sqlx::query(
+            "INSERT INTO bookmarks (id, session_id, kind, target_id, label, created_at)
+             VALUES (?, ?, ?, ?, ?, ?)",
+        )
+        .bind(&bookmark.id)
+        .bind(&bookmark.session_id)
+        .bind(&bookmark.kind)
+        .bind(&bookmark.target_id)
+        .bind(&bookmark.label)
+        .bind(bookmark.created_at)
+        .execute(&self.pool)
+        .await?;
+
+        Ok(Some(bookmark))
     }
 
     pub async fn end(&self, id: &str) -> Result<Session, SessionError> {
@@ -1170,5 +1337,7 @@ fn session_from_row(row: SessionRow) -> Result<Session, SessionError> {
         tasks_done: row.8,
         created_at: row.9,
         ended_at: row.10,
+        pinned_at: row.11,
+        archived_at: row.12,
     })
 }

@@ -38,12 +38,6 @@ pub fn model(api_key: impl Into<String>) -> OpenRouterModel {
         .without_usage_request()
 }
 
-/// Whether an id belongs to this provider. Settings carry one model across a provider switch,
-/// so a stale OmniRoute id must not be sent to Gemini.
-pub fn is_model(model: &str) -> bool {
-    model.trim().to_ascii_lowercase().starts_with("gemini")
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -178,13 +172,5 @@ mod tests {
         );
         // The OpenRouter cost field is not sent to Gemini.
         assert!(!request.contains("\"usage\""), "{request}");
-    }
-
-    #[test]
-    fn only_gemini_ids_are_treated_as_this_providers_models() {
-        assert!(is_model("gemini-4-argon"));
-        assert!(is_model(" gemini-3.8-flash"));
-        assert!(!is_model("gpt-5.6-sol-medium"));
-        assert!(!is_model("openai/gpt-4.1-mini"));
     }
 }

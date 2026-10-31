@@ -1,4 +1,5 @@
 import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import type { CSSProperties, PointerEvent as ReactPointerEvent } from "react";
 
 import {
   api,
@@ -9,6 +10,7 @@ import {
   type AgentChatAgent,
   type KeyStatus,
   type ProjectInfo,
+  type ProviderRow,
   type Session,
   type SkillDetail,
   type SkillRow,
@@ -18,18 +20,32 @@ import {
   type UpdateCheck,
   type UpdateStatus,
 } from "./api";
+import AttentionView, { type AttentionJump } from "./attention";
 import ChatView from "./agentchat";
 import { RigelMark } from "./mark";
 import { PreviewSkillSource } from "./mock";
 import DiffView from "./diff";
+import Palette, { type PaletteAction } from "./palette";
 import SessionView from "./session";
 import SettingsView from "./settings";
+import { applyDisplay } from "./display";
+import { applyTheme } from "./theme";
 import Titlebar from "./titlebar";
 
 // xterm and its CSS are only needed once the terminal is opened; keep them out of the first paint.
 const TerminalView = lazy(() => import("./terminal"));
 
+/**
+ * The status line's answer: which adapter holds the key a native turn would spend. The rows come
+ * from the Rust-side table, so a new adapter is named here without this file knowing about it.
+ */
+function nativeKeyLabel(keys: KeyStatus, providers: ProviderRow[]): string {
+  const held = providers.find((row) => keys.providers[row.id]);
+  return held ? `${held.name} key` : "no provider key";
+}
+
 const ICONS = {
+  attention: "M10 2.5a5 5 0 0 1 5 5c0 3 1 4.5 2 5.5H3c1-1 2-2.5 2-5.5a5 5 0 0 1 5-5ZM8 16h4M9 18h2",
   shelf: "M10 2.5 17 6.5v7l-7 4-7-4v-7l7-4ZM3 6.5l7 4 7-4M10 10.5v7",
   session: "M3 4.5h14M3 9.5h14M3 14.5h9",
   chat: "M6 3.5h8a2.5 2.5 0 0 1 2.5 2.5v5a2.5 2.5 0 0 1-2.5 2.5H9.5L6 16.5v-3H6a2.5 2.5 0 0 1-2.5-2.5V6A2.5 2.5 0 0 1 6 3.5ZM6.5 8.5h.01M10 8.5h.01M13.5 8.5h.01",
@@ -39,10 +55,14 @@ const ICONS = {
     "M10 12.5a2.5 2.5 0 1 0 0-5 2.5 2.5 0 0 0 0 5ZM10 2.5v2M10 15.5v2M2.5 10h2M15.5 10h2",
 } as const;
 
-type View = "shelf" | "session" | "chat" | "diff" | "terminal" | "settings";
+type View = "shelf" | "attention" | "session" | "chat" | "diff" | "terminal" | "settings";
+
+/** A palette jump: which session to open, and the row to land on once it is there. */
+type Focus = { sessionId: string; turnId?: string; patchId?: string; hunkId?: string } | null;
 
 const VIEWS: { id: View; label: string; d: string; phase: string }[] = [
   { id: "shelf", label: "Shelf", d: ICONS.shelf, phase: "P2" },
+  { id: "attention", label: "Attention", d: ICONS.attention, phase: "P7" },
   { id: "session", label: "Session", d: ICONS.session, phase: "P3" },
   { id: "chat", label: "Chat", d: ICONS.chat, phase: "P6" },
   { id: "diff", label: "Diff", d: ICONS.diff, phase: "P5" },
@@ -53,6 +73,20 @@ const VIEWS: { id: View; label: string; d: string; phase: string }[] = [
 /** Rows fetched per page. The index has ~10k skills; the list pages as it scrolls. */
 const PAGE = 250;
 const LAST_PROJECT = "rigel.lastProject";
+
+/* ---------------------------- pane widths (D159) ---------------------------- */
+
+const PANE_DEFAULTS = { list: 264, inspector: 304 };
+const PANE_LIMITS: Record<keyof typeof PANE_DEFAULTS, [number, number]> = {
+  list: [200, 420],
+  inspector: [220, 460],
+};
+const paneKey = (project: string) => `rigel.panes.${project}`;
+
+function clampPane(edge: keyof typeof PANE_DEFAULTS, value: number): number {
+  const [low, high] = PANE_LIMITS[edge];
+  return Number.isFinite(value) ? Math.min(high, Math.max(low, value)) : PANE_DEFAULTS[edge];
+}
 
 export default function App() {
   const source: SkillSource = useMemo(
@@ -75,6 +109,19 @@ export default function App() {
   );
 
   const [view, setView] = useState<View>("shelf");
+  // D159: widths are per project, because a project's folder names and paths decide how much
+  // room the list deserves. The handles are the only way to change them; there is no setting.
+  const [panes, setPanes] = useState(PANE_DEFAULTS);
+  const panesRef = useRef(panes);
+  const dragPane = useRef<{
+    edge: keyof typeof PANE_DEFAULTS;
+    startX: number;
+    start: number;
+  } | null>(null);
+  const [paletteOpen, setPaletteOpen] = useState(false);
+  // D154: how many unresolved rows the rail badge shows. The Attention view reads the same list.
+  const [attention, setAttention] = useState(0);
+  const [focus, setFocus] = useState<Focus>(null);
   // Once visited, the terminal stays mounted (hidden) so switching tabs keeps its shell and
   // scrollback. It is never started before the first visit.
   const [terminalMounted, setTerminalMounted] = useState(false);
@@ -89,6 +136,7 @@ export default function App() {
   const [newBusy, setNewBusy] = useState(false);
   const [activeSession, setActiveSession] = useState<Session | null>(null);
   const [keys, setKeys] = useState<KeyStatus | null>(null);
+  const [providers, setProviders] = useState<ProviderRow[]>([]);
   const [keyPromptDismissed, setKeyPromptDismissed] = useState(false);
   const [swarmNotice, setSwarmNotice] = useState<string | null>(null);
   const [updateStatus, setUpdateStatus] = useState<UpdateStatus | null>(null);
@@ -99,6 +147,88 @@ export default function App() {
   const setActive = useCallback((next: Session | null) => setActiveSession(next), []);
   const noticeFromSession = useCallback((next: string) => setNotice(next), []);
 
+  /* --------------------------- palette jumps --------------------------- */
+
+  const clearFocus = useCallback(() => setFocus(null), []);
+
+  const runPaletteAction = useCallback((action: PaletteAction) => {
+    if (action === "terminal") setTerminalMounted(true);
+    setView(action);
+  }, []);
+
+  // D154: the badge is the view's own count, polled so a question raised in the background is
+  // visible without opening the tab. A read failure shows no badge rather than a stale one.
+  useEffect(() => {
+    // The browser preview has no project row, so it reads the sample list under its mock root.
+    const root = project?.root ?? (isTauri() ? "" : "/preview/rigel");
+    if (!root) {
+      setAttention(0);
+      return;
+    }
+    let live = true;
+    const read = () =>
+      api
+        .attention(root)
+        .then((next) => live && setAttention(next.total))
+        .catch(() => live && setAttention(0));
+    void read();
+    const timer = window.setInterval(read, 10_000);
+    return () => {
+      live = false;
+      window.clearInterval(timer);
+    };
+  }, [project?.root]);
+
+  // A row from the Attention view opens the session that owns it, and lands on the turn or the
+  // patch the row names. An approval row has no session and stays on the Session card.
+  const openAttention = useCallback(
+    async (target: AttentionJump) => {
+      if (project && target.sessionId) {
+        const known = sessions.find((item) => item.id === target.sessionId);
+        try {
+          setActive(known ?? (await api.getSession(project.root, target.sessionId)));
+        } catch {
+          // The view still opens; it reports its own failure.
+        }
+      }
+      setFocus({ sessionId: target.sessionId, turnId: target.turnId, patchId: target.patchId });
+      setView(target.surface);
+    },
+    [project, sessions, setActive],
+  );
+
+  const openSkillFromPalette = useCallback((id: string) => {
+    setSelectedId(id);
+    setView("shelf");
+  }, []);
+
+  const openSessionFromPalette = useCallback((sessionId: string) => {
+    setFocus({ sessionId });
+    setView("session");
+  }, []);
+
+  const openTurnFromPalette = useCallback((sessionId: string, turnId: string) => {
+    setFocus({ sessionId, turnId });
+    setView("session");
+  }, []);
+
+  const openPatchFromPalette = useCallback(
+    async (sessionId: string, patchId: string) => {
+      // DiffView reads the session it is given, so a patch from another session must first become
+      // the active one. A failure still opens the view; the patch then simply is not highlighted.
+      if (project) {
+        try {
+          setActive(await api.getSession(project.root, sessionId));
+        } catch {
+          // The current session's patches remain readable.
+        }
+      }
+      setFocus({ sessionId, patchId });
+      setView("diff");
+    },
+    [project, setActive],
+  );
+
   const [repoInput, setRepoInput] = useState("");
   const [indexing, setIndexing] = useState(false);
   const searchRef = useRef<HTMLInputElement | null>(null);
@@ -107,36 +237,114 @@ export default function App() {
 
   /* ----------------------------- data ----------------------------- */
 
+  // The saved theme, scale and density are applied once at launch; Settings → Appearance
+  // applies a new choice immediately. An unreadable settings file means the defaults, which
+  // are dark, 100% and roomy.
+  useEffect(() => {
+    let live = true;
+    api
+      .getSettings()
+      .then((next) => {
+        if (!live) return;
+        applyTheme(next.theme);
+        applyDisplay(next.ui_scale, next.compact_density);
+      })
+      .catch(() => {
+        applyTheme("dark");
+        applyDisplay(100, false);
+      });
+    return () => {
+      live = false;
+    };
+  }, []);
+
+  // D159: switching project restores that project's widths; a project with none gets the
+  // defaults rather than the last project's shape. A blocked store keeps this run's widths.
+  useEffect(() => {
+    let saved: Partial<typeof PANE_DEFAULTS> = {};
+    if (project) {
+      try {
+        const raw = localStorage.getItem(paneKey(project.root));
+        if (raw) saved = JSON.parse(raw) as Partial<typeof PANE_DEFAULTS>;
+      } catch {
+        saved = {};
+      }
+    }
+    setPanes({
+      list: clampPane("list", Number(saved.list ?? PANE_DEFAULTS.list)),
+      inspector: clampPane("inspector", Number(saved.inspector ?? PANE_DEFAULTS.inspector)),
+    });
+  }, [project?.root]);
+
+  useEffect(() => {
+    panesRef.current = panes;
+  }, [panes]);
+
+  const persistPanes = useCallback(() => {
+    if (!project) return;
+    try {
+      localStorage.setItem(paneKey(project.root), JSON.stringify(panesRef.current));
+    } catch {
+      // A blocked store forgets the widths; dragging still works for this run.
+    }
+  }, [project]);
+
+  const startPane = (edge: keyof typeof PANE_DEFAULTS, event: ReactPointerEvent) => {
+    event.preventDefault();
+    event.currentTarget.setPointerCapture(event.pointerId);
+    dragPane.current = { edge, startX: event.clientX, start: panesRef.current[edge] };
+  };
+
+  /** Client x is in visual CSS pixels; the zoom is applied to #root, so divide it back out. */
+  const movePane = (edge: keyof typeof PANE_DEFAULTS, clientX: number) => {
+    const drag = dragPane.current;
+    if (!drag || drag.edge !== edge) return;
+    const zoom = Number(document.documentElement.dataset.scale ?? 100) / 100 || 1;
+    const delta = (clientX - drag.startX) / zoom;
+    const next = clampPane(edge, drag.start + (edge === "list" ? delta : -delta));
+    setPanes((current) => (current[edge] === next ? current : { ...current, [edge]: next }));
+  };
+
+  const finishPane = () => {
+    if (!dragPane.current) return;
+    dragPane.current = null;
+    persistPanes();
+  };
+
+  /** Arrow keys nudge by 12px; a double-click puts the default back. */
+  const nudgePane = (edge: keyof typeof PANE_DEFAULTS, delta: number) => {
+    setPanes((current) => {
+      const next = { ...current, [edge]: clampPane(edge, current[edge] + delta) };
+      panesRef.current = next;
+      if (project) {
+        try {
+          localStorage.setItem(paneKey(project.root), JSON.stringify(next));
+        } catch {
+          // See persistPanes.
+        }
+      }
+      return next;
+    });
+  };
+
   // The startup check: does a key exist? It asks the keychain, not the network, and the
   // answer is a boolean — the window never receives the key itself.
   useEffect(() => {
     if (!isTauri()) {
-      setKeys({
-        openrouter: false,
-        omniroute: false,
-        openai: false,
-        anthropic: false,
-        cursor: false,
-        gemini: false,
-      });
+      setKeys({ providers: {}, native_ready: false });
       return;
     }
     let live = true;
     api
       .keyStatus()
       .then((next) => live && setKeys(next))
-      .catch(
-        () =>
-          live &&
-          setKeys({
-            openrouter: false,
-            omniroute: false,
-            openai: false,
-            anthropic: false,
-            cursor: false,
-            gemini: false,
-          }),
-      );
+      .catch(() => live && setKeys({ providers: {}, native_ready: false }));
+    // The adapter table, so the banner and the status line name a provider instead of guessing
+    // from a hard-coded list of three.
+    api
+      .providersList()
+      .then((next) => live && setProviders(next))
+      .catch(() => live && setProviders([]));
     return () => {
       live = false;
     };
@@ -273,7 +481,19 @@ export default function App() {
 
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
-      if (event.key === "/" && document.activeElement?.tagName !== "INPUT") {
+      const target = event.target as HTMLElement | null;
+      // D147: Ctrl+K is the palette everywhere except a terminal, where the shell owns the key.
+      if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "k") {
+        if (target?.closest(".terminal-surface")) return;
+        event.preventDefault();
+        setPaletteOpen((open) => !open);
+        return;
+      }
+      if (
+        event.key === "/" &&
+        target?.tagName !== "INPUT" &&
+        target?.tagName !== "TEXTAREA"
+      ) {
         event.preventDefault();
         searchRef.current?.focus();
       }
@@ -282,7 +502,11 @@ export default function App() {
     return () => window.removeEventListener("keydown", onKey);
   }, []);
 
-  const selected = rows.find((row) => row.id === selectedId) ?? null;
+  // A skill opened from the palette may not be in the current result page. Falling back to the
+  // loaded detail keeps the pane usable without changing the shelf's query behind the user.
+  const selected =
+    rows.find((row) => row.id === selectedId) ??
+    (detail && detail.skill.id === selectedId ? detail.skill : null);
   const shown = detail?.skill.id === selected?.id ? detail : null;
 
   /* ---------------------------- actions --------------------------- */
@@ -550,13 +774,29 @@ ${task}`,
     </div>
   );
 
+  // The inspector only exists on these surfaces; the diff is one page, and the shelf and the
+  // terminal own their layout.
+  const hasInspector = view === "session" || view === "settings";
+  const handleTop = native ? 36 : 0;
+
   return (
     <div
       className={`shell${native ? " chrome" : ""}${view === "session" ? " session" : ""}${
         view === "settings" ? " settings" : ""
       }${view === "diff" ? " diff" : ""}`}
+      style={
+        {
+          "--list-w": `${panes.list}px`,
+          "--insp-w": `${panes.inspector}px`,
+        } as CSSProperties
+      }
     >
       {native ? <Titlebar project={project?.name ?? null} /> : null}
+
+      {/* D158: the first Tab stop skips the rail and the list, whether or not the mouse moved. */}
+      <a className="skip-link" href="#main">
+        Skip to content
+      </a>
 
       <nav className="rail" aria-label="Primary">
         <div className="rail-brand" title="Rigel">
@@ -567,8 +807,12 @@ ${task}`,
           <button
             key={item.id}
             className={`rail-btn${view === item.id ? " active" : ""}`}
-            title={`${item.label} — ${item.phase}`}
-            aria-label={item.label}
+            title={item.label}
+            aria-label={
+              item.id === "attention" && attention > 0
+                ? `${item.label}, ${attention} waiting`
+                : item.label
+            }
             aria-pressed={view === item.id}
             onClick={() => {
               if (item.id !== "chat") setSwarmNotice(null);
@@ -588,6 +832,11 @@ ${task}`,
             >
               <path d={item.d} />
             </svg>
+            {item.id === "attention" && attention > 0 ? (
+              <span className="rail-count" aria-hidden>
+                {attention > 99 ? "99+" : attention}
+              </span>
+            ) : null}
           </button>
         ))}
 
@@ -600,6 +849,47 @@ ${task}`,
           ●
         </div>
       </nav>
+
+      {/* D159: two handles, drawn over the gutters rather than as grid children. */}
+      <div
+        className="pane-handle pane-handle-list"
+        role="separator"
+        aria-orientation="vertical"
+        aria-label="Resize the list"
+        tabIndex={0}
+        style={{ left: `calc(48px + ${panes.list}px - 3px)`, top: handleTop, bottom: 28 }}
+        onPointerDown={(event) => startPane("list", event)}
+        onPointerMove={(event) => movePane("list", event.clientX)}
+        onPointerUp={finishPane}
+        onPointerCancel={finishPane}
+        onDoubleClick={() => nudgePane("list", PANE_DEFAULTS.list - panes.list)}
+        onKeyDown={(event) => {
+          if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") return;
+          event.preventDefault();
+          nudgePane("list", event.key === "ArrowRight" ? 12 : -12);
+        }}
+      />
+      {hasInspector ? (
+        <div
+          className="pane-handle pane-handle-inspector"
+          role="separator"
+          aria-orientation="vertical"
+          aria-label="Resize the inspector"
+          tabIndex={0}
+          style={{ right: `calc(${panes.inspector}px - 3px)`, top: handleTop, bottom: 28 }}
+          onPointerDown={(event) => startPane("inspector", event)}
+          onPointerMove={(event) => movePane("inspector", event.clientX)}
+          onPointerUp={finishPane}
+          onPointerCancel={finishPane}
+          onDoubleClick={() => nudgePane("inspector", PANE_DEFAULTS.inspector - panes.inspector)}
+          onKeyDown={(event) => {
+            if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") return;
+            event.preventDefault();
+            // The inspector grows toward the transcript, so the arrow sense is inverted.
+            nudgePane("inspector", event.key === "ArrowLeft" ? 12 : -12);
+          }}
+        />
+      ) : null}
 
       {isTauri() && update?.available && !updateDismissed ? (
         <div className="key-banner update-banner" role="status">
@@ -627,12 +917,7 @@ ${task}`,
         </div>
       ) : null}
 
-      {isTauri() &&
-      keys &&
-      !keys.openrouter &&
-      !keys.omniroute &&
-      !keys.gemini &&
-      !keyPromptDismissed ? (
+      {isTauri() && keys && !keys.native_ready && !keyPromptDismissed ? (
         <div className="key-banner" role="status">
           <span>
             No provider key yet. The agent can price a turn, but it cannot send one.
@@ -662,9 +947,27 @@ ${task}`,
           projectControls={projectControls}
           onSwarmPrepare={prepareSwarm}
           onSwarm={sendSwarm}
+          focus={focus}
+          onFocusHandled={clearFocus}
+          onOpenHunk={(hunkId) => {
+            if (!activeSession) return;
+            setFocus({ sessionId: activeSession.id, hunkId });
+            setView("diff");
+          }}
+        />
+      ) : view === "attention" ? (
+        <AttentionView
+          project={sessionProject}
+          onJump={(target) => void openAttention(target)}
+          onOpenSession={() => setView("session")}
         />
       ) : view === "diff" ? (
-        <DiffView project={sessionProject} session={activeSession?.id ?? null} />
+        <DiffView
+          project={sessionProject}
+          session={activeSession?.id ?? null}
+          focus={focus}
+          onFocusHandled={clearFocus}
+        />
       ) : view === "chat" ? (
         <ChatView
           project={sessionProject}
@@ -677,6 +980,7 @@ ${task}`,
           keys={keys}
           project={sessionProject}
           session={activeSession?.id ?? null}
+          source={source}
           onKeys={setKeys}
           onNotice={setNotice}
         />
@@ -806,7 +1110,7 @@ ${task}`,
         )}
       </aside>
 
-      <main className="detail">
+      <main id="main" tabIndex={-1} className="detail">
         <header className="detail-head">
           <div>
             <p className="eyebrow">
@@ -1002,6 +1306,18 @@ ${task}`,
         </div>
       ) : null}
 
+      <Palette
+        open={paletteOpen}
+        project={project?.root ?? null}
+        currentSession={activeSession?.id ?? null}
+        onClose={() => setPaletteOpen(false)}
+        onAction={runPaletteAction}
+        onSkill={openSkillFromPalette}
+        onSession={openSessionFromPalette}
+        onTurn={openTurnFromPalette}
+        onPatch={openPatchFromPalette}
+      />
+
       <footer className="status" aria-label="Status">
         <span className="status-model">
           rigel {isTauri() ? "desktop" : "browser"}
@@ -1028,13 +1344,7 @@ ${task}`,
         <span className="mono" title="Provider key in the OS keychain">
           {isTauri()
             ? keys
-              ? keys.omniroute
-                ? "omniroute key"
-                : keys.openrouter
-                  ? "openrouter key"
-                  : keys.gemini
-                    ? "gemini key"
-                    : "no provider key"
+              ? nativeKeyLabel(keys, providers)
               : "checking key"
             : "preview key"}
         </span>
@@ -1047,6 +1357,13 @@ ${task}`,
               : "sample"}
         </span>
         <span className="grow" />
+        <button
+          className="chip"
+          onClick={() => setPaletteOpen(true)}
+          title="Search actions, skills, sessions, turns and patches (Ctrl+K)"
+        >
+          Search · Ctrl K
+        </button>
         <span className="metric" title="Interventions per completed task — the product metric (D17)">
           {activeSession
             ? `${activeSession.interventions}/${activeSession.tasks_done} interventions/tasks`

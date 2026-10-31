@@ -35,15 +35,28 @@ COLOR — dark default, light required
   hairline    rgba(255,255,255,0.07)   1px borders; depth comes from borders, never shadows
   text        #E6E8EB   primary
   text-muted  #9BA1A9   secondary
-  text-faint  #6B727C   tertiary, timestamps, metadata
+  text-faint  #7B838D   tertiary, timestamps, metadata (5.0:1 on the bg — AA at 10–11px)
   accent      #E9A23B   amber — the only accent. Actions, focus, the active thing.
   verified    #4CC38A   "checks passed", installed
   danger      #E5484D   destructive, failed checks, critical capability flags
   info        #6E9BFF   links and neutral notices only
 Amber is the identity: it reads as measurement, and it is not what any competitor uses.
 Never introduce a second accent hue. Semantic colors are for state only, never decoration.
-Light theme: invert surfaces to #FAFAF9 / #FFFFFF / #F2F2F0, keep the same amber, darken text
-to #14161A — and verify contrast, don't just flip values.
+
+COLOR — light (D126), same amber, every value measured not flipped
+  bg          #FAFAF9   surface #FFFFFF   raised #F2F2F0   well #F7F7F5
+  hairline    rgba(20,22,26,0.10)
+  text        #14161A   18.1:1 on white
+  text-muted  #565D67   6.65:1 on white, 5.93:1 on the raised surface
+  text-faint  #616A74   5.49:1 on white, 4.90:1 on raised — still clears AA at 10–11px
+  accent      #E9A23B   fills, borders and the cursor keep the exact amber
+  accent-text #9C5D00   amber labels and icons: 5.28:1 on white, 4.71:1 on raised
+  verified    #16794A   5.43:1 on white
+  danger      #B42318   6.57:1 on white
+  On the amber fill: #191106 in both themes (8.6:1).
+A theme switch changes tokens only — components read them, so no surface is left behind. The
+terminal carries two full ANSI palettes (dark and light) because xterm paints its own canvas;
+its light slots are also ≥4.5:1, including the dim ones a prompt uses for metadata.
 
 TYPE
   UI:    Inter (fallback system-ui). Weights 400/500/600 only. Never 700+.
@@ -157,6 +170,6 @@ ACCEPTANCE CHECKS
 
 ## Open design questions for you
 
-1. **Light theme: ship it at all?** A coding tool that lives beside an editor is usually dark-only. Supporting light doubles the QA surface for a small gain — but some users will refuse to open a dark app.
+1. **Light theme: ship it at all?** A coding tool that lives beside an editor is usually dark-only. **Answered (D126):** ship it — one palette behind the same tokens, so the cost is two values per token and one extra ANSI set, not a second stylesheet. Dark stays the default.
 2. **Transcript density.** Collapsed tool calls (one line each) is my recommendation; a "verbose mode" showing streaming output by default would match Warp but fights the instrument thesis.
 3. **Where does the package browser live** — a real pane in the sidebar, or a full-screen overlay invoked by `Ctrl+Shift+P`? A pane makes it ambient and discoverable; an overlay keeps the session screen clean.

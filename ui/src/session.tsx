@@ -1,13 +1,15 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import type { ReactNode } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import type { KeyboardEvent as ReactKeyboardEvent, ReactNode } from "react";
 
 import {
   api,
   compact,
+  defaultSettings,
   when,
   isTauri,
   type Agent,
   type AgentEvent,
+  type Bookmark,
   type BudgetSnapshot,
   type Item,
   type ApprovalAnswer,
@@ -15,6 +17,7 @@ import {
   type Patch,
   type PendingApproval,
   type Session,
+  type SessionTemplate,
   type Settings,
   type Turn,
   type SwarmTarget,
@@ -49,6 +52,11 @@ interface Props {
   onSwarmPrepare?: () => Promise<SwarmTarget[]>;
   /** Swarm step two: broadcast one task to the chosen agent names. */
   onSwarm?: (task: string, names: string[]) => Promise<void>;
+  /** D147: open this session and land on a turn once its transcript is rendered. */
+  focus?: { sessionId: string; turnId?: string } | null;
+  onFocusHandled?: () => void;
+  /** D150: a bookmarked hunk opens the Diff surface on that hunk. */
+  onOpenHunk?: (hunkId: string) => void;
 }
 
 const money = (micros: number | null | undefined): string =>
@@ -57,6 +65,9 @@ const money = (micros: number | null | undefined): string =>
 const cents = (value: number | null | undefined): string =>
   value === null || value === undefined ? "no cap" : `$${(value / 100).toFixed(2)}`;
 
+/** D153: a range is read at a glance, so a fraction of a cent keeps its significant digits. */
+const shortMoney = (micros: number): string =>
+  `$${(micros / 1_000_000).toFixed(micros < 10_000 ? 6 : 4)}`;
 function bodyText(item: Item, key: string): string {
   const value = item.body?.[key];
   return typeof value === "string" ? value : "";
@@ -79,6 +90,182 @@ function argsSummary(item: Item): string {
   return "";
 }
 
+/** D150: the label the inspector draws, built from the line rather than a second query. */
+function itemBookmarkLabel(item: Item, seq: number): string {
+  const summary =
+    item.kind === "message" || item.kind === "reasoning" || item.kind === "note"
+      ? bodyText(item, "text")
+      : item.kind === "error"
+        ? bodyText(item, "message")
+        : argsSummary(item);
+  const tail = summary.replace(/\s+/g, " ").trim().slice(0, 100);
+  return `turn ${seq} · ${item.kind}${tail ? ` · ${tail}` : ""}`;
+}
+
+/* ------------------------- transcript filters (D136) ------------------------- */
+
+/** The five views of one transcript. `yours` keeps the prompts and the notes you wrote. */
+type TranscriptFilter = "all" | "tools" | "diffs" | "errors" | "yours";
+
+const FILTERS: { id: TranscriptFilter; label: string }[] = [
+  { id: "all", label: "all" },
+  { id: "tools", label: "tools" },
+  { id: "diffs", label: "diffs" },
+  { id: "errors", label: "errors" },
+  { id: "yours", label: "yours" },
+];
+
+const TOOL_KINDS = new Set(["command", "mcp_call", "web_search"]);
+const BAD_STATES = new Set([
+  "error",
+  "failed",
+  "cancelled",
+  "denied",
+  "timeout",
+  "timed_out",
+  "interrupted",
+]);
+
+function isErrorItem(item: Item): boolean {
+  return item.kind === "error" || BAD_STATES.has(item.status);
+}
+
+function matchesFilter(item: Item, filter: TranscriptFilter): boolean {
+  if (filter === "all") return true;
+  if (filter === "tools") return TOOL_KINDS.has(item.kind);
+  if (filter === "diffs") return item.kind === "file_change";
+  if (filter === "errors") return isErrorItem(item);
+  return item.kind === "note";
+}
+
+/** A prompt is yours, and it is the one line that is not an item. */
+function filterShowsPrompt(filter: TranscriptFilter): boolean {
+  return filter === "all" || filter === "yours";
+}
+
+const filterKey = (project: string, session: string) =>
+  `rigel.transcriptFilter.${project}::${session}`;
+
+function readFilter(project: string, session: string): TranscriptFilter {
+  try {
+    const saved = localStorage.getItem(filterKey(project, session));
+    return FILTERS.some((row) => row.id === saved) ? (saved as TranscriptFilter) : "all";
+  } catch {
+    return "all";
+  }
+}
+
+/* --------------------------- turn outline (D149) --------------------------- */
+
+type OutlineKind = "prompt" | "diff" | "error" | "approval";
+
+interface OutlineGroup {
+  turnId: string;
+  seq: number;
+  marks: { key: string; kind: OutlineKind; title: string }[];
+}
+
+/* --------------------- composer history and snippets (D151) --------------------- */
+
+interface PromptEntry {
+  session: string;
+  text: string;
+  at: number;
+}
+
+interface Snippet {
+  id: string;
+  label: string;
+  body: string;
+}
+
+const HISTORY_LIMIT = 100;
+
+/* ----------------------- while you were away (D155) ----------------------- */
+
+/** What changed between losing focus and getting it back, counted at focus time. */
+interface AwaySummary {
+  turns: number;
+  patches: number;
+  approvals: number;
+  spend: number;
+}
+
+/* --------------------------- cost preflight (D153) --------------------------- */
+
+/** The last few completed turns are the sample; the floor is when a range means anything. */
+const PREFLIGHT_SAMPLE = 8;
+const PREFLIGHT_FLOOR = 3;
+/** Rough system prompt and tool schemas on every step; only used to scale by draft size. */
+const CONTEXT_TOKENS = 400;
+const SNIPPET_LIMIT = 20;
+const historyKey = (project: string) => `rigel.prompts.${project}`;
+const snippetsKey = (project: string) => `rigel.snippets.${project}`;
+
+/** Three starter snippets, used only until the project has stored its own list. */
+const DEFAULT_SNIPPETS: Snippet[] = [
+  {
+    id: "snippet-review",
+    label: "Review the diff",
+    body: "Review the current diff for {risk}. Read the diff before the description; name the one risk that matters.",
+  },
+  {
+    id: "snippet-failure",
+    label: "Explain a failure",
+    body: "`{command}` failed. Find the cause; do not patch anything yet.",
+  },
+  {
+    id: "snippet-test",
+    label: "Add a test",
+    body: "Add a test for {behavior}. Run it and report the result.",
+  },
+];
+
+function readHistory(project: string): PromptEntry[] {
+  try {
+    const raw = localStorage.getItem(historyKey(project));
+    if (!raw) return [];
+    const parsed: unknown = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return [];
+    return parsed.filter(
+      (row): row is PromptEntry =>
+        typeof row === "object" &&
+        row !== null &&
+        typeof (row as PromptEntry).session === "string" &&
+        typeof (row as PromptEntry).text === "string",
+    );
+  } catch {
+    return [];
+  }
+}
+
+function readSnippets(project: string): Snippet[] {
+  try {
+    const raw = localStorage.getItem(snippetsKey(project));
+    if (raw === null) return DEFAULT_SNIPPETS;
+    const parsed: unknown = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return DEFAULT_SNIPPETS;
+    return parsed.filter(
+      (row): row is Snippet =>
+        typeof row === "object" &&
+        row !== null &&
+        typeof (row as Snippet).id === "string" &&
+        typeof (row as Snippet).label === "string" &&
+        typeof (row as Snippet).body === "string",
+    );
+  } catch {
+    return DEFAULT_SNIPPETS;
+  }
+}
+
+function writeSnippets(project: string, rows: Snippet[]): void {
+  try {
+    localStorage.setItem(snippetsKey(project), JSON.stringify(rows));
+  } catch {
+    // A blocked store only forgets the list; the menu works for this run.
+  }
+}
+
 export default function SessionView({
   project,
   onSessions,
@@ -89,6 +276,9 @@ export default function SessionView({
   projectControls,
   onSwarmPrepare,
   onSwarm,
+  focus,
+  onFocusHandled,
+  onOpenHunk,
 }: Props) {
   const tauri = isTauri();
   const [session, setSession] = useState<Session | null>(() => (tauri ? null : previewSession));
@@ -100,6 +290,7 @@ export default function SessionView({
   const [budget, setBudget] = useState<BudgetSnapshot | null>(() => (tauri ? null : previewBudget));
   const [patches, setPatches] = useState<Patch[]>(() => (tauri ? [] : previewPatches));
   const [checkpoints, setCheckpoints] = useState<Checkpoint[]>([]);
+  const [bookmarks, setBookmarks] = useState<Bookmark[]>([]);
   const [stream, setStream] = useState<Record<string, string>>({});
   const [liveTurn, setLiveTurn] = useState<Turn | null>(null);
   // D40: one transcript, or two side by side. Never more than two, and never a grid.
@@ -117,6 +308,19 @@ export default function SessionView({
   const [attachments, setAttachments] = useState<string[]>([]);
   const [addOpen, setAddOpen] = useState(false);
   const addRef = useRef<HTMLDivElement | null>(null);
+  // D151: snippets are project-local drafts; history is the prompts this project has sent.
+  const [snippets, setSnippets] = useState<Snippet[]>(() => readSnippets(project));
+  const [snipOpen, setSnipOpen] = useState(false);
+  const snippetRef = useRef<HTMLDivElement | null>(null);
+  // D152: project-local templates, offered by the "+ session" button. Never committed.
+  const [templates, setTemplates] = useState<SessionTemplate[]>([]);
+  const [templateOpen, setTemplateOpen] = useState(false);
+  const [templateSaving, setTemplateSaving] = useState(false);
+  const templateRef = useRef<HTMLDivElement | null>(null);
+  const composerRef = useRef<HTMLTextAreaElement | null>(null);
+  const pendingSelection = useRef<[number, number] | null>(null);
+  const [historyIndex, setHistoryIndex] = useState<number | null>(null);
+  const [historyDraft, setHistoryDraft] = useState("");
   // The draft waiting in the review card. Non-null means Send paused before a turn.
   const [review, setReview] = useState<string | null>(null);
   const [quote, setQuote] = useState<TurnQuote | null>(null);
@@ -124,6 +328,7 @@ export default function SessionView({
   const [keyPresent, setKeyPresent] = useState<boolean | null>(tauri ? null : true);
   const [warning, setWarning] = useState(false);
   const [exporting, setExporting] = useState(false);
+  const [publishing, setPublishing] = useState(false);
   // Who the composer sends to. A Claude turn is run by the harness; everything else is the
   // native loop. The picker is the only place this is chosen, so the transcript header can say
   // which agent answered.
@@ -131,6 +336,26 @@ export default function SessionView({
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [starting, setStarting] = useState(false);
+  // D148: the left pane is either the project's sessions or this session's agents. The list
+  // lives here rather than in App because every edit returns the row the core stored.
+  const [pane, setPane] = useState<"sessions" | "agents">("agents");
+  const [list, setList] = useState<Session[]>(() => (tauri ? [] : [previewSession]));
+  const [sessionQuery, setSessionQuery] = useState("");
+  const [statusFilter, setStatusFilter] = useState<"all" | Session["status"]>("all");
+  const [showArchived, setShowArchived] = useState(false);
+  const [renaming, setRenaming] = useState<string | null>(null);
+  const [renameText, setRenameText] = useState("");
+  const renamingRef = useRef<string | null>(null);
+  const [listBusy, setListBusy] = useState<string | null>(null);
+  // D136/D149: the filter is remembered per session; the outline tracks where the reader is.
+  const [filter, setFilter] = useState<TranscriptFilter>("all");
+  const [activeTurnId, setActiveTurnId] = useState<string | null>(null);
+  const transcriptRef = useRef<HTMLDivElement | null>(null);
+  // D155: one card on focus, built from what changed while the window was in the background.
+  const [away, setAway] = useState<AwaySummary | null>(null);
+  const awayMark = useRef<{ at: number; spend: number; approvals: number } | null>(null);
+  const turnsRef = useRef(turns);
+  const patchesRef = useRef(patches);
   const [defaults, setDefaults] = useState<Settings | null>(null);
   const [swarming, setSwarming] = useState(false);
   const [preparing, setPreparing] = useState(false);
@@ -144,10 +369,23 @@ export default function SessionView({
     tauri ? [] : previewApprovals.map((pending) => ({ ...pending })),
   );
   const approvalsSeen = useRef(0);
+  const approvalsRef = useRef(approvals);
   const defaultsRef = useRef<Settings | null>(defaults);
   useEffect(() => {
     defaultsRef.current = defaults;
   }, [defaults]);
+
+  // The focus listener runs on session boundaries only, so it reads the latest rows through
+  // refs rather than restarting — and resetting its baseline — on every streamed item.
+  useEffect(() => {
+    turnsRef.current = turns;
+  }, [turns]);
+  useEffect(() => {
+    patchesRef.current = patches;
+  }, [patches]);
+  useEffect(() => {
+    approvalsRef.current = approvals;
+  }, [approvals]);
 
   useEffect(() => {
     let live = true;
@@ -181,6 +419,12 @@ export default function SessionView({
   const effort = defaults?.effort ?? "medium";
 
   const sessionRef = useRef<Session | null>(session);
+  // A palette jump must not race the mount effect that opens the newest session. The ref keeps
+  // the latest request visible to that effect without making it a dependency.
+  const focusRef = useRef(focus);
+  useEffect(() => {
+    focusRef.current = focus;
+  }, [focus]);
   const projectRef = useRef(project);
   const bottomRef = useRef<HTMLDivElement | null>(null);
   useEffect(() => {
@@ -191,13 +435,15 @@ export default function SessionView({
     projectRef.current = project;
   }, [project]);
 
-  // A command can be asked for at any moment while a turn runs, so the card polls. In the
-  // browser the same call returns the sample queue, which is how this state is inspectable.
+  // A command can be asked for at any moment while a turn runs, so the card polls. The read is
+  // scoped to the open project, so another checkout's question is not this card's to answer.
+  // In the browser the same call returns the sample queue, which is how this state is
+  // inspectable.
   useEffect(() => {
     let alive = true;
     const tick = async () => {
       try {
-        const open = await api.approvals.pending();
+        const open = await api.approvals.pending(project);
         if (alive) {
           if (open.length > approvalsSeen.current) {
             notify(
@@ -250,19 +496,22 @@ export default function SessionView({
     const current = sessionRef.current;
     if (!tauri || !projectRef.current || !current) return;
     try {
-      const [nextTurns, nextAgents, nextPatches, nextSession, nextTeam, nextCheckpoints] = await Promise.all([
-        api.transcript(projectRef.current, current.id),
-        api.listAgents(projectRef.current, current.id),
-        api.listPatches(projectRef.current, current.id),
-        api.getSession(projectRef.current, current.id),
-        api.team(projectRef.current, current.id),
-        api.listCheckpoints(projectRef.current, current.id),
-      ]);
+      const [nextTurns, nextAgents, nextPatches, nextSession, nextTeam, nextCheckpoints, nextBookmarks] =
+        await Promise.all([
+          api.transcript(projectRef.current, current.id),
+          api.listAgents(projectRef.current, current.id),
+          api.listPatches(projectRef.current, current.id),
+          api.getSession(projectRef.current, current.id),
+          api.team(projectRef.current, current.id),
+          api.listCheckpoints(projectRef.current, current.id),
+          api.listBookmarks(projectRef.current, current.id),
+        ]);
       setTurns(nextTurns);
       setAgents(nextAgents);
       setPatches(nextPatches);
       setCheckpoints(nextCheckpoints);
       setTeam(nextTeam);
+      setBookmarks(nextBookmarks);
       setSession(nextSession);
       if (nextAgents[0]) {
         setBudget(await api.getBudget(projectRef.current, nextAgents[0].id));
@@ -279,31 +528,43 @@ export default function SessionView({
       setAgents([]);
       setPatches([]);
       setCheckpoints([]);
+      setBookmarks([]);
       setTeam([]);
       setBudget(null);
       setError(null);
       if (!tauri || !project) return;
       try {
-        const [loadedTurns, loadedAgents, loadedPatches, fresh, loadedTeam, loadedCheckpoints] =
-          await Promise.all([
-            api.transcript(project, next.id),
-            api.listAgents(project, next.id),
-            api.listPatches(project, next.id),
-            api.getSession(project, next.id),
-            api.team(project, next.id),
-            api.listCheckpoints(project, next.id),
-          ]);
+        const [
+          loadedTurns,
+          loadedAgents,
+          loadedPatches,
+          fresh,
+          loadedTeam,
+          loadedCheckpoints,
+          loadedBookmarks,
+        ] = await Promise.all([
+          api.transcript(project, next.id),
+          api.listAgents(project, next.id),
+          api.listPatches(project, next.id),
+          api.getSession(project, next.id),
+          api.team(project, next.id),
+          api.listCheckpoints(project, next.id),
+          api.listBookmarks(project, next.id),
+        ]);
         setTurns(loadedTurns);
         setAgents(loadedAgents);
         setPatches(loadedPatches);
         setCheckpoints(loadedCheckpoints);
+        setBookmarks(loadedBookmarks);
         setTeam(loadedTeam);
         setSession(fresh);
+        // The row in the list is the same record as the open session; a resume can change it.
+        setList((rows) => rows.map((row) => (row.id === fresh.id ? fresh : row)));
         if (loadedAgents[0]) {
           setBudget(await api.getBudget(project, loadedAgents[0].id));
         }
         const keys = await api.keyStatus();
-        setKeyPresent(keys.omniroute || keys.openrouter || keys.gemini);
+        setKeyPresent(keys.native_ready);
       } catch (problem) {
         setError(problem instanceof Error ? problem.message : String(problem));
       }
@@ -322,7 +583,14 @@ export default function SessionView({
       try {
         const [listed, keys] = await Promise.all([api.listSessions(project), api.keyStatus()]);
         if (!live) return;
-        setKeyPresent(keys.omniroute || keys.openrouter || keys.gemini);
+        setKeyPresent(keys.native_ready);
+        setList(listed);
+        if (focusRef.current) {
+          // A palette jump names its session; opening the newest first would race it and could
+          // leave the wrong transcript on screen.
+          onSessions(listed);
+          return;
+        }
         const pick =
           listed.find((candidate) => candidate.status !== "ended") ?? listed[0] ?? null;
         if (pick) {
@@ -346,6 +614,47 @@ export default function SessionView({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [tauri, project]);
 
+  // D147: the palette can name a session that is not the newest one. Open it, then scroll to
+  // the requested turn after the transcript has rendered; clear the request either way so it
+  // cannot fire again on the next save.
+  useEffect(() => {
+    if (!focus || !tauri || !project) return;
+    let live = true;
+    void (async () => {
+      if (sessionRef.current?.id !== focus.sessionId) {
+        try {
+          const target = await api.getSession(project, focus.sessionId);
+          if (!live) return;
+          await selectSession(target);
+        } catch (problem) {
+          if (!live) return;
+          setError(problem instanceof Error ? problem.message : String(problem));
+          onFocusHandled?.();
+          return;
+        }
+      }
+      if (!live) return;
+      if (!focus.turnId) {
+        onFocusHandled?.();
+        return;
+      }
+      // One paint for the transcript that selectSession just set.
+      window.setTimeout(() => {
+        if (!live) return;
+        const row = document.getElementById(`turn-${focus.turnId}`);
+        if (row) {
+          row.scrollIntoView({ block: "center" });
+          row.classList.add("jump");
+          window.setTimeout(() => row.classList.remove("jump"), 1800);
+        }
+        onFocusHandled?.();
+      }, 80);
+    })();
+    return () => {
+      live = false;
+    };
+  }, [focus, project, tauri, selectSession, onFocusHandled]);
+
   // The saved default (D28). The picker writes through the same settings command as Settings.
   useEffect(() => {
     let live = true;
@@ -360,23 +669,29 @@ export default function SessionView({
 
   const applyModel = useCallback(
     async (nextModel: string, nextEffort: string, nextProvider?: string) => {
-      const base: Settings = defaults ?? {
-        theme: "dark",
-        default_budget_cents: 500,
-        unattended_default: false,
-        provider: "omniroute",
-        model: nextModel,
-        effort: nextEffort,
-        notify_approval: true,
-        notify_turn_done: true,
-        notify_turn_failed: true,
-      };
+      const base: Settings = defaults ?? defaultSettings();
       const next = {
         ...base,
         model: nextModel,
         effort: nextEffort,
         ...(nextProvider ? { provider: nextProvider } : {}),
       };
+      setDefaults(next);
+      try {
+        setDefaults(await api.saveSettings(next));
+      } catch (problem) {
+        setError(problem instanceof Error ? problem.message : String(problem));
+      }
+    },
+    [defaults],
+  );
+
+  // The picker's chat filter is a saved preference, not popover state: the same command as the
+  // model, so a restart reads back what this window last chose.
+  const applyChatOnly = useCallback(
+    async (chatModelsOnly: boolean) => {
+      const base: Settings = defaults ?? defaultSettings();
+      const next = { ...base, chat_models_only: chatModelsOnly };
       setDefaults(next);
       try {
         setDefaults(await api.saveSettings(next));
@@ -603,12 +918,18 @@ export default function SessionView({
   }, [session, text, spendMicros, capMicros, model, effort]);
 
   useEffect(() => {
-    if (!addOpen) return;
+    if (!addOpen && !snipOpen && !templateOpen) return;
     const closeOnPointer = (event: PointerEvent) => {
       if (!addRef.current?.contains(event.target as Node)) setAddOpen(false);
+      if (!snippetRef.current?.contains(event.target as Node)) setSnipOpen(false);
+      if (!templateRef.current?.contains(event.target as Node)) setTemplateOpen(false);
     };
     const closeOnKey = (event: KeyboardEvent) => {
-      if (event.key === "Escape") setAddOpen(false);
+      if (event.key === "Escape") {
+        setAddOpen(false);
+        setSnipOpen(false);
+        setTemplateOpen(false);
+      }
     };
     window.addEventListener("pointerdown", closeOnPointer);
     window.addEventListener("keydown", closeOnKey);
@@ -616,7 +937,25 @@ export default function SessionView({
       window.removeEventListener("pointerdown", closeOnPointer);
       window.removeEventListener("keydown", closeOnKey);
     };
-  }, [addOpen]);
+  }, [addOpen, snipOpen]);
+
+  // Snippets are stored per project, so opening another project reads its own list.
+  useEffect(() => {
+    setSnippets(readSnippets(project));
+    setSnipOpen(false);
+  }, [project]);
+
+  // D151: the placeholder is selected after the inserted text commits. A layout effect runs
+  // before the next paint, so typing cannot land in the old caret position first.
+  useLayoutEffect(() => {
+    const pending = pendingSelection.current;
+    if (!pending) return;
+    pendingSelection.current = null;
+    const area = composerRef.current;
+    if (!area) return;
+    area.focus();
+    area.setSelectionRange(pending[0], pending[1]);
+  }, [text]);
 
   const withAttachments = useCallback(
     (prompt: string) => {
@@ -628,26 +967,270 @@ export default function SessionView({
     [attachments],
   );
 
+  /** D151: the prompt that actually ran, once, per project. A restart keeps the list. */
+  const rememberPrompt = useCallback(
+    (prompt: string) => {
+      if (!project || !session) return;
+      try {
+        const entries = readHistory(project).filter(
+          (row) => !(row.session === session.id && row.text === prompt),
+        );
+        entries.push({ session: session.id, text: prompt, at: Date.now() });
+        localStorage.setItem(
+          historyKey(project),
+          JSON.stringify(entries.slice(-HISTORY_LIMIT)),
+        );
+      } catch {
+        // History is a convenience; a blocked store must not block the turn.
+      }
+      setHistoryIndex(null);
+    },
+    [project, session],
+  );
+
   /* ------------------------------- actions ------------------------------- */
 
-  const startSession = useCallback(async () => {
-    if (!tauri || !project) {
-      onNotice("Open the desktop app to create a session.");
+  const startSession = useCallback(
+    async (template?: SessionTemplate) => {
+      if (!tauri || !project) {
+        onNotice("Open the desktop app to create a session.");
+        return;
+      }
+      setStarting(true);
+      setTemplateOpen(false);
+      try {
+        const created = await api.startSession(project, template?.name ?? "Session", 500);
+        const listed = await api.listSessions(project);
+        setList(listed);
+        onSessions(listed);
+        await selectSession(created);
+        if (!template) {
+          onNotice(`Session started with a $5.00 cap.`);
+          return;
+        }
+        // The template's model and effort are applied through the same path the picker uses,
+        // because a turn reads one window-wide default (D130); the roster and the prompt are
+        // the template's own.
+        if (template.model) {
+          await applyModel(template.model, template.effort ?? effort);
+        }
+        if (template.max_steps && defaults) {
+          setDefaults(await api.saveSettings({ ...defaults, max_steps: template.max_steps }));
+        }
+        for (const entry of template.agents) {
+          const spawned = await api.spawnAgent(
+            project,
+            created.id,
+            entry.harness === "claude" ? "claude" : "native",
+            entry.role ?? undefined,
+            entry.model ?? undefined,
+          );
+          setAgents((current) => [...current, spawned]);
+        }
+        if (template.prompt) {
+          setText(template.prompt);
+          composerRef.current?.focus();
+        }
+        onNotice(
+          `Started from “${template.name}”. The prompt is in the composer; nothing has been sent.`,
+        );
+      } catch (problem) {
+        setError(problem instanceof Error ? problem.message : String(problem));
+      } finally {
+        setStarting(false);
+      }
+    },
+    [
+      tauri,
+      project,
+      defaults,
+      effort,
+      applyModel,
+      selectSession,
+      onSessions,
+      onNotice,
+    ],
+  );
+
+  // D152: templates belong to the project, so opening another one shows its own list. A
+  // missing or unreadable file is an empty list, never an error on the session surface.
+  useEffect(() => {
+    if (!project) {
+      setTemplates([]);
       return;
     }
-    setStarting(true);
+    let live = true;
+    api.templates
+      .list(project)
+      .then((next) => live && setTemplates(next))
+      .catch(() => live && setTemplates([]));
+    return () => {
+      live = false;
+    };
+  }, [project]);
+
+  /** Save the current shape of the session: model, effort, steps, roster and the draft. */
+  const saveTemplate = useCallback(async () => {
+    if (!project || !session) return;
+    setTemplateSaving(true);
     try {
-      const created = await api.startSession(project, "Session", 500);
-      const listed = await api.listSessions(project);
-      onSessions(listed);
-      await selectSession(created);
-      onNotice(`Session started with a $5.00 cap.`);
+      const name = (session.title || "Session").slice(0, 60);
+      const existing = templates.find(
+        (row) => row.name.toLowerCase() === name.toLowerCase(),
+      );
+      const saved = await api.templates.save(project, {
+        id: existing?.id ?? "",
+        name,
+        model,
+        effort,
+        max_steps: defaults?.max_steps ?? null,
+        agents: agents.map((agent) => ({
+          harness: agent.harness,
+          role: agent.role,
+          model: agent.model,
+        })),
+        prompt: text,
+        created_at: existing?.created_at ?? 0,
+      });
+      setTemplates((current) =>
+        [...current.filter((row) => row.id !== saved.id), saved].sort((a, b) =>
+          a.name.localeCompare(b.name),
+        ),
+      );
+      onNotice(`“${saved.name}” saved in this project's templates. Model ids stay out of git.`);
     } catch (problem) {
       setError(problem instanceof Error ? problem.message : String(problem));
     } finally {
-      setStarting(false);
+      setTemplateSaving(false);
     }
-  }, [tauri, project, onSessions, onNotice, selectSession]);
+  }, [project, session, templates, model, effort, defaults, agents, text, onNotice]);
+
+  const removeTemplate = useCallback(
+    async (template: SessionTemplate) => {
+      if (!project) return;
+      try {
+        await api.templates.delete(project, template.id);
+        setTemplates((current) => current.filter((row) => row.id !== template.id));
+        onNotice(`“${template.name}” removed from this project.`);
+      } catch (problem) {
+        setError(problem instanceof Error ? problem.message : String(problem));
+      }
+    },
+    [project, onNotice],
+  );
+
+  /* ------------------------- the session list (D148) ------------------------- */
+
+  /** Replace one row with the stored answer and keep App's count in step. */
+  const applySession = useCallback(
+    (next: Session) => {
+      const updated = list.map((row) => (row.id === next.id ? next : row));
+      setList(updated);
+      onSessions(updated);
+      setSession((current) => (current && current.id === next.id ? next : current));
+    },
+    [list, onSessions],
+  );
+
+  const openListItem = useCallback(
+    async (row: Session) => {
+      if (row.id === sessionRef.current?.id) return;
+      await selectSession(row);
+    },
+    [selectSession],
+  );
+
+  const togglePin = useCallback(
+    async (row: Session) => {
+      if (listBusy) return;
+      const pinned = row.pinned_at === null;
+      setListBusy(row.id);
+      try {
+        const next = tauri
+          ? await api.pinSession(project, row.id, pinned)
+          : { ...row, pinned_at: pinned ? Date.now() : null };
+        applySession(next);
+        onNotice(pinned ? "Pinned to the top of the list." : "Unpinned.");
+      } catch (problem) {
+        setError(problem instanceof Error ? problem.message : String(problem));
+      } finally {
+        setListBusy(null);
+      }
+    },
+    [tauri, project, listBusy, applySession, onNotice],
+  );
+
+  const toggleArchive = useCallback(
+    async (row: Session) => {
+      if (listBusy) return;
+      const archived = row.archived_at === null;
+      setListBusy(row.id);
+      try {
+        const next = tauri
+          ? await api.archiveSession(project, row.id, archived)
+          : { ...row, archived_at: archived ? Date.now() : null };
+        applySession(next);
+        onNotice(
+          archived
+            ? "Archived. It stays searchable with Ctrl+K and resumable from the list."
+            : "Restored to the list.",
+        );
+      } catch (problem) {
+        setError(problem instanceof Error ? problem.message : String(problem));
+      } finally {
+        setListBusy(null);
+      }
+    },
+    [tauri, project, listBusy, applySession, onNotice],
+  );
+
+  const beginRename = (row: Session) => {
+    renamingRef.current = row.id;
+    setRenaming(row.id);
+    setRenameText(row.title ?? "");
+  };
+
+  const cancelRename = () => {
+    renamingRef.current = null;
+    setRenaming(null);
+  };
+
+  const commitRename = useCallback(
+    async (row: Session, raw: string) => {
+      // Enter blurs the input, so both paths can arrive; only the first one commits.
+      if (renamingRef.current !== row.id) return;
+      renamingRef.current = null;
+      setRenaming(null);
+      const title = raw.trim();
+      if (title === (row.title ?? "")) return;
+      try {
+        const next = tauri
+          ? await api.renameSession(project, row.id, title || null)
+          : { ...row, title: title || null };
+        applySession(next);
+      } catch (problem) {
+        setError(problem instanceof Error ? problem.message : String(problem));
+      }
+    },
+    [tauri, project, applySession],
+  );
+
+  const visibleSessions = useMemo(() => {
+    const needle = sessionQuery.trim().toLowerCase();
+    return list
+      .filter((row) => showArchived || row.archived_at === null)
+      .filter((row) => statusFilter === "all" || row.status === statusFilter)
+      .filter(
+        (row) =>
+          !needle ||
+          (row.title ?? "").toLowerCase().includes(needle) ||
+          row.id.toLowerCase().startsWith(needle),
+      )
+      .sort(
+        (a, b) =>
+          (b.pinned_at ?? 0) - (a.pinned_at ?? 0) || b.created_at - a.created_at,
+      );
+  }, [list, sessionQuery, statusFilter, showArchived]);
 
   const resume = useCallback(
     async (force: boolean) => {
@@ -714,6 +1297,7 @@ export default function SessionView({
           ],
         },
       ]);
+      rememberPrompt(prompt);
       setAttachments([]);
       return;
     }
@@ -738,6 +1322,7 @@ export default function SessionView({
         worker = spawned;
       }
       const reply = await api.sendTurn(project, session.id, worker.id, turnPrompt, model, effort);
+      rememberPrompt(prompt);
       setAttachments([]);
       setLiveTurn(reply.turn);
       setTurns((previous) => [
@@ -753,7 +1338,19 @@ export default function SessionView({
     } finally {
       setBusy(false);
     }
-  }, [session, busy, tauri, agents, shown, project, model, effort, target, withAttachments]);
+  }, [
+    session,
+    busy,
+    tauri,
+    agents,
+    shown,
+    project,
+    model,
+    effort,
+    target,
+    withAttachments,
+    rememberPrompt,
+  ]);
 
   /** Copy files picked in the native dialog, then let the next turn name their paths. */
   const attachFiles = useCallback(async () => {
@@ -790,6 +1387,111 @@ export default function SessionView({
     setAddOpen(false);
     setReview(prompt);
   }, [text, session, busy, review, attachments]);
+
+  /** D151: newest first, scoped to this session unless a modifier asks for the project. */
+  const promptHistory = useCallback(
+    (all: boolean) => {
+      if (!project || !session) return [];
+      return readHistory(project)
+        .filter((row) => all || row.session === session.id)
+        .sort((a, b) => a.at - b.at)
+        .slice(-HISTORY_LIMIT);
+    },
+    [project, session],
+  );
+
+  const cycleHistory = (direction: -1 | 1, all: boolean) => {
+    const entries = promptHistory(all);
+    if (entries.length === 0) return;
+    if (direction === -1) {
+      if (historyIndex === null) setHistoryDraft(text);
+      const next = historyIndex === null ? entries.length - 1 : Math.max(0, historyIndex - 1);
+      setHistoryIndex(next);
+      setText(entries[next].text);
+      return;
+    }
+    if (historyIndex === null) return;
+    if (historyIndex >= entries.length - 1) {
+      setHistoryIndex(null);
+      setText(historyDraft);
+    } else {
+      setHistoryIndex(historyIndex + 1);
+      setText(entries[historyIndex + 1].text);
+    }
+  };
+
+  /** An inserted snippet is text, never a send: Enter still opens the review card. */
+  const applySnippet = (snippet: Snippet) => {
+    const field = composerRef.current;
+    const focused = field !== null && document.activeElement === field;
+    const start = focused ? (field.selectionStart ?? text.length) : text.length;
+    const end = focused ? (field.selectionEnd ?? text.length) : text.length;
+    const separator = !focused && text.length > 0 && !text.endsWith("\n") ? "\n\n" : "";
+    const inserted = separator + snippet.body;
+    setText(text.slice(0, start) + inserted + text.slice(end));
+    setSnipOpen(false);
+    setHistoryIndex(null);
+    const offset = start + separator.length;
+    const open = snippet.body.indexOf("{");
+    if (open >= 0) {
+      const close = snippet.body.indexOf("}", open);
+      pendingSelection.current = [
+        offset + open,
+        offset + (close >= 0 ? close + 1 : open + 1),
+      ];
+    } else {
+      const end = offset + snippet.body.length;
+      pendingSelection.current = [end, end];
+    }
+  };
+
+  const saveDraftSnippet = () => {
+    const body = text.trim();
+    if (!body) return;
+    const label = (body.split("\n")[0] || "snippet").slice(0, 48);
+    const next = [...snippets, { id: `snippet-${Date.now()}`, label, body }].slice(
+      -SNIPPET_LIMIT,
+    );
+    setSnippets(next);
+    writeSnippets(project, next);
+    setSnipOpen(false);
+    onNotice("Draft saved as a snippet. It inserts text; nothing sends.");
+  };
+
+  const removeSnippet = (id: string) => {
+    const next = snippets.filter((row) => row.id !== id);
+    setSnippets(next);
+    writeSnippets(project, next);
+  };
+
+  /** Up/Down only at the boundary, so a caret inside a draft still moves like a caret. */
+  const onComposerKeyDown = (event: ReactKeyboardEvent<HTMLTextAreaElement>) => {
+    if (event.key === "Enter" && !event.shiftKey) {
+      event.preventDefault();
+      void send();
+      return;
+    }
+    if (event.shiftKey) return;
+    const all = event.metaKey || event.ctrlKey;
+    const field = event.currentTarget;
+    if (
+      event.key === "ArrowUp" &&
+      field.selectionStart === 0 &&
+      field.selectionEnd === 0
+    ) {
+      if (promptHistory(all).length === 0) return;
+      event.preventDefault();
+      cycleHistory(-1, all);
+    } else if (
+      event.key === "ArrowDown" &&
+      field.selectionStart === text.length &&
+      field.selectionEnd === text.length &&
+      historyIndex !== null
+    ) {
+      event.preventDefault();
+      cycleHistory(1, all);
+    }
+  };
 
   /** Swarm, first press: freeze the task and ask the room who can take it. */
   const prepareSwarm = useCallback(async () => {
@@ -892,6 +1594,76 @@ export default function SessionView({
     );
   }, []);
 
+  /* ----------------------------- bookmarks (D150) ----------------------------- */
+
+  const toggleItemBookmark = useCallback(
+    async (item: Item, seq: number) => {
+      if (!session) return;
+      const label = itemBookmarkLabel(item, seq);
+      const marked = bookmarks.some(
+        (row) => row.kind === "item" && row.target_id === item.id,
+      );
+      try {
+        const next = tauri
+          ? await api.toggleBookmark(project, session.id, "item", item.id, label)
+          : marked
+            ? null
+            : {
+                id: `preview-${item.id}`,
+                session_id: session.id,
+                kind: "item" as const,
+                target_id: item.id,
+                label,
+                created_at: Date.now(),
+              };
+        setBookmarks((rows) =>
+          next
+            ? [
+                next,
+                ...rows.filter(
+                  (row) => !(row.kind === "item" && row.target_id === item.id),
+                ),
+              ]
+            : rows.filter((row) => !(row.kind === "item" && row.target_id === item.id)),
+        );
+      } catch (problem) {
+        setError(problem instanceof Error ? problem.message : String(problem));
+      }
+    },
+    [tauri, project, session, bookmarks],
+  );
+
+  const removeBookmark = useCallback(
+    async (row: Bookmark) => {
+      if (!session) return;
+      try {
+        if (tauri) {
+          await api.toggleBookmark(project, session.id, row.kind, row.target_id, row.label);
+        }
+        setBookmarks((rows) => rows.filter((entry) => entry.id !== row.id));
+      } catch (problem) {
+        setError(problem instanceof Error ? problem.message : String(problem));
+      }
+    },
+    [tauri, project, session],
+  );
+
+  const jumpBookmark = (row: Bookmark) => {
+    if (row.kind === "hunk") {
+      onOpenHunk?.(row.target_id);
+      return;
+    }
+    // The line may be filtered out of the transcript; a bookmark jump is still a jump.
+    if (filter !== "all") chooseFilter("all");
+    window.setTimeout(() => {
+      const el = document.getElementById(`item-${row.target_id}`);
+      if (!el) return;
+      el.scrollIntoView({ block: "center" });
+      el.classList.add("jump");
+      window.setTimeout(() => el.classList.remove("jump"), 1800);
+    }, 30);
+  };
+
   // D40: a subagent is an agent of its own, spawned by a turn of another agent. The parent turn
   // names the row it hangs under, so the roster nests instead of listing children as peers.
   const roster = useMemo(() => {
@@ -931,8 +1703,213 @@ export default function SessionView({
     () => turns.filter((entry) => entry.turn.parent_turn_id === null),
     [turns],
   );
+
+  // D136/D149: counts and marks describe what is on screen, not the whole project. In the
+  // all-agents view that is every top-level turn; in a watched pane it is that agent's turns.
+  const paneEntries = useMemo(
+    () =>
+      shown.length === 0
+        ? shownTurns
+        : turns.filter((entry) => shown.includes(entry.turn.agent_id)),
+    [shown, shownTurns, turns],
+  );
+
+  const filterCounts = useMemo(() => {
+    const counts: Record<TranscriptFilter, number> = {
+      all: 0,
+      tools: 0,
+      diffs: 0,
+      errors: 0,
+      yours: 0,
+    };
+    for (const entry of paneEntries) {
+      if (entry.turn.prompt) {
+        counts.all += 1;
+        counts.yours += 1;
+      }
+      for (const item of entry.items) {
+        counts.all += 1;
+        if (matchesFilter(item, "tools")) counts.tools += 1;
+        if (matchesFilter(item, "diffs")) counts.diffs += 1;
+        if (matchesFilter(item, "errors")) counts.errors += 1;
+        if (matchesFilter(item, "yours")) counts.yours += 1;
+      }
+    }
+    return counts;
+  }, [paneEntries]);
+
+  const outline = useMemo<OutlineGroup[]>(() => {
+    const groups: OutlineGroup[] = [];
+    for (const entry of paneEntries) {
+      const marks: OutlineGroup["marks"] = [];
+      if (entry.turn.prompt) {
+        marks.push({
+          key: `prompt-${entry.turn.id}`,
+          kind: "prompt",
+          title: `turn ${entry.turn.seq} · your prompt: ${entry.turn.prompt.slice(0, 90)}`,
+        });
+      }
+      for (const item of entry.items) {
+        if (item.kind === "file_change") {
+          const result = bodyRecord(item, "result");
+          const path =
+            result && typeof result.path === "string" ? result.path : bodyText(item, "path");
+          marks.push({
+            key: `diff-${item.id}`,
+            kind: "diff",
+            title: `turn ${entry.turn.seq} · patch ${path}`.trim(),
+          });
+        } else if (isErrorItem(item)) {
+          const message =
+            item.kind === "error"
+              ? bodyText(item, "message")
+              : `${item.kind} ${item.status}`;
+          marks.push({
+            key: `error-${item.id}`,
+            kind: "error",
+            title: `turn ${entry.turn.seq} · error: ${message.slice(0, 80)}`,
+          });
+        } else if (item.kind === "approval") {
+          marks.push({
+            key: `approval-${item.id}`,
+            kind: "approval",
+            title: `turn ${entry.turn.seq} · approval ${bodyText(item, "kind") || item.status}`,
+          });
+        }
+      }
+      if (marks.length > 0) {
+        groups.push({ turnId: entry.turn.id, seq: entry.turn.seq, marks });
+      }
+    }
+    return groups;
+  }, [paneEntries]);
+
+  // The filter is one state per project + session: opening another session shows its own view,
+  // and a restart does not silently restore `all` over a deliberate choice.
+  useEffect(() => {
+    if (!project || !session) {
+      setFilter("all");
+      return;
+    }
+    setFilter(readFilter(project, session.id));
+  }, [project, session?.id]);
+
+  const chooseFilter = (next: TranscriptFilter) => {
+    setFilter(next);
+    if (!project || !session) return;
+    try {
+      localStorage.setItem(filterKey(project, session.id), next);
+    } catch {
+      // A blocked store forgets the choice; the transcript still filters for this run.
+    }
+  };
+
+  const jumpToTurn = useCallback((turnId: string) => {
+    const row = document.getElementById(`turn-${turnId}`);
+    if (!row) return;
+    row.scrollIntoView({ block: "center" });
+    row.classList.add("jump");
+    window.setTimeout(() => row.classList.remove("jump"), 1600);
+  }, []);
+
+  // D155: opening or switching a session is not time away; the first focus after it shows
+  // nothing. The card reports ids and counts, never prompts, and the notification path (D139)
+  // stays the place a click can open a turn.
+  useEffect(() => {
+    if (!session) return;
+    const stamp = () => ({
+      at: Date.now(),
+      spend: sessionRef.current?.spend_micros ?? 0,
+      approvals: approvalsRef.current.length,
+    });
+    awayMark.current = stamp();
+    setAway(null);
+    const onBlur = () => {
+      awayMark.current = stamp();
+    };
+    const onFocus = () => {
+      const mark = awayMark.current;
+      if (!mark) return;
+      const finished = turnsRef.current.filter(
+        (entry) => entry.turn.completed_at !== null && entry.turn.completed_at > mark.at,
+      ).length;
+      const merged = patchesRef.current.filter(
+        (patch) =>
+          patch.status === "applied" && patch.applied_at !== null && patch.applied_at > mark.at,
+      ).length;
+      const waiting = approvalsRef.current.length;
+      const spent = Math.max(0, (sessionRef.current?.spend_micros ?? mark.spend) - mark.spend);
+      const changed = finished + merged + spent > 0 || waiting !== mark.approvals;
+      awayMark.current = stamp();
+      if (!changed) return;
+      setAway({ turns: finished, patches: merged, approvals: waiting, spend: spent });
+    };
+    window.addEventListener("blur", onBlur);
+    window.addEventListener("focus", onFocus);
+    return () => {
+      window.removeEventListener("blur", onBlur);
+      window.removeEventListener("focus", onFocus);
+    };
+  }, [session?.id, project]);
+
+  const trackOutline = useCallback(() => {
+    const container = transcriptRef.current;
+    if (!container) return;
+    const rows = container.querySelectorAll<HTMLElement>("article.turn");
+    if (rows.length === 0) return;
+    const top = container.getBoundingClientRect().top + 32;
+    let current = rows[0].id.replace(/^turn-/, "");
+    for (const row of rows) {
+      if (row.getBoundingClientRect().top <= top) current = row.id.replace(/^turn-/, "");
+      else break;
+    }
+    setActiveTurnId(current);
+  }, []);
+
+  // Before the first scroll event, point the rail at the turn already in view (the newest one).
+  useEffect(() => {
+    if (activeTurnId === null && shownTurns.length > 0) {
+      setActiveTurnId(shownTurns[shownTurns.length - 1].turn.id);
+    }
+  }, [activeTurnId, shownTurns]);
+
   const live = liveTurn !== null;
   const percent = capMicros ? Math.min(100, (spendMicros / capMicros) * 100) : 0;
+
+  // D153: a range from what completed turns actually cost, scaled to this draft's size. Three
+  // turns are the floor for saying anything at all; below that the line says so rather than
+  // borrowing confidence from one bill. This is arithmetic on recorded bills, not a quote, and
+  // it never disables Send.
+  const costPreflight = useMemo(() => {
+    const sample = turns
+      .filter(
+        (entry) =>
+          entry.turn.parent_turn_id === null &&
+          entry.turn.status === "completed" &&
+          entry.turn.usage !== null &&
+          entry.turn.usage.cost_micros > 0,
+      )
+      .slice(-PREFLIGHT_SAMPLE);
+    const costs = sample.map((entry) => entry.turn.usage!.cost_micros).sort((a, b) => a - b);
+    const prompts = sample
+      .map((entry) => Math.ceil((entry.turn.prompt?.length ?? 0) / 4))
+      .sort((a, b) => a - b);
+    const draftTokens = Math.ceil((text.trim().length + attachments.join("").length) / 4);
+    const typical = prompts.length > 0 ? prompts[Math.floor(prompts.length / 2)] : 0;
+    const scale =
+      typical > 0
+        ? Math.min(3, Math.max(0.4, (draftTokens + CONTEXT_TOKENS) / (typical + CONTEXT_TOKENS)))
+        : 1;
+    const at = (fraction: number) =>
+      Math.max(1, Math.round(costs[Math.round((costs.length - 1) * fraction)] * scale));
+    return {
+      ready: costs.length >= PREFLIGHT_FLOOR,
+      count: costs.length,
+      low: costs.length > 0 ? at(0.2) : 0,
+      high: costs.length > 0 ? at(0.8) : 0,
+      draftTokens,
+    };
+  }, [turns, text, attachments]);
   const quoteWarning = quote?.over_remaining
     ? quote.remaining_micros !== null && quote.remaining_micros < 0
       ? "the next turn is refused before it starts."
@@ -954,7 +1931,7 @@ export default function SessionView({
           </div>
           <p className="empty">Open a project first — the session log lives in its .rigel folder.</p>
         </aside>
-        <main className="detail session-main">
+        <main id="main" tabIndex={-1} className="detail session-main">
           {projectControls}
           <p className="empty">No project open.</p>
         </main>
@@ -1013,13 +1990,142 @@ export default function SessionView({
 
   return (
     <>
-      <aside className="list-pane roster">
+      <aside className="list-pane roster" data-pane={pane}>
         <div className="list-head">
-          <div className="list-title">
-            <h1>Agents</h1>
-            <span>{session ? session.status : "no session"}</span>
+          <div className="segmented session-tabs" role="group" aria-label="Sessions or agents">
+            <button
+              type="button"
+              className={pane === "sessions" ? "on" : ""}
+              aria-pressed={pane === "sessions"}
+              onClick={() => setPane("sessions")}
+            >
+              sessions
+            </button>
+            <button
+              type="button"
+              className={pane === "agents" ? "on" : ""}
+              aria-pressed={pane === "agents"}
+              onClick={() => setPane("agents")}
+            >
+              agents
+            </button>
           </div>
-          {!session ? (
+          <div className="list-title">
+            <h1>{pane === "sessions" ? "Sessions" : "Agents"}</h1>
+            <span>
+              {pane === "sessions"
+                ? `${visibleSessions.length}/${list.length}`
+                : session
+                  ? session.status
+                  : "no session"}
+            </span>
+          </div>
+          {pane === "sessions" ? (
+            <div className="session-filters">
+              <label className="search">
+                <span aria-hidden>⌕</span>
+                <input
+                  value={sessionQuery}
+                  onChange={(event) => setSessionQuery(event.target.value)}
+                  placeholder="Filter sessions"
+                  aria-label="Filter sessions"
+                />
+              </label>
+              <div className="session-filter-row">
+                <select
+                  className="chip"
+                  aria-label="Filter sessions by status"
+                  value={statusFilter}
+                  onChange={(event) =>
+                    setStatusFilter(event.target.value as "all" | Session["status"])
+                  }
+                >
+                  <option value="all">any status</option>
+                  <option value="active">active</option>
+                  <option value="idle">idle</option>
+                  <option value="interrupted">interrupted</option>
+                  <option value="ended">ended</option>
+                </select>
+                <button
+                  type="button"
+                  className={showArchived ? "chip on" : "chip"}
+                  aria-pressed={showArchived}
+                  onClick={() => setShowArchived((shown) => !shown)}
+                  title="Archived sessions are hidden by default and never deleted"
+                >
+                  archived
+                </button>
+                <div className="template-wrap" ref={templateRef}>
+                  <button
+                    type="button"
+                    className="chip"
+                    onClick={() =>
+                      templates.length > 0 ? setTemplateOpen((open) => !open) : void startSession()
+                    }
+                    disabled={starting}
+                    aria-haspopup={templates.length > 0 ? "menu" : undefined}
+                    aria-expanded={templates.length > 0 ? templateOpen : undefined}
+                    title={
+                      templates.length > 0
+                        ? "Start blank or from a project template"
+                        : "Start a session with a $5.00 cap"
+                    }
+                  >
+                    {starting ? "starting…" : "+ session"}
+                  </button>
+                  {templateOpen ? (
+                    <div className="composer-menu template-menu" role="menu" aria-label="Session templates">
+                      <p className="composer-menu-label">Start from</p>
+                      <button
+                        type="button"
+                        role="menuitem"
+                        className="composer-menu-item"
+                        onClick={() => void startSession()}
+                      >
+                        <span>Blank session</span>
+                        <small>$5.00 cap</small>
+                      </button>
+                      {templates.map((template) => (
+                        <div className="template-row" key={template.id}>
+                          <button
+                            type="button"
+                            role="menuitem"
+                            className="composer-menu-item"
+                            onClick={() => void startSession(template)}
+                            title={
+                              template.prompt
+                                ? `Prompt: ${template.prompt.slice(0, 160)}`
+                                : "No prompt skeleton"
+                            }
+                          >
+                            <span>{template.name}</span>
+                            <small>
+                              {template.agents.length} agent
+                              {template.agents.length === 1 ? "" : "s"}
+                              {template.model ? ` · ${template.model.split("/").pop()}` : ""}
+                            </small>
+                          </button>
+                          <button
+                            type="button"
+                            className="snippet-delete"
+                            aria-label={`Delete template ${template.name}`}
+                            title="Delete this template"
+                            onClick={() => void removeTemplate(template)}
+                          >
+                            ×
+                          </button>
+                        </div>
+                      ))}
+                      <p className="composer-menu-hint">
+                        Stored in .rigel/templates.json, never committed: a model id is
+                        machine-specific. The prompt lands in the composer, unsent.
+                      </p>
+                    </div>
+                  ) : null}
+                </div>
+              </div>
+            </div>
+          ) : !session ? (
             <button className="primary wide" onClick={() => void startSession()} disabled={starting}>
               {starting ? "Starting…" : "Start a session · $5.00 cap"}
             </button>
@@ -1035,6 +2141,14 @@ export default function SessionView({
                 title="Start another native or Claude agent in this session"
               >
                 + agent
+              </button>
+              <button
+                className="chip"
+                onClick={() => void saveTemplate()}
+                disabled={!tauri || !session || templateSaving}
+                title="Save this session's model, effort, steps, roster and draft as a project template"
+              >
+                {templateSaving ? "saving…" : "save template"}
               </button>
               {shown.length === 2 ? <span className="fine">two transcripts side by side</span> : null}
               {shown.length === 1 && rolePresets.length ? (
@@ -1069,13 +2183,132 @@ export default function SessionView({
               ) : null}
             </div>
           )}
-          {session ? (
+          {pane === "sessions" ? (
+            <p className="fine roster-hint">
+              Click a row to open it. Hover to rename, pin or archive; an archived session stays
+              searchable with Ctrl+K and resumable from this list.
+            </p>
+          ) : session ? (
             <p className="fine roster-hint">
               Click an agent to watch its transcript; two can sit side by side.
             </p>
           ) : null}
         </div>
 
+        <div className="session-list-pane">
+          <div className="rows">
+            {visibleSessions.map((row) => (
+              <div
+                key={row.id}
+                className={`session-row${session?.id === row.id ? " on" : ""}`}
+              >
+                {renaming === row.id ? (
+                  <input
+                    className="session-rename"
+                    autoFocus
+                    value={renameText}
+                    onChange={(event) => setRenameText(event.target.value)}
+                    onKeyDown={(event) => {
+                      if (event.key === "Enter") {
+                        event.preventDefault();
+                        event.currentTarget.blur();
+                      } else if (event.key === "Escape") {
+                        event.preventDefault();
+                        cancelRename();
+                      }
+                    }}
+                    onBlur={() => void commitRename(row, renameText)}
+                    aria-label={`Rename ${row.title ?? "session"}`}
+                    placeholder="Session name"
+                  />
+                ) : (
+                  <button
+                    type="button"
+                    className="session-open"
+                    onClick={() => void openListItem(row)}
+                    title={`${row.title ?? "Untitled session"} · ${when(row.created_at)} · ${money(
+                      row.spend_micros,
+                    )}`}
+                  >
+                    <span className="row-text">
+                      <span className="row-name">
+                        {row.pinned_at !== null ? (
+                          <span className="pin-flag" aria-hidden="true">
+                            ★
+                          </span>
+                        ) : null}
+                        <span className="session-name">{row.title ?? "Untitled session"}</span>
+                        {row.archived_at !== null ? <span className="tag">archived</span> : null}
+                      </span>
+                      <span className="row-meta session-meta">
+                        <span className={`session-state ${row.status}`}>{row.status}</span>
+                        <span aria-hidden="true">·</span>
+                        <span>{when(row.created_at).slice(0, 10)}</span>
+                        <span aria-hidden="true">·</span>
+                        <span>{money(row.spend_micros)}</span>
+                      </span>
+                    </span>
+                  </button>
+                )}
+                {renaming === row.id ? null : (
+                  <div className="session-row-actions">
+                    <button
+                      type="button"
+                      className="session-act"
+                      aria-pressed={row.pinned_at !== null}
+                      disabled={listBusy === row.id}
+                      title={row.pinned_at !== null ? "Unpin" : "Pin to the top"}
+                      onClick={() => void togglePin(row)}
+                    >
+                      {row.pinned_at !== null ? "★" : "☆"}
+                    </button>
+                    <button
+                      type="button"
+                      className="session-act"
+                      title="Rename"
+                      aria-label={`Rename ${row.title ?? "session"}`}
+                      onClick={() => beginRename(row)}
+                    >
+                      ✎
+                    </button>
+                    <button
+                      type="button"
+                      className="session-act"
+                      disabled={listBusy === row.id}
+                      title={
+                        row.archived_at !== null
+                          ? "Restore to the list"
+                          : "Archive: hidden by default, still searchable and resumable"
+                      }
+                      aria-label={row.archived_at !== null ? "Restore session" : "Archive session"}
+                      onClick={() => void toggleArchive(row)}
+                    >
+                      {row.archived_at !== null ? "restore" : "archive"}
+                    </button>
+                  </div>
+                )}
+              </div>
+            ))}
+            {visibleSessions.length === 0 ? (
+              <p className="empty subtle">
+                {list.length === 0
+                  ? "No session in this project yet. Start one from the button above."
+                  : "No session matches this filter."}
+              </p>
+            ) : null}
+          </div>
+          <div className="roster-foot">
+            <span>
+              {list.length} session{list.length === 1 ? "" : "s"}
+            </span>
+            <span className="grow" />
+            <span className="mono">
+              {list.filter((row) => row.archived_at !== null).length} archived
+            </span>
+          </div>
+        </div>
+
+        <div className="agent-list-pane">
         {spawnOpen ? (
           <form
             className="agent-spawn"
@@ -1181,9 +2414,10 @@ export default function SessionView({
           </span>
           <span className="mono">{compact(agents.reduce((n, a) => n + a.tokens_in + a.tokens_out, 0))} tok</span>
         </div>
+        </div>
       </aside>
 
-      <main className="detail session-main">
+      <main id="main" tabIndex={-1} className="detail session-main">
         {projectControls}
         <header className="detail-head">
           <div>
@@ -1204,8 +2438,10 @@ export default function SessionView({
             <ModelControls
               model={model}
               effort={effort}
+              chatOnly={defaults?.chat_models_only ?? true}
               onModel={(next, provider) => void applyModel(next, effort, provider)}
               onEffort={(next) => void applyModel(model, next)}
+              onChatOnly={(next) => void applyChatOnly(next)}
             />
             {keyPresent === false && onOpenSettings ? (
               <button className="chip warn" onClick={onOpenSettings}>
@@ -1246,6 +2482,31 @@ export default function SessionView({
                 {exporting ? "Exporting…" : "Export session"}
               </button>
             ) : null}
+            {session ? (
+              <button
+                className="chip"
+                disabled={publishing}
+                title="Send this session's prompts and replies to your Firebase project, where the phone can read them"
+                onClick={() => {
+                  setPublishing(true);
+                  void api
+                    .cloudPublishSession(project, session.id)
+                    .then((report) =>
+                      onNotice(
+                        `Published ${report.turns} turn${report.turns === 1 ? "" : "s"} — the phone can read them when it signs in.`,
+                      ),
+                    )
+                    .catch((failure) =>
+                      onNotice(
+                        failure instanceof Error ? failure.message : "Publish failed.",
+                      ),
+                    )
+                    .finally(() => setPublishing(false));
+                }}
+              >
+                {publishing ? "Publishing…" : "Publish to phone"}
+              </button>
+            ) : null}
             {liveTurn ? (
               <button className="danger-button" onClick={() => void cancel()}>
                 Stop turn
@@ -1257,6 +2518,31 @@ export default function SessionView({
         {approvals.map((pending) => (
           <ApprovalCard key={pending.id} pending={pending} onAnswer={answer} />
         ))}
+
+        {away ? (
+          <div className="away-card" role="status" aria-live="polite">
+            <div>
+              <strong>While you were away</strong>
+              <span>
+                {[
+                  away.turns ? `${away.turns} turn${away.turns === 1 ? "" : "s"} finished` : null,
+                  away.patches
+                    ? `${away.patches} patch${away.patches === 1 ? "" : "es"} merged`
+                    : null,
+                  away.approvals
+                    ? `${away.approvals} approval${away.approvals === 1 ? "" : "s"} waiting`
+                    : null,
+                  away.spend ? `${money(away.spend)} spent` : null,
+                ]
+                  .filter(Boolean)
+                  .join(" · ")}
+              </span>
+            </div>
+            <button className="ghost-btn" onClick={() => setAway(null)}>
+              Dismiss
+            </button>
+          </div>
+        ) : null}
 
         <p className="notice" role="status">
           {error
@@ -1281,7 +2567,28 @@ export default function SessionView({
             </p>
           </section>
         ) : (
-          <div className="transcripts">
+          <>
+            <div className="transcript-bar" role="group" aria-label="Transcript filter">
+              {FILTERS.map((row) => (
+                <button
+                  key={row.id}
+                  type="button"
+                  className={filter === row.id ? "chip on" : "chip"}
+                  aria-pressed={filter === row.id}
+                  onClick={() => chooseFilter(row.id)}
+                  title={
+                    row.id === "yours"
+                      ? "Your prompts and notes, without the agent's tool traffic"
+                      : `Show only ${row.label}`
+                  }
+                >
+                  {row.label}
+                  <span className="filter-count">{filterCounts[row.id]}</span>
+                </button>
+              ))}
+            </div>
+            <div className="transcript-shell">
+            <div className="transcripts" ref={transcriptRef} onScroll={trackOutline}>
             <div className={shown.length === 2 ? "transcript-panes split" : "transcript-panes"}>
               {(shown.length === 0 ? [null] : shown).map((id) => {
                 const agent =
@@ -1315,6 +2622,9 @@ export default function SessionView({
                         entry={entry}
                         turns={turns}
                         raw={raw}
+                        filter={filter}
+                        bookmarks={bookmarks}
+                        onBookmark={toggleItemBookmark}
                         stream={stream}
                         checkpoint={checkpoints.find((row) => row.turn_id === entry.turn.id)}
                         onRestore={async (checkpoint) => {
@@ -1341,7 +2651,29 @@ export default function SessionView({
               })}
             </div>
             <div ref={bottomRef} />
-          </div>
+            </div>
+            {outline.length > 0 && shown.length !== 2 ? (
+              <nav className="turn-outline" aria-label="Turn outline">
+                {outline.map((group) => (
+                  <div className="outline-group" key={group.turnId}>
+                    {group.marks.map((mark) => (
+                      <button
+                        key={mark.key}
+                        type="button"
+                        className={`outline-mark ${mark.kind}${
+                          activeTurnId === group.turnId ? " on" : ""
+                        }`}
+                        title={mark.title}
+                        aria-label={mark.title}
+                        onClick={() => jumpToTurn(group.turnId)}
+                      />
+                    ))}
+                  </div>
+                ))}
+              </nav>
+            ) : null}
+            </div>
+          </>
         )}
 
         {session && nearCap ? (
@@ -1401,14 +2733,13 @@ export default function SessionView({
             <div className="composer">
               <div className="composer-field">
                 <textarea
+                  ref={composerRef}
                   value={text}
-                  onChange={(event) => setText(event.target.value)}
-                  onKeyDown={(event) => {
-                    if (event.key === "Enter" && !event.shiftKey) {
-                      event.preventDefault();
-                      void send();
-                    }
+                  onChange={(event) => {
+                    setText(event.target.value);
+                    setHistoryIndex(null);
                   }}
+                  onKeyDown={onComposerKeyDown}
                   placeholder={
                     review
                       ? "Review the brief above before it sends…"
@@ -1519,6 +2850,67 @@ export default function SessionView({
                         </button>
                         <p className="composer-menu-hint">
                           Files are copied into .rigel/attachments; the next turn gets their paths.
+                        </p>
+                      </div>
+                    ) : null}
+                  </div>
+                  <div className="composer-snippets" ref={snippetRef}>
+                    <button
+                      type="button"
+                      className="composer-snippet-toggle"
+                      aria-haspopup="menu"
+                      aria-expanded={snipOpen}
+                      aria-label="Snippets"
+                      title="Insert a saved prompt; placeholders are selected for you"
+                      onClick={() => setSnipOpen((open) => !open)}
+                      disabled={live || review !== null}
+                    >
+                      snippets
+                    </button>
+                    {snipOpen ? (
+                      <div className="composer-menu" role="menu" aria-label="Snippets">
+                        <p className="composer-menu-label">Snippets</p>
+                        {snippets.length === 0 ? (
+                          <p className="composer-menu-hint">
+                            None saved. Write a draft, then save it here.
+                          </p>
+                        ) : null}
+                        {snippets.map((snippet) => (
+                          <div className="snippet-row" key={snippet.id}>
+                            <button
+                              type="button"
+                              role="menuitem"
+                              className="composer-menu-item"
+                              onClick={() => applySnippet(snippet)}
+                              title={snippet.body}
+                            >
+                              <span>{snippet.label}</span>
+                              <small>{/\{[a-z]+\}/.test(snippet.body) ? "placeholder" : "insert"}</small>
+                            </button>
+                            <button
+                              type="button"
+                              className="snippet-delete"
+                              aria-label={`Delete ${snippet.label}`}
+                              title={`Delete ${snippet.label}`}
+                              onClick={() => removeSnippet(snippet.id)}
+                            >
+                              ×
+                            </button>
+                          </div>
+                        ))}
+                        <button
+                          type="button"
+                          role="menuitem"
+                          className="composer-menu-item"
+                          onClick={saveDraftSnippet}
+                          disabled={!text.trim()}
+                        >
+                          <span>Save this draft as a snippet</span>
+                          <small>local</small>
+                        </button>
+                        <p className="composer-menu-hint">
+                          Up/Down recalls sent prompts; Ctrl+Up widens to the whole project.
+                          Inserted text stays a draft until you confirm it.
                         </p>
                       </div>
                     ) : null}
@@ -1638,6 +3030,36 @@ export default function SessionView({
                 </div>
               </div>
             ) : null}
+            {review === null && text.trim() ? (
+              <p
+                className="composer-preflight"
+                role="status"
+                title={
+                  costPreflight.ready
+                    ? `The 20th to 80th percentile of the last ${costPreflight.count} completed turns, scaled to this draft's ~${costPreflight.draftTokens} tokens. Arithmetic from recorded bills, not a quote; Send stays enabled.`
+                    : `A range needs ${PREFLIGHT_FLOOR} completed turns in this session; the first-step quote above is the only estimate until then.`
+                }
+              >
+                {costPreflight.ready ? (
+                  <>
+                    <span className="mono">
+                      ≈ {shortMoney(costPreflight.low)}–{shortMoney(costPreflight.high)}
+                    </span>{" "}
+                    a turn · from {costPreflight.count} turns
+                    {quote &&
+                    quote.remaining_micros !== null &&
+                    costPreflight.high > quote.remaining_micros ? (
+                      <>{" · "}more than the remaining cap; the turn stops after the step that crosses it</>
+                    ) : null}
+                  </>
+                ) : (
+                  <>
+                    cost history: no history yet — {costPreflight.count} of {PREFLIGHT_FLOOR}{" "}
+                    completed turns recorded
+                  </>
+                )}
+              </p>
+            ) : null}
             {review === null && text.trim() && quote ? (
               <p
                 className={`composer-quote${quoteWarning ? " over" : ""}`}
@@ -1707,6 +3129,41 @@ export default function SessionView({
                       revert
                     </button>
                   ) : null}
+                </li>
+              ))}
+            </ul>
+          )}
+        </section>
+
+        <section>
+          <h3>Bookmarks</h3>
+          {bookmarks.length === 0 ? (
+            <p className="fine">
+              Star a line in the transcript, or a hunk in Diff. A jump opens the session or the
+              patch it lives in.
+            </p>
+          ) : (
+            <ul className="bookmark-list">
+              {bookmarks.map((row) => (
+                <li key={row.id}>
+                  <button
+                    type="button"
+                    className="bookmark-jump"
+                    title={row.label}
+                    onClick={() => jumpBookmark(row)}
+                  >
+                    <span className="tag">{row.kind}</span>
+                    <span className="bookmark-label">{row.label}</span>
+                  </button>
+                  <button
+                    type="button"
+                    className="snippet-delete"
+                    aria-label={`Remove bookmark ${row.label}`}
+                    title="Remove bookmark"
+                    onClick={() => void removeBookmark(row)}
+                  >
+                    ×
+                  </button>
                 </li>
               ))}
             </ul>
@@ -1895,6 +3352,9 @@ function TurnCard({
   stream,
   checkpoint,
   onRestore,
+  filter,
+  bookmarks,
+  onBookmark,
 }: {
   entry: TurnTranscript;
   turns: TurnTranscript[];
@@ -1902,14 +3362,26 @@ function TurnCard({
   stream: Record<string, string>;
   checkpoint?: Checkpoint;
   onRestore?: (checkpoint: Checkpoint) => void;
+  filter: TranscriptFilter;
+  bookmarks: Bookmark[];
+  onBookmark: (item: Item, seq: number) => void;
 }) {
   const children = turns.filter((candidate) => candidate.turn.parent_turn_id === entry.turn.id);
+  const visibleItems = entry.items.filter((item) => matchesFilter(item, filter));
+  const hidden =
+    entry.items.length -
+    visibleItems.length +
+    (entry.turn.prompt && !filterShowsPrompt(filter) ? 1 : 0);
   const childSpend = children.reduce(
     (sum, child) => sum + (child.turn.usage?.cost_micros ?? 0),
     0,
   );
   return (
-    <article className="turn">
+    <article
+      className="turn"
+      id={`turn-${entry.turn.id}`}
+      aria-label={`Turn ${entry.turn.seq}, ${entry.turn.status}`}
+    >
       <header className="turn-head">
         <span className="turn-seq">turn {entry.turn.seq}</span>
         <span className={`pill ${entry.turn.status}`}>{entry.turn.status}</span>
@@ -1939,16 +3411,39 @@ function TurnCard({
         ) : null}
       </header>
 
-      {entry.turn.prompt ? (
+      {entry.turn.prompt && filterShowsPrompt(filter) ? (
         <div className="msg user">
           <span className="gutter">you</span>
           <div className="msg-body">{entry.turn.prompt}</div>
         </div>
       ) : null}
 
-      {entry.items.map((item) => (
-        <ItemRow key={item.id} item={item} raw={raw} />
-      ))}
+      {visibleItems.map((item) => {
+        const marked = bookmarks.some(
+          (row) => row.kind === "item" && row.target_id === item.id,
+        );
+        return (
+          <div className="item-shell" id={`item-${item.id}`} key={item.id}>
+            <ItemRow item={item} raw={raw} />
+            <button
+              type="button"
+              className={`bookmark-star${marked ? " on" : ""}`}
+              aria-pressed={marked}
+              aria-label={marked ? "Remove bookmark" : "Bookmark this line"}
+              title={marked ? "Remove bookmark" : "Keep this line in the inspector"}
+              onClick={() => onBookmark(item, entry.turn.seq)}
+            >
+              {marked ? "★" : "☆"}
+            </button>
+          </div>
+        );
+      })}
+
+      {hidden > 0 ? (
+        <p className="turn-hidden fine">
+          {hidden} line{hidden === 1 ? "" : "s"} hidden by the {filter} filter
+        </p>
+      ) : null}
 
       {stream[entry.turn.id] ? (
         <div className="msg assistant">

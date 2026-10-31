@@ -309,9 +309,37 @@ pub fn usd_to_micros(usd: f64) -> i64 {
     (usd * 1_000_000.0).round() as i64
 }
 
+/// The suffix a gateway uses to name an execution mode that is **not** `/chat/completions`.
+const BATCH_SUFFIX: &str = ":batch";
+
+/// The id a chat turn may put on the wire.
+///
+/// A provider's roster carries ids for other endpoints as well as the chat one. The id that
+/// reached the refiner was `google/gemini-4-argon:batch`, and the answer was
+/// `404 … cannot be used with the chat/completions endpoint (adapter VertexGeminiBatchAdapter)`:
+/// the provider routed it to its batch adapter because the id said batch, not because anything
+/// was wrong with the request.
+///
+/// So an id that names another execution mode is never sent. The chat twin of a batch id is the
+/// same id without the suffix, which is the only substitution made here — `:free` and the other
+/// routing variants are chat ids and pass through untouched.
+pub fn chat_model_id(model: &str) -> &str {
+    let trimmed = model.trim();
+    let bytes = trimmed.as_bytes();
+    let suffix = BATCH_SUFFIX.as_bytes();
+    if bytes.len() > suffix.len()
+        && bytes[bytes.len() - suffix.len()..].eq_ignore_ascii_case(suffix)
+    {
+        return trimmed[..trimmed.len() - suffix.len()].trim_end();
+    }
+    trimmed
+}
+
 pub fn usage_from_raw(raw: RawUsage, model: &str) -> Usage {
     let provider_micros = raw.cost_usd.map(usd_to_micros);
-    let estimate = crate::agent::pricing::estimate(model, &raw);
+    // Price the id that was actually asked for, so a stored `…:batch` is billed as the model
+    // that served the turn.
+    let estimate = crate::agent::pricing::estimate(chat_model_id(model), &raw);
     Usage {
         input_tokens: raw.input_tokens,
         cached_input_tokens: raw.cached_input_tokens,
@@ -366,5 +394,27 @@ mod tests {
         assert_eq!(usd_to_micros(0.0000042), 4);
         assert_eq!(usd_to_micros(0.25), 250_000);
         assert_eq!(usd_to_micros(1.0), 1_000_000);
+    }
+
+    #[test]
+    fn a_batch_only_id_is_never_the_id_on_the_wire() {
+        assert_eq!(
+            chat_model_id("google/gemini-4-argon:batch"),
+            "google/gemini-4-argon"
+        );
+        assert_eq!(chat_model_id("gemini-4-argon:BATCH"), "gemini-4-argon");
+        assert_eq!(
+            chat_model_id(" google/gemini-4-argon:batch "),
+            "google/gemini-4-argon"
+        );
+        // Dropping the suffix must not eat a chat id that merely ends in those letters.
+        assert_eq!(chat_model_id("vendor/prebatch"), "vendor/prebatch");
+        // The other routing variants a roster uses are chat ids.
+        assert_eq!(
+            chat_model_id("baseten/mammoth-1:free"),
+            "baseten/mammoth-1:free"
+        );
+        assert_eq!(chat_model_id("openai/gpt-4.1-mini"), "openai/gpt-4.1-mini");
+        assert_eq!(chat_model_id(":batch"), ":batch");
     }
 }

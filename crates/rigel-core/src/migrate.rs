@@ -81,6 +81,16 @@ pub const PROJECT_MIGRATIONS: &[Migration] = &[
         name: "0011_writable_agents",
         sql: include_str!("../../../migrations/project/0011_writable_agents.sql"),
     },
+    Migration {
+        version: 12,
+        name: "0012_session_list",
+        sql: include_str!("../../../migrations/project/0012_session_list.sql"),
+    },
+    Migration {
+        version: 13,
+        name: "0013_bookmarks",
+        sql: include_str!("../../../migrations/project/0013_bookmarks.sql"),
+    },
 ];
 
 /// `%APPDATA%\Rigel\index.db`

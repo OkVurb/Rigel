@@ -364,6 +364,32 @@ impl SkillIndex {
         Ok(result.rows_affected() as i64)
     }
 
+    /// Remove one row from the local shelf.
+    ///
+    /// The FTS triggers keep search in step, and the row's version history and evidence go
+    /// with it so `rigel skills get` cannot find orphans. A body blob is left to `rigel skills
+    /// gc`: another row may still reference the same bytes. Returns whether a row existed.
+    ///
+    /// This is the local half of cloud deletion: the next `rigel cloud push` sees the id in
+    /// its manifest but not in the shelf, and writes a tombstone for the other machines.
+    pub async fn remove(&self, id: &str) -> Result<bool, SkillsError> {
+        let mut tx = self.store.pool().begin().await?;
+        sqlx::query("DELETE FROM evidence WHERE skill_id = ?")
+            .bind(id)
+            .execute(&mut *tx)
+            .await?;
+        sqlx::query("DELETE FROM skill_versions WHERE skill_id = ?")
+            .bind(id)
+            .execute(&mut *tx)
+            .await?;
+        let deleted = sqlx::query("DELETE FROM skills WHERE id = ?")
+            .bind(id)
+            .execute(&mut *tx)
+            .await?;
+        tx.commit().await?;
+        Ok(deleted.rows_affected() > 0)
+    }
+
     pub async fn sync_marketplace(
         &self,
         which: &str,
@@ -400,6 +426,132 @@ impl SkillIndex {
                 Err(error)
             }
         }
+    }
+
+    /// Re-sync every source that is not fresh, so a shelf nobody has touched for a day updates
+    /// itself instead of staying stale.
+    ///
+    /// Bounded on purpose, because this runs at launch and in the background: the repositories
+    /// whose skills are already in this index (at most [`AUTO_REFRESH_REPOS`]), and one page of
+    /// each marketplace. The freshness policy still applies, so an unchanged tree costs a tree
+    /// call and no bodies.
+    ///
+    /// A **broken** source is retried only once its last *success* is older than the stale
+    /// window. A failed walk does not move `last_sync_at`, so that is one retry per window
+    /// rather than a loop against a dead URL.
+    pub async fn refresh_stale(&self) -> Result<RefreshReport, SkillsError> {
+        let statuses = self.status().await?;
+        let mut report = RefreshReport {
+            checked: statuses.len(),
+            refreshed: 0,
+            sources: Vec::with_capacity(statuses.len()),
+        };
+
+        for status in statuses {
+            let due = match status.state {
+                SourceState::Ok => false,
+                SourceState::Stale => true,
+                SourceState::Broken => match status.last_sync_at {
+                    None => true,
+                    Some(at) => now_ms() - at >= super::STALE_AFTER_MS,
+                },
+            };
+            if !due {
+                report.sources.push(SourceRefresh {
+                    id: status.id,
+                    state: status.state,
+                    detail: match status.state {
+                        SourceState::Ok => "fresh".to_string(),
+                        _ => "failed inside the window; left for the next pass".to_string(),
+                    },
+                });
+                continue;
+            }
+
+            let (state, detail) = match self.refresh_source(&status.id).await {
+                Ok(Some(detail)) => {
+                    report.refreshed += 1;
+                    (SourceState::Ok, detail)
+                }
+                // A source another surface wrote, with no rule here. Reported, not guessed at.
+                Ok(None) => (status.state, format!("no refresh rule for `{}`", status.id)),
+                Err(error) => (SourceState::Broken, error.to_string()),
+            };
+            report.sources.push(SourceRefresh {
+                id: status.id,
+                state,
+                detail,
+            });
+        }
+
+        Ok(report)
+    }
+
+    /// What one source's refresh does. `None` means this index has no rule for that id.
+    async fn refresh_source(&self, id: &str) -> Result<Option<String>, SkillsError> {
+        match id {
+            "github" => {
+                let repos = self.indexed_repos(AUTO_REFRESH_REPOS).await?;
+                if repos.is_empty() {
+                    return Ok(Some("no repository indexed yet".to_string()));
+                }
+                let mut rows = 0;
+                let mut failure: Option<SkillsError> = None;
+                for repo in &repos {
+                    match self.index_repo(repo, SyncPolicy::normal()).await {
+                        Ok(report) => rows += report.added + report.updated,
+                        Err(error) => {
+                            failure.get_or_insert(error);
+                        }
+                    }
+                }
+                // One failing repository must not hide a walk that worked; every repository
+                // failing is a broken source, and `index_repo` has already recorded it as one.
+                match failure {
+                    Some(error) if rows == 0 => Err(error),
+                    Some(error) => Ok(Some(format!(
+                        "{} repo(s), {rows} row(s) updated · one still failing: {error}",
+                        repos.len()
+                    ))),
+                    None => Ok(Some(format!(
+                        "{} repo(s), {rows} row(s) updated",
+                        repos.len()
+                    ))),
+                }
+            }
+            "skillhub" => {
+                let rows = self
+                    .sync_marketplace("skillhub", AUTO_REFRESH_QUERY, AUTO_REFRESH_LIMIT)
+                    .await?;
+                Ok(Some(format!("{rows} row(s) from skillhub")))
+            }
+            // SkillsMP is a *search* source and its rows carry no record of the query that found
+            // them, so the shelf's own default is re-run: it adds what that query finds and makes
+            // the source fresh again. Rows from the other queries stay put; `rigel skills sweep`
+            // is what walks those.
+            "skillsmp" => {
+                let rows = self
+                    .sync_marketplace("skillsmp", AUTO_REFRESH_QUERY, AUTO_REFRESH_LIMIT)
+                    .await?;
+                Ok(Some(format!(
+                    "{rows} row(s) from the `{AUTO_REFRESH_QUERY}` query"
+                )))
+            }
+            _ => Ok(None),
+        }
+    }
+
+    /// The repositories this index's skills came from, most recently seen first.
+    pub async fn indexed_repos(&self, limit: usize) -> Result<Vec<String>, SkillsError> {
+        let rows: Vec<(String,)> = sqlx::query_as(
+            "SELECT repo FROM skills
+             WHERE source = 'github' AND repo IS NOT NULL AND repo <> ''
+             GROUP BY repo ORDER BY MAX(last_seen_at) DESC LIMIT ?",
+        )
+        .bind(limit as i64)
+        .fetch_all(self.store.pool())
+        .await?;
+        Ok(rows.into_iter().map(|(repo,)| repo).collect())
     }
 
     /// Sweep the two marketplaces across many pages and turn the result into metadata rows —
@@ -846,6 +998,59 @@ impl SkillIndex {
         })
     }
 
+    /// Every metadata row, newest first, without bodies.
+    ///
+    /// This is the cloud mirror's read side: it needs the whole shelf rather than one page of
+    /// search hits, and it must be able to send a row without its body. `body_sha` is deliberately
+    /// absent — a pulled record never names a blob this machine holds, so `write_skill` keeps the
+    /// local one instead of clearing it.
+    pub async fn catalogue(&self, limit: usize) -> Result<Vec<SkillRecord>, SkillsError> {
+        let rows = sqlx::query(
+            "SELECT id, name, description, source, repo, path, url, grade, grade_scope,
+                    license, stars, installs, tokens, capabilities_json, simhash
+               FROM skills
+              ORDER BY last_seen_at DESC, id
+              LIMIT ?",
+        )
+        .bind(limit as i64)
+        .fetch_all(self.store.pool())
+        .await?;
+
+        Ok(rows
+            .into_iter()
+            .map(|row| {
+                let capabilities = row
+                    .get::<Option<String>, _>("capabilities_json")
+                    .and_then(|text| serde_json::from_str(&text).ok())
+                    .unwrap_or_default();
+                let simhash = row
+                    .get::<Option<String>, _>("simhash")
+                    .and_then(|text| u64::from_str_radix(&text, 16).ok())
+                    .map(|value| value as i64);
+                SkillRecord {
+                    id: row.get("id"),
+                    name: row.get("name"),
+                    description: row
+                        .get::<Option<String>, _>("description")
+                        .unwrap_or_default(),
+                    source: row.get("source"),
+                    repo: row.get("repo"),
+                    path: row.get("path"),
+                    url: row.get("url"),
+                    body_sha: None,
+                    grade: row.get("grade"),
+                    grade_scope: row.get("grade_scope"),
+                    license: row.get("license"),
+                    stars: row.get("stars"),
+                    installs: row.get("installs"),
+                    tokens: row.get("tokens"),
+                    capabilities,
+                    simhash,
+                }
+            })
+            .collect())
+    }
+
     /// Live blob hashes, for `rigel gc`.
     ///
     /// Cached HTTP bodies count as live: the tree and repo metadata blobs are what makes a
@@ -957,6 +1162,35 @@ const EXTRA: &str = "COALESCE(c.n, 1) AS variants,
 /// Nullable columns are decoded as `Option<T>`, never as `T` with `.ok()`. Decoding a NULL
 /// into `i64` succeeds with 0 in sqlx's SQLite backend, which would report a repository with
 /// no star count as having zero stars instead of "unknown".
+/// One source's state after a refresh pass, as the shelf and Settings show it.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SourceRefresh {
+    pub id: String,
+    pub state: SourceState,
+    /// One line: what was fetched, or why the source was left alone.
+    pub detail: String,
+}
+
+/// What one auto-refresh pass did.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RefreshReport {
+    /// Sources this index knows about.
+    pub checked: usize,
+    /// Sources that were actually re-synced.
+    pub refreshed: usize,
+    pub sources: Vec<SourceRefresh>,
+}
+
+/// How many repositories one pass re-walks. The point is a fresh shelf, not a full re-index: the
+/// freshness policy makes each walk a tree call at most, but a dozen repositories would still be
+/// a dozen requests nobody asked for.
+const AUTO_REFRESH_REPOS: usize = 3;
+
+/// The query the marketplace refresh re-runs, and the page size it pulls. SkillsMP rows carry no
+/// record of the query that found them, so the shelf's own default query is used.
+const AUTO_REFRESH_QUERY: &str = "agent";
+const AUTO_REFRESH_LIMIT: usize = 30;
+
 fn row_to_hit(row: &sqlx::sqlite::SqliteRow) -> SearchHit {
     SearchHit {
         id: row.get("id"),

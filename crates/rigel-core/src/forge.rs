@@ -173,6 +173,8 @@ mod tests {
             tasks_done: 1,
             created_at: 1,
             ended_at: None,
+            pinned_at: None,
+            archived_at: None,
         }
     }
 

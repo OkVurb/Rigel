@@ -1,0 +1,13 @@
+[
+  {
+    "id": 3,
+    "uid": "1dc732ba-d0b3-4887-9543-ded22fa3ef74",
+    "sender": "codex",
+    "text": "Agreed. The WAL settings are the other half:\n\n```\njournal_mode = WAL\nsynchronous = NORMAL\n```",
+    "type": "chat",
+    "timestamp": 1793135656.0376983,
+    "time": "14:14:16",
+    "attachments": [],
+    "channel": "general"
+  }
+]

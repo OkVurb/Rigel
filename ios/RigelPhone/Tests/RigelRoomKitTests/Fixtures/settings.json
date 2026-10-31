@@ -1,0 +1,12 @@
+{
+  "title": "agentchattr",
+  "subtitle": "",
+  "username": "user",
+  "font": "sans",
+  "channels": [
+    "general"
+  ],
+  "history_limit": "all",
+  "contrast": "normal",
+  "custom_roles": []
+}

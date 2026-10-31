@@ -26,12 +26,20 @@ test("every surface renders from the rail", async ({ page }) => {
 
   await page.getByRole("button", { name: "Terminal" }).click();
   await expect(page.getByRole("heading", { name: "Terminal", exact: true }).first()).toBeVisible();
-  await expect(page.getByText("The browser preview has no PTY.")).toBeVisible();
+  await expect(page.getByText("The preview echoes locally.")).toBeVisible();
 
+  // Settings is a page list: the model control is on Agent, the sources are on Skill shelf and
+  // the notification switches are on their own page.
   await page.getByRole("button", { name: "Settings" }).click();
-  await expect(page.getByRole("heading", { name: "Providers and keys" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Agent", exact: true })).toBeVisible();
   await expect(page.getByRole("heading", { name: "MODEL AND EFFORT" })).toBeVisible();
+  await page.getByRole("option", { name: /Skill shelf/ }).click();
+  await expect(page.getByRole("heading", { name: "SOURCES" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Refresh stale now" })).toBeVisible();
+  await page.getByRole("option", { name: /Notifications/ }).click();
   await expect(page.getByRole("checkbox", { name: "Approval waiting" })).toBeChecked();
+  await page.getByRole("option", { name: /Harnesses/ }).click();
+  await expect(page.getByRole("heading", { name: "DETECTED HARNESSES" })).toBeVisible();
 });
 
 test("the shelf search filters without leaving the surface", async ({ page }) => {

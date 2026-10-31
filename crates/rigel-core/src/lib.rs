@@ -5,9 +5,12 @@
 //! `docs/handoff.md` §3.2 (S2).
 
 pub mod agent;
+pub mod agentmail;
+pub mod attention;
 pub mod attribute;
 pub mod budget;
 pub mod claims;
+pub mod cloud;
 pub mod comments;
 pub mod credentials;
 pub mod diagnostics;
@@ -19,14 +22,17 @@ pub mod migrate;
 pub mod patches;
 pub mod plan;
 pub mod process;
+pub mod provenance;
 pub mod resume;
 pub mod rules;
 pub mod safety;
+pub mod search;
 pub mod session;
 pub mod skills;
 pub mod snapshot;
 pub mod spend;
 pub mod storage;
+pub mod templates;
 pub mod toolchain;
 pub mod tree;
 pub mod update;
@@ -39,6 +45,11 @@ pub use agent::{
     Policy, Position, Scopes, ScriptedModel, ServerStatus, StopReason, SubagentPolicy, ToolCall,
     ToolOutcome, ToolSpec, Tools, TurnRun, classify,
 };
+pub use agentmail::{
+    Mail, MailConfig, MailError, MailStatus, MessageBody, MessageSummary, SentMail, ThreadSummary,
+    ThreadView,
+};
+pub use attention::{Attention, AttentionGroup, AttentionItem};
 pub use attribute::{Attributed, ConflictWatcher, Observed, POLL_INTERVAL, Watcher};
 pub use budget::{
     BudgetError, BudgetOutcome, BudgetService, BudgetSnapshot, DEFAULT_DAILY_CAP_MICROS,
@@ -49,6 +60,10 @@ pub use claims::{
     CLAIM_TTL, Claim, ClaimConflict, ClaimError, ClaimResult, ClaimService, ConflictSides,
     ConflictText, MERGE_AUTHOR, MergeResolution, MergedConflict, STALE_AFTER, UnverifiedChange,
 };
+pub use cloud::{
+    Cloud, CloudConfig, CloudError, CloudStatus, Endpoints, MemorySessionStore, PullReport,
+    PushReport, SessionStore,
+};
 pub use comments::{CommentError, HunkComment, HunkComments};
 pub use domain::{AgentEvent, CostSource, EventSink, ItemKind, NullSink, Usage};
 pub use memory::{MemoryError, MemoryFile, MemoryService, WriteMode};
@@ -58,13 +73,15 @@ pub use patches::{
     AttributedHunk, HunkHeader, Patch, PatchError, PatchPipeline, Recovery, RecoveryState, StopAt,
     apply_patch_text, parse_diff_hunks, reverse_patch,
 };
+pub use provenance::{Provenance, ProvenanceError};
 pub use resume::{ResumeError, ResumeOutcome};
 pub use safety::{
     AppliedReview, DecisionError, MergeReview, MergeReviews, Verdict, apply_review, diff_sha,
 };
+pub use search::{MAX_HITS, PatchHit, SessionHit, TurnHit, WorkspaceHits};
 pub use session::{
-    Agent, Checkpoint, Item, Session, SessionError, SessionService, SessionStatus, TeamAgent, Turn,
-    TurnTranscript, WritableAgent,
+    Agent, Bookmark, Checkpoint, Item, Session, SessionError, SessionService, SessionStatus,
+    TeamAgent, Turn, TurnTranscript, WritableAgent,
 };
 pub use skills::{
     Capability, Evidence, EvidenceSummary, GitHubSource, IndexStats, IngestReport, SkillDetail,
@@ -75,6 +92,9 @@ pub use snapshot::{
     SnapshotError, SnapshotKind, SnapshotService,
 };
 pub use storage::{StorageError, Store, default_index_dir};
+pub use templates::{
+    MAX_TEMPLATES, SessionTemplate, SessionTemplates, TemplateAgent, TemplateError,
+};
 pub use toolchain::{
     Decision, Environment, Host, InstallPlan, InstallRecord, Manager, Pin, Requirement,
     RequirementSource, RunOutcome, Runner, SourceKind, SystemEnvironment, SystemRunner, TOOLS,

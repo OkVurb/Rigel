@@ -23,6 +23,10 @@ export interface Session {
   tasks_done: number;
   created_at: number;
   ended_at: number | null;
+  /** D148: pinned sessions sort first in the Session pane's list. */
+  pinned_at: number | null;
+  /** D148: archived sessions are hidden by default, still searchable and still resumable. */
+  archived_at: number | null;
 }
 
 export interface ProjectInfo {
@@ -31,11 +35,64 @@ export interface ProjectInfo {
   db: string;
 }
 
+/** D147: one palette row per section. The window never re-ranks these; the core already did. */
+/** D150: a kept line. `target_id` is an item id or a patch hunk id. */
+export interface Bookmark {
+  id: string;
+  session_id: string;
+  kind: "item" | "hunk";
+  target_id: string;
+  label: string;
+  created_at: number;
+}
+
+export interface PaletteSkill {
+  id: string;
+  name: string;
+  description: string;
+  grade: string | null;
+  source: string;
+}
+
+export interface PaletteSession {
+  id: string;
+  title: string;
+  status: string;
+  created_at: number;
+}
+
+export interface PaletteTurn {
+  session_id: string;
+  turn_id: string;
+  seq: number;
+  role: string;
+  harness: string;
+  prompt: string;
+  snippet: string;
+  from_item: boolean;
+  created_at: number;
+}
+
+export interface PalettePatch {
+  id: string;
+  session_id: string;
+  path: string;
+  status: string;
+  created_at: number;
+}
+
+export interface PaletteResults {
+  skills: PaletteSkill[];
+  sessions: PaletteSession[];
+  turns: PaletteTurn[];
+  patches: PalettePatch[];
+}
+
 export interface Settings {
   theme: string;
   default_budget_cents: number;
   unattended_default: boolean;
-  /** `omniroute` (local router), `openrouter`, or `gemini` (Google's API). */
+  /** One row of the Rust-side adapter table: `omniroute`, `openrouter`, `gemini`, `vertex`, … */
   provider: string;
   model: string;
   /** Separate reasoning effort: low, medium or high. */
@@ -44,6 +101,53 @@ export interface Settings {
   notify_approval: boolean;
   notify_turn_done: boolean;
   notify_turn_failed: boolean;
+  /** The Terminal surface: xterm's font size and scrollback, and the shell to open. */
+  terminal_font_size: number;
+  terminal_scrollback: number;
+  /** Empty means PowerShell on Windows and `$SHELL` elsewhere. */
+  terminal_shell: string;
+  /** Re-sync a skill source whose data is older than the stale window, in the background. */
+  skills_auto_update: boolean;
+  /** D159: 90, 100, 110 or 125; applied to the shell, never to the terminal's cell size. */
+  ui_scale: number;
+  /** D159: tighter rows in the transcript, list and diff. */
+  compact_density: boolean;
+  /** How many model steps one native turn may take. */
+  max_steps: number;
+  /**
+   * Whether the model picker hides rows that cannot answer a chat turn.
+   * Saved, so the choice survives a restart; defaults to on.
+   */
+  chat_models_only: boolean;
+}
+
+/** The browser preview's stand-in for `settings.toml`; `null` until the first save. */
+let previewSettings: Settings | null = null;
+
+/**
+ * The settings a window starts from before Rust answers — also the shape a first run writes.
+ * One copy, so a new field is added here and in Rust's `Settings::default`, not in every form.
+ */
+export function defaultSettings(): Settings {
+  return {
+    theme: "dark",
+    default_budget_cents: 500,
+    unattended_default: false,
+    provider: "omniroute",
+    model: "gpt-5.6-sol-medium",
+    effort: "medium",
+    notify_approval: true,
+    notify_turn_done: true,
+    notify_turn_failed: true,
+    terminal_font_size: 13,
+    terminal_scrollback: 8_000,
+    terminal_shell: "",
+    skills_auto_update: true,
+    max_steps: 10,
+    chat_models_only: true,
+    ui_scale: 100,
+    compact_density: false,
+  };
 }
 
 /** The update switch, this build's version and whether a publisher key is present. */
@@ -66,6 +170,103 @@ export interface UpdateCheck {
   notes: string | null;
   msi_url: string | null;
   msi_sha256: string | null;
+}
+
+/** The Firebase project and account, as `rigel cloud status` reports them. No token is here. */
+export interface CloudStatus {
+  configured: boolean;
+  project_id: string | null;
+  signed_in: boolean;
+  email: string | null;
+  uid: string | null;
+  expires_at: number | null;
+  /**
+   * Firebase's answer about the address. False when signed out, and for a session stored before
+   * the check existed until `cloudCheckVerification` re-reads it.
+   */
+  email_verified: boolean;
+  /** The App Check attestation endpoint, when this machine sends App Check tokens. */
+  app_check: { attest_url: string } | null;
+  /** The local manifest's clock: when this machine last pushed and pulled the shelf. */
+  last_push_at: number | null;
+  last_pull_at: number | null;
+  last_sync_at: number | null;
+}
+
+/** The AgentMail inbox, as `rigel mail status` reports it. The key itself is never here. */
+export interface MailStatus {
+  configured: boolean;
+  inbox: string | null;
+  key_present: boolean;
+}
+
+/** One conversation in the inbox. Bodies are fetched only when it is opened. */
+export interface MailThreadSummary {
+  thread_id: string;
+  subject: string;
+  timestamp: string | null;
+  message_count: number;
+  unread: boolean;
+}
+
+/** One message inside an opened conversation. */
+export interface MailThreadMessage {
+  message_id: string;
+  from: string;
+  to: string[];
+  subject: string;
+  timestamp: string | null;
+  text: string;
+  extracted_text: string | null;
+}
+
+/** One conversation, oldest message first. */
+export interface MailThread {
+  thread_id: string;
+  subject: string;
+  messages: MailThreadMessage[];
+}
+
+/** What a send produced. */
+export interface SentMail {
+  message_id: string;
+  thread_id: string | null;
+}
+
+/** What a push sent. Bodies never leave the machine. */
+export interface CloudPushReport {
+  project_id: string;
+  uid: string;
+  pushed: number;
+  batches: number;
+  /** Rows in the manifest that are gone locally; each became a tombstone. */
+  deleted: number;
+  /** The shelf exceeded the mirror cap, so deletions were not propagated. */
+  truncated: boolean;
+}
+
+/** What a publish sent: the header and one document per turn. */
+export interface CloudPublishReport {
+  project_id: string;
+  uid: string;
+  session_id: string;
+  title: string;
+  turns: number;
+  batches: number;
+}
+
+/** What a pull found. A pulled row never carries a body. */
+export interface CloudPullReport {
+  project_id: string;
+  uid: string;
+  received: number;
+  written: number;
+  skipped: number;
+  pages: number;
+  /** Tombstone documents seen. */
+  tombstones: number;
+  /** Local rows a tombstone actually removed. */
+  deleted: number;
 }
 
 /** D82: an opt-in, local-only diagnostics bundle. Nothing leaves the machine. */
@@ -211,6 +412,8 @@ export interface ModelOption {
   provider: "openrouter" | "omniroute" | "gemini" | string;
   name?: string | null;
   free: boolean;
+  /** Whether this row can answer a chat turn; the picker hides the rest behind a toggle. */
+  chat?: boolean;
 }
 
 export interface TerminalInfo {
@@ -295,6 +498,72 @@ export interface Patch {
 }
 
 /** One `@@` block and the agent whose patch proposed it (P5.6). */
+/** D154: one unresolved row. `kind` names why it is here, never a guess at a cause. */
+export interface AttentionItem {
+  kind: string;
+  /** Empty on an approval from a surface that recorded no session. */
+  session_id: string;
+  label: string;
+  detail: string;
+  at: number;
+  turn_id: string | null;
+  agent_id: string | null;
+  patch_id: string | null;
+}
+
+export interface AttentionGroup {
+  session_id: string;
+  title: string;
+  status: string;
+  archived: boolean;
+  items: AttentionItem[];
+}
+
+export interface Attention {
+  groups: AttentionGroup[];
+  total: number;
+}
+
+/** D152: one agent a project template spawns, with its own model (D135). */
+export interface TemplateAgent {
+  harness: string;
+  role: string | null;
+  model: string | null;
+}
+
+/** D152: the shape of a session before it starts, stored in `.rigel/templates.json`. */
+export interface SessionTemplate {
+  id: string;
+  name: string;
+  model: string | null;
+  effort: string | null;
+  max_steps: number | null;
+  agents: TemplateAgent[];
+  /** Left in the composer by a create; never sent. */
+  prompt: string;
+  created_at: number;
+}
+
+/** D156: the recorded chain behind a patch. Empty links are printed as "unknown". */
+export interface Provenance {
+  patch_id: string;
+  path: string;
+  status: string;
+  created_at: number;
+  applied_at: number | null;
+  agent_id: string;
+  agent_role: string | null;
+  harness: string | null;
+  model: string | null;
+  turn_id: string | null;
+  turn_seq: number | null;
+  turn_status: string | null;
+  item_id: string | null;
+  item_kind: string | null;
+  tool: string | null;
+  complete: boolean;
+}
+
 export interface AttributedHunk {
   /** The `patch_hunks` row: what a comment attaches to. */
   id: string;
@@ -395,13 +664,143 @@ function previewQuote(prompt: string, spendMicros: number, capMicros: number | n
   };
 }
 
+/** Browser-preview attention: one session group plus a waiting approval. */
+function previewAttention(): Attention {
+  const now = Date.now();
+  return {
+    total: 3,
+    groups: [
+      {
+        session_id: "",
+        title: "Waiting on you",
+        status: "active",
+        archived: false,
+        items: [
+          {
+            kind: "approval",
+            session_id: "7c1e4a3d-0000-4000-8000-000000000000",
+            label: "cargo test --workspace",
+            detail: "command · waiting for an answer",
+            at: now - 60_000,
+            turn_id: "turn-preview-2",
+            agent_id: "agent-preview-worker",
+            patch_id: null,
+          },
+        ],
+      },
+      {
+        session_id: "7c1e4a3d-0000-4000-8000-000000000000",
+        title: "Fix the flaky resume test",
+        status: "active",
+        archived: false,
+        items: [
+          {
+            kind: "blocked_merge",
+            session_id: "7c1e4a3d-0000-4000-8000-000000000000",
+            label: "Blocked merge from writer",
+            detail: "blocked · 1 file · the caller asked for exactly this comment",
+            at: now - 240_000,
+            turn_id: null,
+            agent_id: "c4d18e77-2b90-4a51-8f0e-6d3a9b5c7e21",
+            patch_id: null,
+          },
+          {
+            kind: "failed_turn",
+            session_id: "7c1e4a3d-0000-4000-8000-000000000000",
+            label: "Turn 2 failed",
+            detail: "writer · no later turn on this agent completed",
+            at: now - 300_000,
+            turn_id: "turn-preview-2",
+            agent_id: "agent-preview-worker",
+            patch_id: null,
+          },
+        ],
+      },
+    ],
+  };
+}
+
+/** Browser-preview templates: one sample, kept in memory for the session. */
+let previewTemplates: SessionTemplate[] | null = null;
+
+function previewTemplateList(): SessionTemplate[] {
+  previewTemplates ??= [
+    {
+      id: "template-preview-1",
+      name: "Fix the flaky test",
+      model: "anthropic/claude-sonnet-4.5",
+      effort: "medium",
+      max_steps: 10,
+      agents: [{ harness: "native", role: "writer", model: "anthropic/claude-sonnet-4.5" }],
+      prompt: "The resume test fails on Windows. Find the cause before patching it.",
+      created_at: Date.now() - 600_000,
+    },
+  ];
+  return previewTemplates;
+}
+
+function previewTemplateSave(template: SessionTemplate): SessionTemplate {
+  const list = previewTemplateList();
+  const saved: SessionTemplate = {
+    ...template,
+    id: template.id || `template-preview-${Date.now()}`,
+    name: template.name.split("\n")[0].trim().slice(0, 60) || "Session",
+    prompt: template.prompt.trimEnd(),
+    created_at: template.created_at || Date.now(),
+  };
+  const index = list.findIndex((row) => row.id === saved.id);
+  previewTemplates = index >= 0 ? list.map((row) => (row.id === saved.id ? saved : row)) : [...list, saved];
+  return saved;
+}
+
+/**
+ * Browser-preview provenance only: the chain the sample diff and transcript share. The desktop
+ * app reads the same shape from `provenance.rs`.
+ */
+function previewProvenance(patchId: string): Provenance {
+  if (patchId !== "patch-preview-1") {
+    throw new Error(`patch ${patchId} is not in the journal`);
+  }
+  return {
+    patch_id: patchId,
+    path: "ui/src/session.tsx",
+    status: "applied",
+    created_at: Date.now() - 120_000,
+    applied_at: Date.now() - 120_000,
+    agent_id: "agent-worker",
+    agent_role: "worker",
+    harness: "native",
+    model: "anthropic/claude-sonnet-4.5",
+    turn_id: "turn-preview-2",
+    turn_seq: 2,
+    turn_status: "completed",
+    item_id: "item-preview-5",
+    item_kind: "file_change",
+    tool: "edit_file",
+    complete: true,
+  };
+}
+
 export interface KeyStatus {
-  openrouter: boolean;
-  omniroute: boolean;
-  openai: boolean;
-  anthropic: boolean;
-  cursor: boolean;
-  gemini: boolean;
+  /** `true` per credential name: one entry per provider and one per harness key. */
+  providers: Record<string, boolean>;
+  /** Whether any chat provider has a credential — the answer the launch banner asks for. */
+  native_ready: boolean;
+}
+
+/** One chat adapter, from the Rust-side table (`providers_list`). Never a key, only its absence. */
+export interface ProviderRow {
+  id: string;
+  name: string;
+  hint: string;
+  /** The variable a headless run reads instead of the keychain. */
+  env: string | null;
+  /** A short-lived token rather than a key: the field's label and copy follow this. */
+  access_token: boolean;
+  default_model: string | null;
+  /** Where a key is created, when the vendor publishes a page for it. */
+  key_url: string | null;
+  key_present: boolean;
 }
 
 /** Health of the vendor chat server (agentchattr) the Chat tab fronts. */
@@ -463,6 +862,50 @@ const PREVIEW_CHAT_MESSAGES: AgentChatMessage[] = [
   { id: 2, sender: "claude", text: "PatchCommand variants carry no help text while AgentCommand's do — add doc comments.", time: "21:18:41", kind: "chat", channel: "general" },
   { id: 3, sender: "codex", text: "--max-steps 0 is accepted, then the coordinator fails on the step bound at once — validate in Clap.", time: "21:19:03", kind: "chat", channel: "general" },
   { id: 4, sender: "claude", text: "@codex Agreed — your fix lands first; mine is docs-only follow-up. This enum has acp, not register.", time: "21:19:30", kind: "chat", channel: "general" },
+];
+
+/** The adapters a browser preview shows; the real list comes from the Rust-side table. */
+const PREVIEW_PROVIDERS: ProviderRow[] = [
+  {
+    id: "omniroute",
+    name: "OmniRoute",
+    hint: "Local router · one key, any model",
+    env: "OMNIROUTE_API_KEY",
+    access_token: false,
+    default_model: "gpt-5.6-sol-medium",
+    key_url: null,
+    key_present: false,
+  },
+  {
+    id: "openrouter",
+    name: "OpenRouter",
+    hint: "Hosted gateway · the widest roster",
+    env: "OPENROUTER_API_KEY",
+    access_token: false,
+    default_model: "openai/gpt-4.1-mini",
+    key_url: "https://openrouter.ai/keys",
+    key_present: false,
+  },
+  {
+    id: "vertex",
+    name: "Google Vertex AI",
+    hint: "Your GCP project · a short-lived access token",
+    env: "VERTEX_ACCESS_TOKEN",
+    access_token: true,
+    default_model: "google/gemini-4-argon",
+    key_url: "https://docs.cloud.google.com/gemini-enterprise-agent-platform/models/start/openai",
+    key_present: false,
+  },
+  {
+    id: "anthropic",
+    name: "Anthropic",
+    hint: "Claude's own endpoint · the Messages API",
+    env: "ANTHROPIC_API_KEY",
+    access_token: false,
+    default_model: "claude-opus-5-5",
+    key_url: "https://platform.claude.com/settings/keys",
+    key_present: false,
+  },
 ];
 
 /** One row of `adapters.json` (P4.1). */
@@ -653,6 +1096,24 @@ export interface SkillSource {
   load(id: string): Promise<SkillDetail>;
   status(): Promise<SourceStatus[]>;
   indexRepo?(repo: string): Promise<IngestReport>;
+  /** Re-sync every source that is not fresh; what the auto-update switch runs. */
+  refresh?(): Promise<RefreshReport>;
+}
+
+/** One source after an auto-update pass. */
+export interface SourceRefresh {
+  id: string;
+  /** `ok` | `stale` | `broken` — the state the source is left in. */
+  state: string;
+  /** One line: what was fetched, or why the source was left alone. */
+  detail: string;
+}
+
+/** What one auto-update pass did. */
+export interface RefreshReport {
+  checked: number;
+  refreshed: number;
+  sources: SourceRefresh[];
 }
 
 
@@ -665,6 +1126,11 @@ export interface PendingApproval {
   title: string;
   detail: Record<string, unknown> | null;
   requested_at: number;
+  /** D154: the project and origin the asking surface recorded; absent on older files. */
+  project_root?: string;
+  session_id?: string;
+  agent_id?: string;
+  turn_id?: string;
 }
 
 export type ApprovalAnswer = "once" | "session" | "project" | "always" | "deny";
@@ -828,11 +1294,11 @@ async function call<T>(command: string, args?: Record<string, unknown>): Promise
 export const api = {
   isTauri,
 
-  /** The approval card: every open question, oldest first (P4.10e). */
+  /** The approval card: every open question for this project, oldest first (P4.10e, D154). */
   approvals: {
-    async pending(): Promise<PendingApproval[]> {
+    async pending(project: string): Promise<PendingApproval[]> {
       if (!isTauri()) return previewQueue;
-      return call<PendingApproval[]>("approval_pending");
+      return call<PendingApproval[]>("approval_pending", { project });
     },
     /** Answer one question. A refusal is `null` on the wire, never an unknown string. */
     async answer(
@@ -889,6 +1355,84 @@ export const api = {
   async listSessions(project: string): Promise<Session[]> {
     if (!isTauri()) return [];
     return call<Session[]>("session_list", { project });
+  },
+
+  /** D148: nil clears the name, so the automatic title is used again. */
+  async renameSession(project: string, id: string, title: string | null): Promise<Session> {
+    if (!isTauri()) throw new Error("Rename a session in the desktop app.");
+    return call<Session>("session_rename", { project, id, title });
+  },
+
+  async pinSession(project: string, id: string, pinned: boolean): Promise<Session> {
+    if (!isTauri()) throw new Error("Pin a session in the desktop app.");
+    return call<Session>("session_pin", { project, id, pinned });
+  },
+
+  async archiveSession(project: string, id: string, archived: boolean): Promise<Session> {
+    if (!isTauri()) throw new Error("Archive a session in the desktop app.");
+    return call<Session>("session_archive", { project, id, archived });
+  },
+
+  async listBookmarks(project: string, session: string): Promise<Bookmark[]> {
+    if (!isTauri()) return [];
+    return call<Bookmark[]>("bookmark_list", { project, session });
+  },
+
+  /** D154: unresolved work, grouped by session, with open approvals leading the list. */
+  async attention(project: string): Promise<Attention> {
+    if (!isTauri()) return previewAttention();
+    return call<Attention>("attention_list", { project });
+  },
+
+  /** D152: the project's own templates. Nothing here is committed to the repository. */
+  templates: {
+    async list(project: string): Promise<SessionTemplate[]> {
+      if (!isTauri()) return previewTemplateList();
+      return call<SessionTemplate[]>("template_list", { project });
+    },
+
+    async save(project: string, template: SessionTemplate): Promise<SessionTemplate> {
+      if (!isTauri()) return previewTemplateSave(template);
+      return call<SessionTemplate>("template_save", { project, template });
+    },
+
+    async delete(project: string, id: string): Promise<void> {
+      if (!isTauri()) {
+        previewTemplates = previewTemplateList().filter((row) => row.id !== id);
+        return;
+      }
+      return call<void>("template_delete", { project, id });
+    },
+  },
+
+  /** D156: read the chain for one patch. Nothing here is written or re-run. */
+  async provenance(project: string, patchId: string): Promise<Provenance> {
+    if (!isTauri()) return previewProvenance(patchId);
+    return call<Provenance>("patch_provenance", { project, patchId });
+  },
+
+  /** `null` means the star was cleared. */
+  async toggleBookmark(
+    project: string,
+    session: string,
+    kind: "item" | "hunk",
+    targetId: string,
+    label: string,
+  ): Promise<Bookmark | null> {
+    if (!isTauri()) throw new Error("Bookmark a line in the desktop app.");
+    return call<Bookmark | null>("bookmark_toggle", { project, session, kind, targetId, label });
+  },
+
+  /** D147: skills, sessions, turns and patches in one read. Capped per section in the core. */
+  async searchAll(
+    project: string | null,
+    query: string,
+    currentSession: string | null,
+  ): Promise<PaletteResults> {
+    if (!isTauri()) {
+      return { skills: [], sessions: [], turns: [], patches: [] };
+    }
+    return call<PaletteResults>("search_all", { project, query, currentSession });
   },
 
   async startSession(project: string, title?: string, budgetCents?: number | null): Promise<Session> {
@@ -1166,45 +1710,24 @@ export const api = {
   },
 
   async keyStatus(): Promise<KeyStatus> {
-    if (!isTauri()) {
-      return {
-        openrouter: false,
-        omniroute: false,
-        openai: false,
-        anthropic: false,
-        cursor: false,
-        gemini: false,
-      };
-    }
+    if (!isTauri()) return { providers: {}, native_ready: false };
     return call<KeyStatus>("key_status");
   },
 
   async setKey(provider: string, value: string): Promise<KeyStatus> {
-    if (!isTauri()) {
-      return {
-        openrouter: true,
-        omniroute: true,
-        openai: true,
-        anthropic: true,
-        cursor: true,
-        gemini: true,
-      };
-    }
+    if (!isTauri()) return { providers: { [provider]: true }, native_ready: true };
     return call<KeyStatus>("key_set", { provider, value });
   },
 
   async deleteKey(provider: string): Promise<KeyStatus> {
-    if (!isTauri()) {
-      return {
-        openrouter: false,
-        omniroute: false,
-        openai: false,
-        anthropic: false,
-        cursor: false,
-        gemini: false,
-      };
-    }
+    if (!isTauri()) return { providers: { [provider]: false }, native_ready: false };
     return call<KeyStatus>("key_delete", { provider });
+  },
+
+  /** The chat adapters, in the order the app lists them. A preview answers the same shape. */
+  async providersList(): Promise<ProviderRow[]> {
+    if (!isTauri()) return PREVIEW_PROVIDERS;
+    return call<ProviderRow[]>("providers_list");
   },
 
   async harnesses(): Promise<HarnessInfo[]> {
@@ -1240,23 +1763,18 @@ export const api = {
 
   async getSettings(): Promise<Settings> {
     if (!isTauri()) {
-      return {
-        theme: "dark",
-        default_budget_cents: 500,
-        unattended_default: false,
-        provider: "omniroute",
-        model: "gpt-5.6-sol-medium",
-        effort: "medium",
-        notify_approval: true,
-        notify_turn_done: true,
-        notify_turn_failed: true,
-      };
+      return previewSettings ?? defaultSettings();
     }
     return call<Settings>("settings_get");
   },
 
   async saveSettings(settings: Settings): Promise<Settings> {
-    if (!isTauri()) return settings;
+    if (!isTauri()) {
+      // The browser preview has no settings.toml. Keep one in memory for the session so a saved
+      // choice reads back the way it will in the window, instead of resetting on the next mount.
+      previewSettings = settings;
+      return settings;
+    }
     return call<Settings>("settings_set", { settings });
   },
 
@@ -1303,6 +1821,131 @@ export const api = {
   async updateInstall(): Promise<string> {
     if (!isTauri()) throw new Error("Updates install from the desktop app.");
     return call<string>("update_install");
+  },
+
+  /** The Firebase project and account. No network call; `cloud.json` and the keychain answer. */
+  async cloudStatus(): Promise<CloudStatus> {
+    if (!isTauri()) {
+      return {
+        configured: false,
+        project_id: null,
+        signed_in: false,
+        email: null,
+        uid: null,
+        expires_at: null,
+        email_verified: false,
+        app_check: null,
+        last_push_at: null,
+        last_pull_at: null,
+        last_sync_at: null,
+      };
+    }
+    return call<CloudStatus>("cloud_status");
+  },
+
+  async cloudConfigure(project: string, apiKey: string): Promise<CloudStatus> {
+    if (!isTauri()) throw new Error("Configure the Firebase project in the desktop app.");
+    return call<CloudStatus>("cloud_configure", { project, apiKey });
+  },
+
+  /** One sign-in. The password is not stored; only the refresh token reaches the keychain. */
+  async cloudLogin(email: string, password: string): Promise<CloudStatus> {
+    if (!isTauri()) throw new Error("Rigel Cloud signs in from the desktop app.");
+    return call<CloudStatus>("cloud_login", { email, password });
+  },
+
+  /** Create the account; Firebase returns the session, so the page is signed in afterwards. */
+  async cloudSignup(email: string, password: string): Promise<CloudStatus> {
+    if (!isTauri()) throw new Error("Rigel Cloud creates accounts from the desktop app.");
+    return call<CloudStatus>("cloud_signup", { email, password });
+  },
+
+  /** Ask Firebase for a reset link. The answer is the address, not whether it has an account. */
+  async cloudResetPassword(email: string): Promise<string> {
+    if (!isTauri()) throw new Error("Rigel Cloud sends reset links from the desktop app.");
+    return call<string>("cloud_reset_password", { email });
+  },
+
+  /**
+   * Ask Firebase for a verification link to the signed-in account. Sending again is the resend
+   * control; the answer is the address the link went to, never a token.
+   */
+  async cloudSendVerification(): Promise<string> {
+    if (!isTauri()) throw new Error("Rigel Cloud sends verification links from the desktop app.");
+    return call<string>("cloud_send_verification");
+  },
+
+  /** Re-read the verification state from Firebase; the stored session keeps the answer. */
+  async cloudCheckVerification(): Promise<CloudStatus> {
+    if (!isTauri()) throw new Error("Rigel Cloud checks verification from the desktop app.");
+    return call<CloudStatus>("cloud_check_verification");
+  },
+
+  /**
+   * Point App Check at an attestation endpoint, or turn it off with `null`. The endpoint answers
+   * with short-lived tokens; none of them ever reaches this process.
+   */
+  async cloudAppCheck(url: string | null): Promise<CloudStatus> {
+    if (!isTauri()) throw new Error("Rigel Cloud configures App Check in the desktop app.");
+    return call<CloudStatus>("cloud_app_check", { url });
+  },
+
+  async cloudLogout(): Promise<CloudStatus> {
+    if (!isTauri()) throw new Error("Rigel Cloud signs out from the desktop app.");
+    return call<CloudStatus>("cloud_logout");
+  },
+
+  async cloudPush(): Promise<CloudPushReport> {
+    if (!isTauri()) throw new Error("The shelf mirror runs in the desktop app.");
+    return call<CloudPushReport>("cloud_push");
+  },
+
+  async cloudPull(): Promise<CloudPullReport> {
+    if (!isTauri()) throw new Error("The shelf mirror runs in the desktop app.");
+    return call<CloudPullReport>("cloud_pull");
+  },
+
+  /** The AgentMail inbox and whether a key is stored. No network call. */
+  async mailStatus(): Promise<MailStatus> {
+    if (!isTauri()) {
+      return { configured: false, inbox: null, key_present: false };
+    }
+    return call<MailStatus>("mail_status");
+  },
+
+  async mailConfigure(inbox: string): Promise<MailStatus> {
+    if (!isTauri()) throw new Error("The AgentMail inbox is configured in the desktop app.");
+    return call<MailStatus>("mail_configure", { inbox });
+  },
+
+  /** The key goes to the OS keychain; this window never reads it back. */
+  async mailSetKey(apiKey: string): Promise<MailStatus> {
+    if (!isTauri()) throw new Error("The AgentMail API key is saved in the desktop app.");
+    return call<MailStatus>("mail_set_key", { apiKey });
+  },
+
+  /** Conversations in the inbox, newest first. No body is fetched here. */
+  async mailThreads(limit = 10): Promise<MailThreadSummary[]> {
+    if (!isTauri()) return [];
+    return call<MailThreadSummary[]>("mail_threads", { limit });
+  },
+
+  /** One conversation, oldest message first. */
+  async mailThread(threadId: string): Promise<MailThread> {
+    if (!isTauri()) throw new Error("Mail is read in the desktop app.");
+    return call<MailThread>("mail_thread", { threadId });
+  },
+
+  /** Send from the page. An agent's send goes through the approval card instead. */
+  async mailSend(to: string, subject: string, text: string): Promise<SentMail> {
+    if (!isTauri()) throw new Error("Mail is sent from the desktop app.");
+    return call<SentMail>("mail_send", { to, subject, text });
+  },
+
+  /** Publish one session to the phone: prompts and assistant text only. */
+  async cloudPublishSession(project: string, session: string): Promise<CloudPublishReport> {
+    if (!isTauri()) throw new Error("Sessions publish from the desktop app.");
+    return call<CloudPublishReport>("cloud_publish_session", { project, session });
   },
 
   /** Compose the PR title/body locally, for a review before creating it. */
@@ -1353,14 +1996,19 @@ export const api = {
     return call<DiagnosticsBundle>("diagnostics_export", { project, session });
   },
 
-  /** The merged model catalogue for the picker: the current provider first, then OpenRouter. */
+  /**
+   * The merged model catalogue for the picker: every provider that holds a credential, the
+   * current one first. Rows that cannot answer a chat turn come back marked, not removed — the
+   * picker's toggle decides whether they are shown.
+   */
   async listModels(): Promise<ModelOption[]> {
     if (!isTauri()) {
       return [
-        { id: "gpt-5.6-sol-medium", provider: "omniroute", free: false },
-        { id: "openai/gpt-4.1-mini", provider: "openrouter", free: false },
-        { id: "baseten/mammoth-1:free", provider: "openrouter", free: true },
-        { id: "anthropic/claude-sonnet-4.5", provider: "openrouter", free: false },
+        { id: "gpt-5.6-sol-medium", provider: "omniroute", free: false, chat: true },
+        { id: "openai/gpt-4.1-mini", provider: "openrouter", free: false, chat: true },
+        { id: "baseten/mammoth-1:free", provider: "openrouter", free: true, chat: true },
+        { id: "anthropic/claude-sonnet-4.5", provider: "openrouter", free: false, chat: true },
+        { id: "aihorde/AbyssOrangeMix", provider: "omniroute", free: false, chat: false },
       ];
     }
     return call<ModelOption[]>("models_list");
@@ -1455,9 +2103,16 @@ export const api = {
       project: string | null,
       cols: number,
       rows: number,
+      /** The shell to open; empty or absent means the OS default. */
+      shell?: string,
     ): Promise<TerminalInfo> {
       if (!isTauri()) throw new Error("The terminal runs in the desktop app, not the browser preview.");
-      return call<TerminalInfo>("terminal_open", { project, cols, rows });
+      return call<TerminalInfo>("terminal_open", {
+        project,
+        cols,
+        rows,
+        shell: shell?.trim() ? shell.trim() : null,
+      });
     },
 
     async write(id: string, data: string): Promise<void> {
@@ -1510,6 +2165,10 @@ export class TauriSkillSource implements SkillSource {
 
   async indexRepo(repo: string): Promise<IngestReport> {
     return call<IngestReport>("skills_index", { repo, force: false });
+  }
+
+  async refresh(): Promise<RefreshReport> {
+    return call<RefreshReport>("skills_refresh");
   }
 }
 

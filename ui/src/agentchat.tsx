@@ -247,7 +247,7 @@ export default function ChatView({
             </div>
           </div>
         </aside>
-        <main className="detail chat-main">
+        <main id="main" tabIndex={-1} className="detail chat-main">
           {notice ? <p className="notice" role="status">{notice}</p> : null}
           <section className="chat-empty">
             <h3>{status.setup ? "agentchattr is not installed here" : "The room is not running"}</h3>
@@ -304,7 +304,7 @@ export default function ChatView({
             </div>
           </div>
         </aside>
-        <main className="detail chat-main">
+        <main id="main" tabIndex={-1} className="detail chat-main">
           {notice ? <p className="notice" role="status">{notice}</p> : null}
           <section className="chat-empty">
             <h3>This room is not Rigel's</h3>
@@ -366,7 +366,6 @@ export default function ChatView({
               >
                 <span
                   className={`chat-dot ${agent.available ? (agent.busy ? "busy" : "up") : "down"}`}
-                  style={{ color: agent.color }}
                   aria-hidden
                 >
                   ●
@@ -418,7 +417,7 @@ export default function ChatView({
         </section>
       </aside>
 
-      <main className="detail chat-main">
+      <main id="main" tabIndex={-1} className="detail chat-main">
         <header className="detail-head">
           <div>
             <p className="eyebrow">{channel === "general" ? "the room" : channel}</p>

@@ -3,7 +3,8 @@
 //! A file edit is reversible by construction: it is journalled and can be reverted. A shell
 //! command is not, so it is shown first — exact text, working directory, timeout — and the
 //! default answer is no. The CLI asks on stdin; the window gets a card (P4.10). A caller with
-//! neither surface uses [`DenyCommands`], which is safe by default.
+//! neither surface uses [`DenyCommands`], which is safe by default. An email leaves the machine
+//! and cannot be recalled, so it gets the same treatment through [`MailApprover`].
 //!
 //! **Scope (N2).** An answer is not only yes or no, it is "yes, for how long": once, for this
 //! session, for this project, or always. The four scopes live here so every surface shows the
@@ -169,6 +170,41 @@ impl PlanApprover for DenyPlans {
     }
 }
 
+/// One outgoing email, exactly as the user will see it before it leaves the machine.
+///
+/// A sent message cannot be recalled, so the whole thing is shown — sender, recipient, subject
+/// and body — and it is never covered by a grant the user gave to something else.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct MailRequest {
+    pub from: String,
+    pub to: String,
+    pub subject: String,
+    pub text: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MailDecision {
+    Allow,
+    Deny,
+}
+
+/// Who answers a [`MailRequest`]. Implementations must fail closed: an error, EOF or a closed
+/// window is a refusal.
+#[async_trait]
+pub trait MailApprover: Send + Sync {
+    async fn approve(&self, request: &MailRequest) -> MailDecision;
+}
+
+/// Refuses to send anything. The default for a headless caller, and for a turn with no card.
+pub struct DenyMail;
+
+#[async_trait]
+impl MailApprover for DenyMail {
+    async fn approve(&self, _request: &MailRequest) -> MailDecision {
+        MailDecision::Deny
+    }
+}
+
 /// What has already been approved, keyed by the exact text the user saw.
 ///
 /// Cloneable and cheap: a turn's tool set and the window share one of these, which is what
@@ -278,6 +314,20 @@ pub struct PendingApproval {
     pub detail: Option<serde_json::Value>,
     /// Milliseconds since the epoch, so a surface can show the oldest first.
     pub requested_at: i64,
+    /// D154: the project the question belongs to, so a window shows only its own. `None` is an
+    /// older queued file; it stays visible rather than hiding a live question.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project_root: Option<PathBuf>,
+    /// D154: the session and agent that asked, when the surface knows them. An older queued
+    /// file deserializes without these, and a question with no session is still a question.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_id: Option<String>,
+    /// The turn that asked. `turn_send` creates one per question, so a native command or mail
+    /// card can point back at the transcript row; a harness call may have no turn.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub turn_id: Option<String>,
 }
 
 /// What a surface wrote back. `None` is a rejection, which is also what a timeout means.
@@ -397,6 +447,15 @@ impl ApprovalBus {
         open
     }
 
+    /// The open questions a window for `project_root` may show (D154). The channel is shared by
+    /// every project, so both the Session card and Attention read through this one rule.
+    pub fn pending_for(&self, project_root: &Path) -> Vec<PendingApproval> {
+        self.pending()
+            .into_iter()
+            .filter(|pending| pending.belongs_to(project_root))
+            .collect()
+    }
+
     /// Answer one question. An id that is no longer pending is not an error: a late click after
     /// a timeout must not fail the window that made it.
     pub fn answer(&self, id: &str, scope: Option<ApprovalScope>) -> Result<(), String> {
@@ -464,12 +523,54 @@ impl PendingApproval {
                 .duration_since(std::time::UNIX_EPOCH)
                 .map(|elapsed| elapsed.as_millis() as i64)
                 .unwrap_or_default(),
+            project_root: None,
+            session_id: None,
+            agent_id: None,
+            turn_id: None,
         }
     }
 
     pub fn with_detail(mut self, detail: serde_json::Value) -> Self {
         self.detail = Some(detail);
         self
+    }
+
+    /// D154: name the project the question belongs to. The path is canonical when it exists,
+    /// so two spellings of the same checkout compare equal.
+    pub fn in_project(mut self, project_root: impl AsRef<Path>) -> Self {
+        let root = project_root.as_ref();
+        self.project_root = Some(root.canonicalize().unwrap_or_else(|_| root.to_path_buf()));
+        self
+    }
+
+    /// D154: name the session and agent a question came from. The MCP permission tool knows
+    /// these but not a turn; the window knows all three.
+    pub fn in_session(mut self, session_id: &str, agent_id: &str) -> Self {
+        self.session_id = Some(session_id.to_string());
+        self.agent_id = Some(agent_id.to_string());
+        self
+    }
+
+    /// D154: name the turn that asked, so Attention can open its transcript row instead of
+    /// the Session card.
+    pub fn on_turn(mut self, turn_id: &str) -> Self {
+        self.turn_id = Some(turn_id.to_string());
+        self
+    }
+
+    /// D154: whether a window for `project_root` may show this question. A question that names
+    /// another project is left out; an older queued file with no project stays visible, because
+    /// hiding a live question is worse than a stale row.
+    pub fn belongs_to(&self, project_root: &Path) -> bool {
+        match &self.project_root {
+            Some(root) => {
+                let here = project_root
+                    .canonicalize()
+                    .unwrap_or_else(|_| project_root.to_path_buf());
+                root.canonicalize().unwrap_or_else(|_| root.clone()) == here
+            }
+            None => true,
+        }
     }
 }
 
@@ -617,6 +718,64 @@ mod tests {
         let first = PendingApproval::now("command", "a", "a");
         let second = PendingApproval::now("command", "a", "a");
         assert_ne!(first.id, second.id);
+    }
+
+    #[test]
+    fn a_request_can_name_the_session_agent_and_turn_that_asked() {
+        let project = tempfile::tempdir().unwrap();
+        let pending = PendingApproval::now("command", "command:cargo test", "cargo test")
+            .in_project(project.path())
+            .in_session("session-1", "agent-1")
+            .on_turn("turn-1");
+        assert!(pending.project_root.is_some());
+        assert_eq!(pending.session_id.as_deref(), Some("session-1"));
+        assert_eq!(pending.agent_id.as_deref(), Some("agent-1"));
+        assert_eq!(pending.turn_id.as_deref(), Some("turn-1"));
+
+        let text = serde_json::to_string(&pending).unwrap();
+        let back: PendingApproval = serde_json::from_str(&text).unwrap();
+        assert_eq!(back, pending);
+
+        // A file published before D154 still reads as a question with no origin.
+        let old: PendingApproval = serde_json::from_str(
+            r#"{"id":"1","key":"k","kind":"command","title":"t","requested_at":1}"#,
+        )
+        .unwrap();
+        assert_eq!(old.project_root, None);
+        assert_eq!(old.session_id, None);
+        assert_eq!(old.agent_id, None);
+        assert_eq!(old.turn_id, None);
+    }
+
+    #[test]
+    fn the_bus_reads_only_the_open_projects_questions() {
+        let here = tempfile::tempdir().unwrap();
+        let elsewhere = tempfile::tempdir().unwrap();
+        let bus = ApprovalBus::new(here.path().join("index"));
+        for pending in [
+            PendingApproval::now("command", "command:cargo test", "cargo test")
+                .in_project(here.path()),
+            PendingApproval::now("command", "command:git status", "git status")
+                .in_project(elsewhere.path()),
+            PendingApproval::now("mail", "mail:a@b:c", "Send email to a@b"),
+        ] {
+            bus.publish(&pending).unwrap();
+        }
+
+        assert_eq!(bus.pending().len(), 3, "the channel itself is app-wide");
+        let mine = bus.pending_for(here.path());
+        assert_eq!(
+            mine.len(),
+            2,
+            "the other project's question is not on this card: {mine:?}"
+        );
+        assert!(mine.iter().any(|pending| pending.title == "cargo test"));
+        assert!(
+            mine.iter()
+                .any(|pending| pending.title == "Send email to a@b"),
+            "an older file with no project stays visible"
+        );
+        assert!(mine.iter().all(|pending| pending.title != "git status"));
     }
 
     #[test]

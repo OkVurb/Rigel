@@ -15,8 +15,10 @@ use rigel_core::{
 use serde_json::json;
 
 mod claims;
+mod cloud;
 mod doctor;
 mod harness;
+mod mail;
 mod phase3;
 mod tools;
 mod update;
@@ -118,6 +120,18 @@ enum Command {
         command: update::UpdateCommand,
     },
 
+    /// The user's own Firebase project: sign in and mirror the shelf.
+    Cloud {
+        #[command(subcommand)]
+        command: cloud::CloudCommand,
+    },
+
+    /// The AgentMail inbox the agent reads and sends from.
+    Mail {
+        #[command(subcommand)]
+        command: mail::MailCommand,
+    },
+
     /// One private git checkout per agent, merged back through the patch pipeline.
     Worktree {
         #[command(subcommand)]
@@ -140,6 +154,23 @@ enum Command {
     Harness {
         #[command(subcommand)]
         command: HarnessCommand,
+    },
+
+    /// The model roster every provider with a credential offers, as the picker shows it.
+    Models {
+        /// One provider's own list instead of the merged roster.
+        #[arg(long, value_name = "ID")]
+        provider: Option<String>,
+        /// The provider whose rows lead the merged list (the window's saved one is not read
+        /// here; the local router is the app's default door).
+        #[arg(long, value_name = "ID")]
+        current: Option<String>,
+        /// Include rows that cannot answer a chat turn: image checkpoints, video and music
+        /// models, embedding and moderation endpoints. The picker hides these by default.
+        #[arg(long)]
+        all: bool,
+        #[arg(long)]
+        json: bool,
     },
 
     /// Spend across every session in a project (D92).
@@ -227,6 +258,13 @@ enum SkillCommand {
         json: bool,
     },
 
+    /// Remove one row from the local shelf; the next `cloud push` writes a tombstone.
+    Remove {
+        id: String,
+        #[arg(long)]
+        json: bool,
+    },
+
     /// Walk a GitHub repository (or URL) into the index.
     Index {
         target: String,
@@ -254,6 +292,14 @@ enum SkillCommand {
         query: String,
         #[arg(long, default_value_t = 30)]
         limit: usize,
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Re-sync every source that is not fresh: the repositories this index holds (at most three,
+    /// most recently seen first) and one page of each marketplace. What the window runs at launch
+    /// when the Shelf's auto-update switch is on.
+    Refresh {
         #[arg(long)]
         json: bool,
     },
@@ -349,6 +395,79 @@ async fn main() -> ExitCode {
 
         Command::Harness { command } => harness::run_harness(command, &dir).await,
 
+        Command::Models {
+            provider,
+            current,
+            all,
+            json: as_json,
+        } => {
+            let store = rigel_core::credentials::KeychainCredentialStore;
+            // The window's saved provider lives in its own settings file, which this command does
+            // not read; the router is the app's default door, so it leads unless one is named.
+            let current = current.unwrap_or_else(|| rigel_core::credentials::OMNIROUTE.to_string());
+            let rows = match provider {
+                Some(id) => rigel_core::agent::catalog::catalog(&id, &store).await,
+                None => rigel_core::agent::catalog::roster(&current, &store).await,
+            };
+            match rows {
+                Ok(rows) => {
+                    let hidden = rows.iter().filter(|option| !option.chat).count();
+                    let shown: Vec<&rigel_core::agent::ModelOption> =
+                        rows.iter().filter(|option| all || option.chat).collect();
+                    if as_json {
+                        // The machine-readable form carries **every** row with its `chat` flag:
+                        // a caller that wants only chat rows can filter on the field, and a
+                        // caller that wants the whole roster does not need a second request.
+                        println!(
+                            "{}",
+                            serde_json::to_string_pretty(&rows).unwrap_or_default()
+                        );
+                    } else {
+                        for option in &shown {
+                            // With `--all` the list mixes both kinds, so the tag says which
+                            // rows the picker would have hidden instead of leaving it to guess.
+                            let tag = match (all && !option.chat, option.free) {
+                                (true, true) => "free · non-chat",
+                                (true, false) => "non-chat",
+                                (false, true) => "free",
+                                (false, false) => "",
+                            };
+                            println!(
+                                "  {:<46} {:<12} {:<16}{}",
+                                truncate(&option.id, 46),
+                                option.provider,
+                                tag,
+                                option
+                                    .name
+                                    .as_ref()
+                                    .map(|name| format!("  {name}"))
+                                    .unwrap_or_default()
+                            );
+                        }
+                        if all {
+                            println!(
+                                "\n{} row(s) — {hidden} cannot answer a chat turn",
+                                shown.len()
+                            );
+                        } else {
+                            println!("\n{} chat row(s)", shown.len());
+                            if hidden > 0 {
+                                println!(
+                                    "{hidden} row(s) cannot answer a chat turn — \
+                                     image, video, audio or retrieval models. `--all` shows them."
+                                );
+                            }
+                        }
+                    }
+                    ExitCode::SUCCESS
+                }
+                Err(error) => {
+                    eprintln!("rigel: {error}");
+                    ExitCode::from(2)
+                }
+            }
+        }
+
         Command::Spend {
             project,
             json: as_json,
@@ -409,6 +528,10 @@ async fn main() -> ExitCode {
         Command::Trust { command } => tools::run_trust(command),
 
         Command::Update { command } => update::run(&dir, command).await,
+
+        Command::Cloud { command } => cloud::run(&dir, command).await,
+
+        Command::Mail { command } => mail::run(&dir, command).await,
 
         Command::Worktree { command } => worktree::run(&dir, command).await,
 
@@ -538,6 +661,23 @@ async fn run_skills(dir: &Path, command: SkillCommand) -> ExitCode {
             Err(error) => skills_failure(error, as_json),
         },
 
+        SkillCommand::Remove { id, json: as_json } => match index.remove(&id).await {
+            Ok(true) => {
+                if as_json {
+                    println!("{}", json!({ "ok": true, "removed": id }));
+                } else {
+                    println!("removed    {id}");
+                    println!(
+                        "           the next `rigel cloud push` writes a tombstone so other \
+                         machines drop it too"
+                    );
+                }
+                ExitCode::SUCCESS
+            }
+            Ok(false) => skills_failure(SkillsError::NotIndexed(id), as_json),
+            Err(error) => skills_failure(error, as_json),
+        },
+
         SkillCommand::Index {
             target,
             force,
@@ -631,6 +771,24 @@ async fn run_skills(dir: &Path, command: SkillCommand) -> ExitCode {
                     println!("{}", json!({ "source": source, "rows": count }));
                 } else {
                     println!("{count} rows from {source}");
+                }
+                ExitCode::SUCCESS
+            }
+            Err(error) => skills_failure(error, as_json),
+        },
+
+        SkillCommand::Refresh { json: as_json } => match index.refresh_stale().await {
+            Ok(report) => {
+                if as_json {
+                    println!("{}", serde_json::to_string(&report).unwrap_or_default());
+                } else {
+                    println!(
+                        "{} source(s) known, {} refreshed",
+                        report.checked, report.refreshed
+                    );
+                    for row in &report.sources {
+                        println!("{:<10} {:<7} {}", row.id, row.state.as_str(), row.detail);
+                    }
                 }
                 ExitCode::SUCCESS
             }

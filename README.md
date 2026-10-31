@@ -135,6 +135,56 @@ to `$RESOURCE/sidecar`; first launch copies the writable source to `%APPDATA%\Ri
 points its agents at the open project. The script refuses to run off Windows x64. Without the
 sidecar the app still starts, and the Chat tab explains what is missing.
 
+### Rigel Cloud (optional)
+
+The app is offline unless you point it at a Firebase project you own. Settings → Cloud takes the
+project id and web API key; `rigel cloud configure` does the same from the terminal. Account
+creation, email/password sign-in, password reset and email verification go through Firebase
+Authentication — the refresh token (with the verification answer) stays in the OS keychain and a
+reset answer never says whether the address has an account — **Push shelf** mirrors the
+catalogue's metadata to Firestore, **Pull shelf** brings
+down rows another machine added, and **Publish to phone** sends one session's prompts and the
+assistant's own words so the iPhone client can read them. A row removed locally becomes a
+tombstone on the next push, so a pull deletes it everywhere; Settings → Cloud shows the last sync
+(and `rigel cloud status` prints it). Bodies, tool calls, command output and project files never
+leave the machine. App Check is optional: point the app at an attestation endpoint you run
+(`rigel cloud app-check --url …`) and every Firebase request carries its short-lived token, so a
+public web API key is not enough to use your project. [docs/cloud.md](docs/cloud.md) has the
+five-minute setup, the App Check endpoint and the document shape;
+[`firestore.rules`](firestore.rules) is the access control.
+
+```bash
+printf '%s' "$FIREBASE_WEB_API_KEY" | cargo run -q -p rigel-cli -- cloud configure --project <project-id>
+printf '%s' "$PASSWORD" | cargo run -q -p rigel-cli -- cloud sign-up --email you@example.com
+printf '%s' "$PASSWORD" | cargo run -q -p rigel-cli -- cloud login --email you@example.com
+cargo run -q -p rigel-cli -- cloud reset --email you@example.com
+cargo run -q -p rigel-cli -- cloud verify            # email a verification link; --check re-reads it
+cargo run -q -p rigel-cli -- cloud push
+cargo run -q -p rigel-cli -- cloud pull
+cargo run -q -p rigel-cli -- cloud publish <session-id>
+cargo run -q -p rigel-cli -- cloud app-check --url https://<region>-<project>.cloudfunctions.net/appCheck
+```
+
+### Email
+
+`rigel mail` gives the agent an inbox on [AgentMail](https://agentmail.to): list, read, send and
+reply.
+Reading needs no confirmation, because nothing leaves the machine. Sending is a card first —
+recipient, subject and body — and silence is a refusal; a read-only subagent is not offered
+the tool at all. The API key lives in the OS keychain, the address in `agentmail.json`, and every
+message comes back labelled untrusted, because it was written by strangers. Nothing is polled and
+no body is written to the project database. Settings → Email lists the conversations and opens one
+oldest-first, so a thread reads as a conversation rather than as separate messages.
+
+```bash
+cargo run -q -p rigel-cli -- mail configure --inbox you@agentmail.to
+printf '%s' "$AGENTMAIL_API_KEY" | cargo run -q -p rigel-cli -- keys set agentmail
+cargo run -q -p rigel-cli -- mail list
+cargo run -q -p rigel-cli -- mail read --message-id '<abc@agentmail.to>'
+printf '%s' 'Body text' | cargo run -q -p rigel-cli -- mail send --to someone@example.com --subject Hi
+printf '%s' 'Thanks!' | cargo run -q -p rigel-cli -- mail reply --message-id '<abc@agentmail.to>'
+```
+
 The browser prototype is the visual reference and needs no Rust at all:
 
 ```bash
@@ -180,6 +230,15 @@ cargo run -q -p rigel-cli -- skills index anthropics/skills
 cargo run -q -p rigel-cli -- skills search "pdf" --json
 cargo run -q -p rigel-cli -- skills get github:anthropics/skills:skills/pdf/SKILL.md
 cargo run -q -p rigel-cli -- skills status
+# re-sync every source that is not fresh — what the window does at launch, when its switch is on
+cargo run -q -p rigel-cli -- skills refresh
+
+# the model roster the picker shows: every provider that holds a credential, merged.
+# The picker opens on chat-eligible rows; `--all` includes image, video, audio and
+# retrieval models instead of naming them in a count.
+cargo run -q -p rigel-cli -- models
+cargo run -q -p rigel-cli -- models --provider openrouter --json
+cargo run -q -p rigel-cli -- models --all
 
 # the native agent: one turn, billed to the session
 # OmniRoute is the default provider; a turn starts `omniroute serve` if it is down.
@@ -191,6 +250,18 @@ cargo run -q -p rigel-cli -- agent run --project . --prompt "run the tests" --ap
 # Google's models through the Gemini API (a key from AI Studio; default gemini-4-argon)
 printf '%s' "$GEMINI_API_KEY" | cargo run -q -p rigel-cli -- keys set gemini
 cargo run -q -p rigel-cli -- agent run --provider gemini --prompt "say pong"
+# the same models on Vertex AI: your project and location in the URL, an access token as the
+# credential (VERTEX_ACCESS_TOKEN, or `gcloud auth print-access-token`, which Rigel calls when
+# nothing is stored); ids are the publisher-prefixed `google/gemini-…`
+cargo run -q -p rigel-cli -- agent run --provider vertex --prompt "say pong"
+# Claude through Anthropic's own endpoint — the Messages API, not the OpenAI shape. The key is the
+# same `rigel/anthropic` entry the Claude Code harness reads; default model `claude-opus-5-5`
+printf '%s' "$ANTHROPIC_API_KEY" | cargo run -q -p rigel-cli -- keys set anthropic
+cargo run -q -p rigel-cli -- agent run --provider anthropic --prompt "say pong"
+# the other adapters are one key and one base URL each — `rigel keys status` lists them with their
+# variables. A vendor with no assumed default takes its model from its own live list
+printf '%s' "$GROQ_API_KEY" | cargo run -q -p rigel-cli -- keys set groq
+cargo run -q -p rigel-cli -- agent run --provider groq --model openai/gpt-oss-120b --prompt "say pong"
 # one ACP turn against Cursor, Cline or Gemini; approvals prompt on stdin
 # (needs its CLI and its own key: CURSOR_API_KEY, CLINE_API_KEY or GEMINI_API_KEY)
 cargo run -q -p rigel-cli -- agent acp --harness gemini --project . --prompt "say pong"
@@ -261,13 +332,15 @@ each surface and the evidence for it.
 | Surface | State |
 |---|---|
 | **Shelf** | FTS5 search, six-rule static review with `file:line` evidence, evidence table, variants — all offline |
-| **Session** | The native agent streaming turns, approvals, snapshots, subagents, a live model picker, and a cap that holds within one turn |
+| **Cloud** | An opt-in Firebase project you own: email/password sign-in, the shelf mirrored both ways (metadata only), sessions published on request for the phone, and per-user Firestore rules |
+| **Session** | The native agent streaming turns, approvals, snapshots, subagents, a live model picker that merges **every provider you hold a key for** and opens on chat-eligible rows, and a cap that holds within one turn |
 | **Safety** | Three writable agents at once, a per-child plan the user approves, a clean-context reviewer on every merge, and a $20/day cap across the project |
 | **Harnesses** | Codex, Claude, Gemini CLI, Cursor and Cline, each probed as its own row with its own key |
 | **Diff** | Attributed writes, the conflict strip, claims with stale rows, per-patch revert, subagent plans with their merge reviews and pending worktree diffs, and a merge or recorded override for an unmerged review |
 | **Tools** | Twelve probed tools, requirements traced to the line that said so, the trust arithmetic, gated installs |
 | **Doctor** | One row per check and an exit code: `0` clear, `1` warnings, `2` failures |
 | **MCP** | A stdio host scoped to one session and one agent, sharing the same tools |
+| **Settings** | Thirteen pages — Agent, Providers, Harnesses, Safety, Spending, Terminal, Appearance, Skill shelf, Cloud, Project rules, Notifications, Updates, Diagnostics — each one writing something the core reads |
 | **Updates** | One signed check of the latest GitHub release, an artifact SHA-256 and Ed25519 check, and auto-install — both switches in Settings → Updates |
 | **Window** | Closing hides to the tray while agents and terminals keep running; the tray menu reopens or quits |
 
@@ -308,10 +381,11 @@ and `migrate` writes a `.gitignore` for it, so a session log can never be commit
 <details>
 <summary><b>Which agents can it drive?</b></summary>
 
-The native agent, against OmniRoute by default, OpenRouter or Gemini. Plus one turn through Codex
-(`codex app-server`, with `codex exec --json` as the fallback), one through the Claude CLI, and one
-ACP turn through Gemini CLI, Cursor or Cline. Every harness is probed as its own row and keeps its
-own key in the keychain.
+The native agent, against any row of its provider table: OmniRoute by default (the local router),
+or OpenRouter, Gemini (AI Studio or Vertex), Claude (Anthropic's own Messages API), OpenAI, xAI,
+Groq, DeepSeek, Mistral, Together and Fireworks with a key of your own. Plus one turn through Codex (`codex app-server`, with
+`codex exec --json` as the fallback), one through the Claude CLI, and one ACP turn through Gemini
+CLI, Cursor or Cline. Every harness is probed as its own row and keeps its own key in the keychain.
 
 </details>
 
@@ -330,6 +404,7 @@ A model turn needs a key; the deterministic scripted model drives the tests with
 - [ARCHITECTURE.md](ARCHITECTURE.md) — the pieces, the two databases, the write path and a turn
 - [docs/what-works.md](docs/what-works.md) — every surface, its state and the evidence for it
 - [docs/PLATFORMS.md](docs/PLATFORMS.md) — Windows support, signing, and what macOS/Linux mean here
+- [docs/cloud.md](docs/cloud.md) — your own Firebase project: setup, the account, and the shelf's document shape
 - [qa/p2.md](docs/qa/p2.md) — the Phase 2 exit test, with recorded results
 - [qa/p3.md](docs/qa/p3.md) — the Phase 3 exit test: killed turn, resume, idempotent patch, the cap
 - [migrating-prototype-index.md](docs/migrating-prototype-index.md) — moving the `skilldb:` rows into SQLite

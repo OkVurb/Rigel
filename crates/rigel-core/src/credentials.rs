@@ -20,11 +20,24 @@ pub const ANTHROPIC: &str = "anthropic";
 pub const CURSOR: &str = "cursor";
 pub const CLINE: &str = "cline";
 pub const GEMINI: &str = "gemini";
+/// Not an API key: Vertex takes a short-lived OAuth access token, and this is the provider name
+/// the token is stored under. `rigel/vertex` holds the token itself.
+pub const VERTEX: &str = "vertex";
+pub const XAI: &str = "xai";
+pub const GROQ: &str = "groq";
+pub const DEEPSEEK: &str = "deepseek";
+pub const MISTRAL: &str = "mistral";
+pub const TOGETHER: &str = "together";
+pub const FIREWORKS: &str = "fireworks";
+/// Not an inference provider: the API key for the AgentMail inbox the mail tools use. It lives
+/// beside the provider keys because that is where Rigel keeps every secret it holds.
+pub const AGENTMAIL: &str = "agentmail";
 
 /// Every provider Rigel can resolve. One list so a new adapter cannot be added to the keychain
 /// without also appearing in `rigel keys status` and in the environment scrub for commands.
 pub const PROVIDERS: &[&str] = &[
-    OMNIROUTE, OPENROUTER, OPENAI, ANTHROPIC, CURSOR, CLINE, GEMINI,
+    OMNIROUTE, OPENROUTER, GEMINI, VERTEX, OPENAI, XAI, GROQ, DEEPSEEK, MISTRAL, TOGETHER,
+    FIREWORKS, ANTHROPIC, CURSOR, CLINE, AGENTMAIL,
 ];
 
 const SERVICE: &str = "rigel";
@@ -182,6 +195,16 @@ pub fn provider_environment_variable(provider: &str) -> Option<&'static str> {
         CURSOR => Some("CURSOR_API_KEY"),
         CLINE => Some("CLINE_API_KEY"),
         GEMINI => Some("GEMINI_API_KEY"),
+        // Vertex has no API key to hold: the credential is an OAuth access token, and this is
+        // the variable the adapter reads it from.
+        VERTEX => Some("VERTEX_ACCESS_TOKEN"),
+        XAI => Some("XAI_API_KEY"),
+        GROQ => Some("GROQ_API_KEY"),
+        DEEPSEEK => Some("DEEPSEEK_API_KEY"),
+        MISTRAL => Some("MISTRAL_API_KEY"),
+        TOGETHER => Some("TOGETHER_API_KEY"),
+        FIREWORKS => Some("FIREWORKS_API_KEY"),
+        AGENTMAIL => Some("AGENTMAIL_API_KEY"),
         _ => None,
     }
 }
@@ -248,12 +271,29 @@ mod tests {
         // The mapping is what makes `infisical run` work without any code change; a provider
         // added without one would silently fall back to the keychain only.
         for provider in [
-            OPENAI, ANTHROPIC, OPENROUTER, OMNIROUTE, CURSOR, CLINE, GEMINI,
+            OPENAI, ANTHROPIC, OPENROUTER, OMNIROUTE, CURSOR, CLINE, GEMINI, VERTEX, XAI, GROQ,
+            DEEPSEEK, MISTRAL, TOGETHER, FIREWORKS,
         ] {
             let name = provider_environment_variable(provider)
                 .unwrap_or_else(|| panic!("no environment name for {provider}"));
-            assert!(name.ends_with("_API_KEY"), "{provider} -> {name}");
+            // Vertex is the one credential that is a token rather than a key; its name says so.
+            assert!(
+                name.ends_with("_API_KEY") || name.ends_with("_ACCESS_TOKEN"),
+                "{provider} -> {name}"
+            );
         }
         assert!(provider_environment_variable("not-a-provider").is_none());
+    }
+
+    #[test]
+    fn the_provider_list_covers_every_constant() {
+        // `rigel keys status` and the environment scrub both read PROVIDERS; a constant missing
+        // from it is a key the user can store but never see the state of.
+        for provider in [
+            OPENROUTER, OMNIROUTE, OPENAI, ANTHROPIC, CURSOR, CLINE, GEMINI, VERTEX, XAI, GROQ,
+            DEEPSEEK, MISTRAL, TOGETHER, FIREWORKS,
+        ] {
+            assert!(PROVIDERS.contains(&provider), "{provider} is missing");
+        }
     }
 }

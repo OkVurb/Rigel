@@ -5,9 +5,8 @@ use std::sync::Arc;
 use rigel_core::{
     AgentEvent, ApprovalScope, BudgetService, Cancels, CommandApprover, CommandDecision,
     CommandRequest, Coordinator, Deliberator, EventSink, Model, ModelDeliberator, NoDeliberation,
-    OpenRouterModel, OriginApprover, OriginDecision, OriginRequest, PlanApprover, PlanDecision,
-    PlanRequest, ScriptedModel, SessionService, StopAt, StopReason, SubagentPolicy, Tools,
-    credentials,
+    OriginApprover, OriginDecision, OriginRequest, PlanApprover, PlanDecision, PlanRequest,
+    ScriptedModel, SessionService, StopAt, StopReason, SubagentPolicy, Tools, credentials,
 };
 use serde_json::json;
 
@@ -413,44 +412,36 @@ fn provider_name(requested: Option<String>) -> String {
 }
 
 fn default_model(provider: &str) -> String {
-    match provider {
-        "openrouter" => rigel_core::agent::openrouter::DEFAULT_MODEL.to_string(),
-        "gemini" => rigel_core::agent::gemini::DEFAULT_MODEL.to_string(),
-        _ => rigel_core::agent::omniroute::DEFAULT_MODEL.to_string(),
-    }
+    rigel_core::agent::providers::find(provider)
+        .and_then(|spec| spec.default_model)
+        .unwrap_or_default()
+        .to_string()
 }
 
-/// The provider's model, with its key resolved. OmniRoute is started on demand: a local
-/// router that is down is not a configuration error, it is a process to launch.
+/// A provider whose vendor publishes no default model — the picker reads its list — cannot run a
+/// turn without one. Saying so is kinder than sending an empty id and printing the provider's
+/// 400 back.
+fn missing_model(provider: &str) -> ExitCode {
+    eprintln!(
+        "rigel: no model chosen for `{provider}`; pass --model, or pick one in Settings (the \
+         picker reads the provider's own list)"
+    );
+    ExitCode::from(1)
+}
+
+/// The adapter table is the authority on which providers exist: a name it does not know cannot be
+/// a missing model or a missing key, and saying so first is what a typo deserves.
+fn known_provider(provider: &str) -> Result<(), String> {
+    rigel_core::agent::providers::find(provider)
+        .map(|_| ())
+        .ok_or_else(|| rigel_core::agent::providers::unknown_provider(provider))
+}
+
+/// The provider's model, with its credential resolved. The table owns where each vendor lives and
+/// how its credential is named; a local router that is down is a process to launch, which `build`
+/// starts.
 async fn provider_model(provider: &str) -> Result<Arc<dyn Model>, String> {
-    match provider {
-        "openrouter" => {
-            let key = credentials::get(credentials::OPENROUTER).map_err(|error| {
-                format!("{error}\n  set one with: rigel keys set openrouter (reads stdin)")
-            })?;
-            Ok(Arc::new(OpenRouterModel::new(key)))
-        }
-        "gemini" => {
-            let key = credentials::get(credentials::GEMINI).map_err(|error| {
-                format!(
-                    "{error}\n  set one with: rigel keys set gemini (reads stdin), or GEMINI_API_KEY in the environment\n  the key comes from Google AI Studio: https://aistudio.google.com/apikey"
-                )
-            })?;
-            Ok(Arc::new(rigel_core::agent::gemini::model(key)))
-        }
-        "omniroute" => {
-            let key = credentials::get(credentials::OMNIROUTE).map_err(|error| {
-                format!(
-                    "{error}\n  set one with: rigel keys set omniroute (reads stdin)\n  or run a deterministic script with --script"
-                )
-            })?;
-            rigel_core::agent::omniroute::ensure_server().await?;
-            Ok(Arc::new(rigel_core::agent::omniroute::model(key)))
-        }
-        other => Err(format!(
-            "unknown provider `{other}`; use `omniroute`, `openrouter` or `gemini`"
-        )),
-    }
+    rigel_core::agent::providers::build(provider, &credentials::KeychainCredentialStore).await
 }
 
 /// The newest active session, or none. Unlike [`resolve_session`] this never creates one:
@@ -495,6 +486,9 @@ async fn quote_run(
     // The quote prices the exact request the first step would send: the same system prompt
     // and tool schemas the coordinator measures, plus the typed prompt.
     let model_name = model.unwrap_or_else(|| default_model(provider));
+    if model_name.trim().is_empty() {
+        return missing_model(provider);
+    }
     let context_chars = rigel_core::agent::fixed_context_chars(&model_name);
     let quote = match &session {
         Some(session) => {
@@ -776,6 +770,10 @@ pub async fn run_agent(dir: &Path, command: AgentCommand) -> ExitCode {
                 eprintln!("rigel: unknown effort `{level}`; use low, medium or high");
                 return ExitCode::from(1);
             }
+            if let Err(error) = known_provider(&provider) {
+                eprintln!("rigel: {error}");
+                return ExitCode::from(1);
+            }
             // A machine-readable run has nobody to ask, so the default is no. An explicit
             // `--approval allow` is the only way a command runs unattended.
             let approval = approval.unwrap_or(if as_json {
@@ -818,6 +816,9 @@ pub async fn run_agent(dir: &Path, command: AgentCommand) -> ExitCode {
                     default_model(&provider)
                 }
             });
+            if model_name.trim().is_empty() {
+                return missing_model(&provider);
+            }
 
             let worker = match service.agents(&session.id).await.ok().and_then(|agents| {
                 agents.into_iter().find(|candidate| {

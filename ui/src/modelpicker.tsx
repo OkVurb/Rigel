@@ -3,22 +3,23 @@
  *
  * The catalogue is read through Rust so keys never enter the window. It merges the current
  * provider with OpenRouter's full roster, free models included; choosing a row carries its
- * provider with it, so there is no second switch to set. Effort is a separate saved setting.
- * The same control appears in Session and Settings so there is one interaction to learn.
+ * provider with it, so there is no second switch to set. Effort and the chat filter are separate
+ * saved settings, passed in by the caller that owns them. The same control appears in Session
+ * and Settings so there is one interaction to learn.
  */
 
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 
 import { api, type ModelOption } from "./api";
 
 const EFFORTS = ["low", "medium", "high"] as const;
 
 const FALLBACK_MODELS: ModelOption[] = [
-  { id: "gpt-5.6-sol-medium", provider: "omniroute", free: false },
-  { id: "openai/gpt-4.1-mini", provider: "openrouter", free: false },
-  { id: "baseten/mammoth-1:free", provider: "openrouter", free: true },
-  { id: "nvidia/nemotron-3.5-super-vl:free", provider: "openrouter", free: true },
-  { id: "anthropic/claude-sonnet-4.5", provider: "openrouter", free: false },
+  { id: "gpt-5.6-sol-medium", provider: "omniroute", free: false, chat: true },
+  { id: "openai/gpt-4.1-mini", provider: "openrouter", free: false, chat: true },
+  { id: "baseten/mammoth-1:free", provider: "openrouter", free: true, chat: true },
+  { id: "nvidia/nemotron-3.5-super-vl:free", provider: "openrouter", free: true, chat: true },
+  { id: "anthropic/claude-sonnet-4.5", provider: "openrouter", free: false, chat: true },
 ];
 
 function shownModel(model: string): string {
@@ -28,22 +29,43 @@ function shownModel(model: string): string {
 export function ModelControls({
   model,
   effort,
+  chatOnly,
   disabled,
   onModel,
   onEffort,
+  onChatOnly,
 }: {
   model: string;
   effort: string;
+  /** The saved `chat_models_only` setting; the caller writes the new value through settings_set. */
+  chatOnly: boolean;
   disabled?: boolean;
   onModel: (model: string, provider: string) => void;
   onEffort: (effort: string) => void;
+  onChatOnly: (chatOnly: boolean) => void;
 }) {
   const [open, setOpen] = useState(false);
   const [models, setModels] = useState<ModelOption[] | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [filter, setFilter] = useState("");
+  // The merged roster can run to four figures — every provider that holds a credential is asked —
+  // so the provider chips are how a person reaches the useful end of it without typing. The
+  // chat filter is the other half: a chat picker should not open on a Stable-Diffusion checkpoint.
+  // Rows the core marked `chat: false` are hidden, never dropped, and the count says how many.
+  // The choice itself is the saved `chat_models_only` setting, so it survives a restart.
+  const [door, setDoor] = useState<string | null>(null);
   const searchRef = useRef<HTMLInputElement | null>(null);
+  const triggerRef = useRef<HTMLButtonElement | null>(null);
+
+  // Closing returns focus to the button that opened the popover: Escape and the × should not
+  // drop a keyboard user back at the top of the document.
+  const close = useCallback(() => {
+    setOpen(false);
+    // After the commit: the focused search box is being removed, and unmounting it would
+    // otherwise hand focus back to the document rather than to this button.
+    requestAnimationFrame(() => triggerRef.current?.focus());
+  }, []);
 
   // Fetch once, the first time the popover opens. Deliberately not guarded by `loading`:
   // setting state from an effect that depends on that state would cancel its own request
@@ -68,24 +90,33 @@ export function ModelControls({
     if (!open) return;
     searchRef.current?.focus();
     const onKey = (event: KeyboardEvent) => {
-      if (event.key === "Escape") setOpen(false);
+      if (event.key === "Escape") close();
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [open]);
+  }, [open, close]);
 
   const needle = filter.trim().toLowerCase();
+  const doors = Array.from(new Set((models ?? []).map((option) => option.provider))).sort();
+  const counts = new Map<string, number>();
+  for (const option of models ?? []) {
+    counts.set(option.provider, (counts.get(option.provider) ?? 0) + 1);
+  }
+  const nonChat = (models ?? []).filter((option) => option.chat === false).length;
   const filtered = (models ?? []).filter(
     (option) =>
-      !needle ||
-      option.id.toLowerCase().includes(needle) ||
-      option.name?.toLowerCase().includes(needle),
+      (!chatOnly || option.chat !== false) &&
+      (!door || option.provider === door) &&
+      (!needle ||
+        option.id.toLowerCase().includes(needle) ||
+        option.name?.toLowerCase().includes(needle)),
   );
   const visible = filtered.slice(0, 300);
 
   return (
     <div className="model-picker">
       <button
+        ref={triggerRef}
         className="model-button"
         type="button"
         aria-haspopup="dialog"
@@ -105,9 +136,27 @@ export function ModelControls({
             className="model-scrim"
             type="button"
             aria-label="Close model picker"
-            onClick={() => setOpen(false)}
+            onClick={close}
           />
-          <div className="model-popover" role="dialog" aria-label="Model and reasoning effort">
+          <div
+            className="model-popover"
+            role="dialog"
+            aria-modal="true"
+            aria-label="Model and reasoning effort"
+          >
+            <div className="model-popover-head">
+              <span>Model</span>
+              <button
+                className="model-close"
+                type="button"
+                aria-label="Close model picker"
+                title="Close"
+                onClick={close}
+              >
+                ×
+              </button>
+            </div>
+
             <div className="model-effort">
               <span>Effort</span>
               <div className="segmented" role="group" aria-label="Reasoning effort">
@@ -124,6 +173,47 @@ export function ModelControls({
                 ))}
               </div>
             </div>
+
+            {nonChat > 0 ? (
+              <label
+                className="toggle model-chat-only"
+                title="Image, video, audio and retrieval models cannot answer a chat turn. Untick to show them anyway."
+              >
+                <input
+                  type="checkbox"
+                  checked={chatOnly}
+                  onChange={(event) => onChatOnly(event.target.checked)}
+                />
+                chat models only
+                <span className="fine">
+                  {chatOnly ? `${nonChat} hidden` : `all ${models?.length ?? 0} shown`}
+                </span>
+              </label>
+            ) : null}
+
+            {doors.length > 1 ? (
+              <div className="model-doors" role="group" aria-label="Providers in this list">
+                <button
+                  type="button"
+                  aria-pressed={door === null}
+                  className={door === null ? "on" : ""}
+                  onClick={() => setDoor(null)}
+                >
+                  all · {models?.length ?? 0}
+                </button>
+                {doors.map((id) => (
+                  <button
+                    key={id}
+                    type="button"
+                    aria-pressed={door === id}
+                    className={door === id ? "on" : ""}
+                    onClick={() => setDoor(door === id ? null : id)}
+                  >
+                    {id} · {counts.get(id) ?? 0}
+                  </button>
+                ))}
+              </div>
+            ) : null}
 
             <label className="model-search">
               <span aria-hidden>⌕</span>
@@ -152,7 +242,7 @@ export function ModelControls({
                   title={option.name ?? option.id}
                   onClick={() => {
                     onModel(option.id, option.provider);
-                    setOpen(false);
+                    close();
                   }}
                 >
                   <span className="model-row-text">
@@ -175,7 +265,7 @@ export function ModelControls({
             <p className="fine">
               {error
                 ? `${error} Showing a short fallback list.`
-                : "Picking a model also switches to the provider that serves it. Effort is sent per request."}
+                : "Every provider with a key is listed — the chips filter by door. Picking a model also switches to the provider that serves it; effort is sent per request."}
             </p>
           </div>
         </>

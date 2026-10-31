@@ -1,0 +1,17 @@
+{
+  "claude": {
+    "available": true,
+    "busy": false,
+    "label": "Claude",
+    "color": "#da7756",
+    "role": ""
+  },
+  "codex": {
+    "available": true,
+    "busy": false,
+    "label": "Codex",
+    "color": "#10a37f",
+    "role": ""
+  },
+  "paused": false
+}

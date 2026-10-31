@@ -51,8 +51,13 @@ fn next_id() -> String {
     )
 }
 
-/// What a terminal opens: PowerShell on Windows, the user's shell elsewhere.
-fn shell_choice() -> (String, Vec<String>) {
+/// What a terminal opens: PowerShell on Windows, the user's shell elsewhere. A non-empty
+/// override from Settings wins, which is how a machine with two shells (pwsh beside Windows
+/// PowerShell, zsh beside bash) picks one without changing its environment.
+fn shell_choice(override_path: Option<&str>) -> (String, Vec<String>) {
+    if let Some(path) = override_path.map(str::trim).filter(|path| !path.is_empty()) {
+        return (path.to_string(), Vec::new());
+    }
     #[cfg(windows)]
     {
         ("powershell.exe".to_string(), vec!["-NoLogo".to_string()])
@@ -77,9 +82,10 @@ fn start_terminal(
     project: Option<String>,
     cols: u16,
     rows: u16,
+    shell: Option<&str>,
 ) -> Result<(TerminalInfo, Terminal, Box<dyn Read + Send>), String> {
     let cwd = project_dir(project);
-    let (program, args) = shell_choice();
+    let (program, args) = shell_choice(shell);
     let mut command = CommandBuilder::new(&program);
     for arg in &args {
         command.arg(arg);
@@ -135,9 +141,14 @@ pub(crate) fn terminal_open(
     project: Option<String>,
     cols: Option<u16>,
     rows: Option<u16>,
+    shell: Option<String>,
 ) -> Result<TerminalInfo, String> {
-    let (info, mut terminal, mut reader) =
-        start_terminal(project, cols.unwrap_or(100), rows.unwrap_or(30))?;
+    let (info, mut terminal, mut reader) = start_terminal(
+        project,
+        cols.unwrap_or(100),
+        rows.unwrap_or(30),
+        shell.as_deref(),
+    )?;
     let id = info.id.clone();
 
     let event_id = id.clone();
@@ -249,12 +260,31 @@ mod tests {
     use std::io::Write;
     use std::time::{Duration, Instant};
 
+    /// D-settings: the shell override wins over the OS default, and an empty one does not.
+    #[test]
+    fn a_shell_override_replaces_the_default_shell() {
+        #[cfg(windows)]
+        let (program, args) = shell_choice(Some(" pwsh.exe "));
+        #[cfg(not(windows))]
+        let (program, args) = shell_choice(Some(" /usr/bin/fish "));
+        assert!(
+            program.contains("pwsh") || program.contains("fish"),
+            "{program}"
+        );
+        assert!(args.is_empty(), "an override is spawned as given");
+        let (default, _) = shell_choice(Some("   "));
+        assert!(
+            !default.trim().is_empty(),
+            "a blank override means the default"
+        );
+    }
+
     #[test]
     fn a_shell_runs_commands_in_the_project_directory() {
         let project = tempfile::tempdir().expect("temp project");
         let cwd = project.path().display().to_string();
         let (info, mut terminal, mut reader) =
-            start_terminal(Some(cwd.clone()), 80, 24).expect("a PTY starts");
+            start_terminal(Some(cwd.clone()), 80, 24, None).expect("a PTY starts");
 
         assert_eq!(info.cwd, cwd);
         assert!(!info.shell.is_empty());

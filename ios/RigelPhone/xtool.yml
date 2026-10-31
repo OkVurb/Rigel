@@ -1,0 +1,3 @@
+version: 1
+bundleID: dev.rigel.phone
+infoPath: Info.plist

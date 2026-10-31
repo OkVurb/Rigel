@@ -212,17 +212,18 @@ fn memory_failure(error: rigel_core::MemoryError, as_json: bool) -> ExitCode {
 pub fn run_keys(command: KeyCommand) -> ExitCode {
     match command {
         KeyCommand::Status { json: as_json } => {
-            let providers = [
-                credentials::OMNIROUTE,
-                credentials::OPENROUTER,
-                credentials::OPENAI,
-                credentials::ANTHROPIC,
-                credentials::CURSOR,
-            ];
-            let rows: Vec<_> = providers
+            // The credential list is the whole list, so a provider that exists in the app
+            // cannot be missing from this output — which is how the newer adapters would have
+            // been, had this stayed a hand-written array.
+            let rows: Vec<_> = credentials::PROVIDERS
                 .iter()
                 .map(|provider| {
-                    json!({ "provider": provider, "present": credentials::present(provider) })
+                    let env = credentials::provider_environment_variable(provider);
+                    json!({
+                        "provider": provider,
+                        "present": credentials::present(provider),
+                        "env": env,
+                    })
                 })
                 .collect();
             if as_json {
@@ -230,13 +231,14 @@ pub fn run_keys(command: KeyCommand) -> ExitCode {
             } else {
                 for row in rows {
                     println!(
-                        "{:<12} {}",
+                        "{:<12} {:<11} {}",
                         row["provider"].as_str().unwrap_or("?"),
                         if row["present"].as_bool().unwrap_or(false) {
                             "key stored"
                         } else {
                             "no key"
-                        }
+                        },
+                        row["env"].as_str().unwrap_or("-")
                     );
                 }
             }

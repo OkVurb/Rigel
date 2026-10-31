@@ -1,0 +1,42 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>CFBundleDevelopmentRegion</key>
+	<string>en</string>
+	<key>CFBundleDisplayName</key>
+	<string>RigelPhone</string>
+	<key>CFBundleExecutable</key>
+	<string>RigelPhone</string>
+	<key>CFBundleIdentifier</key>
+	<string>dev.rigel.phone</string>
+	<key>CFBundleInfoDictionaryVersion</key>
+	<string>6.0</string>
+	<key>CFBundleName</key>
+	<string>RigelPhone</string>
+	<key>CFBundlePackageType</key>
+	<string>APPL</string>
+	<key>CFBundleShortVersionString</key>
+	<string>1.0.0</string>
+	<key>CFBundleVersion</key>
+	<string>1</string>
+	<key>LSRequiresIPhoneOS</key>
+	<true/>
+
+	<!-- The room is plain HTTP on the computer's LAN or Tailscale address
+	     (`http://192.168.1.42:8300`), which ATS blocks by default. The
+	     local-networking exception covers `.local` names and link-local
+	     addresses; arbitrary loads cover the numeric addresses a room prints,
+	     including the 100.64/10 range Tailscale hands out. Everything else —
+	     Firebase included — is HTTPS. Sideloaded builds only. -->
+	<key>NSAppTransportSecurity</key>
+	<dict>
+		<key>NSAllowsArbitraryLoads</key>
+		<true/>
+		<key>NSAllowsLocalNetworking</key>
+		<true/>
+	</dict>
+	<key>NSLocalNetworkUsageDescription</key>
+	<string>RigelPhone connects to a Rigel room running on your own computer over your local network.</string>
+</dict>
+</plist>

@@ -319,7 +319,11 @@ async fn call(ctx: &McpContext, name: &str, args: Value) -> Result<Value, Value>
                 Some(scope) => Some(scope),
                 None => {
                     let bus = ApprovalBus::new(&ctx.index_dir);
+                    // D154: the harness knows its session and agent but not a Rigel turn, so
+                    // the row opens the session; the native approvers also record the turn.
                     let pending = PendingApproval::now("claude", &key, title)
+                        .in_project(&ctx.project_root)
+                        .in_session(&ctx.session_id, &ctx.agent_id)
                         .with_detail(json!({ "tool": tool_name, "input": input }));
                     match bus.ask(pending, ctx.approval_wait).await {
                         Ok(scope) => {

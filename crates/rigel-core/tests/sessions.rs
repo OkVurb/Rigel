@@ -47,6 +47,141 @@ async fn sessions_list_newest_first_and_end_marks_them_ended() {
     ));
 }
 
+/// D148: the window's list is an edit over rows that already existed. Renaming clears back to
+/// the automatic title, pinning reorders without a second sort key, and archiving hides a row
+/// from the default list without ending it or making it unreachable.
+#[tokio::test]
+async fn a_session_can_be_renamed_pinned_and_archived() {
+    let tmp = TempDir::new().unwrap();
+    let service = SessionService::open(tmp.path()).await.unwrap();
+
+    let first = service.start(Some("first"), None).await.unwrap();
+    tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    let second = service.start(Some("second"), None).await.unwrap();
+
+    let renamed = service
+        .rename(&second.id, Some("  release check  "))
+        .await
+        .unwrap();
+    assert_eq!(renamed.title.as_deref(), Some("release check"));
+
+    // One line and 120 characters: a row cannot grow into the pane it is drawn in.
+    let multiline = format!("release check\n{}", "x".repeat(200));
+    let clipped = service
+        .rename(&second.id, Some(multiline.as_str()))
+        .await
+        .unwrap();
+    assert_eq!(clipped.title.as_deref(), Some("release check"));
+    let long = "y".repeat(200);
+    let clipped = service
+        .rename(&second.id, Some(long.as_str()))
+        .await
+        .unwrap();
+    assert_eq!(clipped.title.unwrap().chars().count(), 120);
+
+    let cleared = service.rename(&second.id, Some("   ")).await.unwrap();
+    assert_eq!(cleared.title, None, "whitespace clears the name");
+
+    let pinned = service.set_pinned(&first.id, true).await.unwrap();
+    assert!(pinned.pinned_at.is_some());
+    let listed = service.list().await.unwrap();
+    assert_eq!(listed[0].id, first.id, "a pinned session sorts first");
+    assert_eq!(listed[1].id, second.id);
+
+    // Both edits are database rows, so a restarted window reads the same list.
+    let reopened = SessionService::open(tmp.path()).await.unwrap();
+    assert_eq!(
+        reopened.get(&first.id).await.unwrap().pinned_at,
+        pinned.pinned_at
+    );
+
+    service.set_pinned(&first.id, false).await.unwrap();
+    let listed = service.list().await.unwrap();
+    assert_eq!(listed[0].id, second.id, "unpinned returns to newest first");
+
+    let archived = service.set_archived(&second.id, true).await.unwrap();
+    assert!(archived.archived_at.is_some());
+    assert_eq!(
+        service.list().await.unwrap().len(),
+        2,
+        "list keeps archived rows"
+    );
+    assert_eq!(
+        service.get(&second.id).await.unwrap().status,
+        SessionStatus::Active,
+        "archiving is not ending"
+    );
+
+    assert!(matches!(
+        service.rename("missing", Some("x")).await,
+        Err(SessionError::SessionNotFound(_))
+    ));
+    assert!(matches!(
+        service.set_pinned("missing", true).await,
+        Err(SessionError::SessionNotFound(_))
+    ));
+    assert!(matches!(
+        service.set_archived("missing", true).await,
+        Err(SessionError::SessionNotFound(_))
+    ));
+}
+
+/// D150: a star is a toggle over one target per session, and the label is a single line the
+/// inspector can draw without joining the item it names.
+#[tokio::test]
+async fn a_bookmark_toggles_and_stays_per_session() {
+    let tmp = TempDir::new().unwrap();
+    let service = SessionService::open(tmp.path()).await.unwrap();
+    let session = service.start(Some("bookmarks"), None).await.unwrap();
+
+    let marked = service
+        .toggle_bookmark(
+            &session.id,
+            "item",
+            "item-1",
+            "turn 1 · read_file\nsecond line",
+        )
+        .await
+        .unwrap()
+        .expect("the first toggle is on");
+    assert_eq!(marked.kind, "item");
+    assert_eq!(marked.label, "turn 1 · read_file", "one line only");
+    assert_eq!(service.bookmarks(&session.id).await.unwrap().len(), 1);
+
+    assert!(
+        service
+            .toggle_bookmark(&session.id, "item", "item-1", "again")
+            .await
+            .unwrap()
+            .is_none(),
+        "starring the same target clears it"
+    );
+    assert!(service.bookmarks(&session.id).await.unwrap().is_empty());
+
+    // The same id in another kind is another target: a hunk and an item share no namespace.
+    service
+        .toggle_bookmark(&session.id, "hunk", "item-1", "patch · @@ -1,2 +1,2 @@")
+        .await
+        .unwrap();
+    assert_eq!(service.bookmarks(&session.id).await.unwrap().len(), 1);
+
+    let other = service.start(None, None).await.unwrap();
+    assert!(service.bookmarks(&other.id).await.unwrap().is_empty());
+
+    assert!(matches!(
+        service
+            .toggle_bookmark(&session.id, "file", "item-1", "no")
+            .await,
+        Err(SessionError::InvalidBookmarkKind(_))
+    ));
+    assert!(matches!(
+        service
+            .toggle_bookmark("missing", "item", "item-1", "no")
+            .await,
+        Err(SessionError::SessionNotFound(_))
+    ));
+}
+
 #[tokio::test]
 async fn turns_are_sequenced_per_agent_and_close_exactly_once() {
     let tmp = TempDir::new().unwrap();

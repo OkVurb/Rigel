@@ -22,8 +22,18 @@ ui/playwright-report/
 .env.*
 !.env.example
 *.log
+
+# AgentMail list output contains message bodies and verification codes; never repository state
+/am_list.json
+
+# Firebase CLI: the project alias and the CLI's cache are per-machine, not repository state
+.firebaserc
+.firebase/
 .DS_Store
 Thumbs.db
+
+# Apple's Xcode.xip is multiple GB and only needed to build the Darwin SDK once
+*.xip
 
 # generated screenshots stay out of history except the ones we reference
 screenshots/*.tmp.png

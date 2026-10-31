@@ -175,6 +175,18 @@ const TABLE: &[(&str, Price)] = &[
         },
     ),
     (
+        // Anthropic's own endpoint names the same models without a vendor prefix, and the
+        // Messages adapter sends ids in that namespace. Cache reads are the published 0.1× of
+        // input. Models the picker lists but this table does not are priced at the conservative
+        // fallback until a row is added.
+        "claude-opus-5-5",
+        Price {
+            input: 4.00,
+            cached_input: 0.40,
+            output: 20.00,
+        },
+    ),
+    (
         "deepseek/deepseek-chat",
         Price {
             input: 0.27,
@@ -255,6 +267,13 @@ mod tests {
             ..RawUsage::default()
         };
         assert_eq!(estimate("openai/gpt-5.4-mini", &usage), 75_000);
+    }
+
+    #[test]
+    fn the_anthropic_default_is_priced_by_its_own_row() {
+        // It is the model a turn runs when nothing has been chosen, so it must never be billed
+        // at the fallback.
+        assert!(is_listed(crate::agent::anthropic::DEFAULT_MODEL));
     }
 
     #[test]

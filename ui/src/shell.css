@@ -7,21 +7,107 @@
   --bg: #0b0c0e;
   --surface: #121417;
   --raised: #171a1f;
+  /* Recessed wells inside a raised card: conflict sides, merged text, writable rows. */
+  --well: #0e1013;
   --hairline: rgba(255, 255, 255, 0.07);
   --text: #e6e8eb;
   --muted: #9ba1a9;
-  --faint: #6b727c;
+  /* 5.0:1 on the bg — AA for the 10–11px metadata this colour is used for. The old #6b727c
+     measured 3.97:1, below the design brief's non-negotiable AA line. */
+  --faint: #7b838d;
   --accent: #e9a23b;
+  /* Text and icons in the accent hue. Identical to --accent here; the light theme uses a
+     darker shade of the same amber so labels clear AA on white. Fills keep --accent. */
+  --accent-text: #e9a23b;
+  --focus: var(--accent);
   --verified: #4cc38a;
   --danger: #e5484d;
+  --scroll-thumb: #333a43;
+  --scroll-thumb-hover: #454d58;
+  /* Punctuation between facts (`·`) and the underline of a text link: decoration, but it has
+     to stay visible in both themes, which a 7–10% hairline is not. */
+  --sep: rgba(255, 255, 255, 0.24);
+  --shadow-popover: 0 18px 45px rgba(0, 0, 0, 0.45);
+  --shadow-menu: 0 16px 40px rgba(0, 0, 0, 0.45);
+  --shadow-panel: 0 10px 30px rgba(0, 0, 0, 0.35);
+  --cursor-ring: rgba(11, 12, 14, 0.7);
   --ui: "Inter", system-ui, -apple-system, "Segoe UI", sans-serif;
   --mono: "JetBrains Mono", "Cascadia Mono", ui-monospace, monospace;
+}
+
+/* Light theme (D126). Surfaces follow the brief's #FAFAF9 / #FFFFFF / #F2F2F0, and the amber
+   stays the identity. Text colours are picked against white rather than flipped. Measured on
+   #FFFFFF / the raised #F2F2F0 (the worst case, and the real pairing for most metadata): muted
+   6.65 / 5.93, faint 5.49 / 4.90, accent text 5.28 / 4.71, verified 5.43 / 4.84, danger 6.57 /
+   5.87. On-accent stays #191106 at 8.6:1. */
+:root[data-theme="light"] {
+  color-scheme: light;
+  --bg: #fafaf9;
+  --surface: #ffffff;
+  --raised: #f2f2f0;
+  --well: #f7f7f5;
+  --hairline: rgba(20, 22, 26, 0.1);
+  --text: #14161a;
+  --muted: #565d67;
+  --faint: #616a74;
+  --accent-text: #9c5d00;
+  --focus: #9c5d00;
+  --verified: #16794a;
+  --danger: #b42318;
+  --scroll-thumb: #c9c9c4;
+  --scroll-thumb-hover: #b0b0aa;
+  --sep: rgba(20, 22, 26, 0.32);
+  --shadow-popover: 0 18px 45px rgba(20, 22, 26, 0.14);
+  --shadow-menu: 0 16px 40px rgba(20, 22, 26, 0.14);
+  --shadow-panel: 0 10px 30px rgba(20, 22, 26, 0.1);
+  --cursor-ring: rgba(20, 22, 26, 0.45);
+}
+
+/* D158: a high-contrast palette follows the OS preference. Only text and hairlines move; the
+   amber identity, layout and density stay exactly where they were. */
+@media (prefers-contrast: more) {
+  :root {
+    --muted: #c6cbd2;
+    --faint: #aeb5be;
+    --hairline: rgba(255, 255, 255, 0.22);
+    --sep: rgba(255, 255, 255, 0.5);
+  }
+
+  :root[data-theme="light"] {
+    --muted: #343a42;
+    --faint: #3f464f;
+    --hairline: rgba(20, 22, 26, 0.28);
+    --sep: rgba(20, 22, 26, 0.55);
+  }
+
+  :focus-visible {
+    outline-width: 3px;
+  }
+}
+
+/* D158: off-screen until Tab reaches it, then a visible target above the rail. */
+.skip-link {
+  position: absolute;
+  top: 6px;
+  left: 60px;
+  z-index: 100;
+  padding: 6px 10px;
+  border: 1px solid var(--accent);
+  border-radius: 6px;
+  background: var(--raised);
+  color: var(--text);
+  font-size: 12px;
+  transform: translateY(-200%);
+}
+
+.skip-link:focus-visible {
+  transform: none;
 }
 
 * {
   box-sizing: border-box;
   scrollbar-width: thin;
-  scrollbar-color: #333a43 transparent;
+  scrollbar-color: var(--scroll-thumb) transparent;
 }
 
 ::-webkit-scrollbar {
@@ -36,12 +122,12 @@
 ::-webkit-scrollbar-thumb {
   border: 2px solid transparent;
   border-radius: 999px;
-  background: #333a43;
+  background: var(--scroll-thumb);
   background-clip: padding-box;
 }
 
 ::-webkit-scrollbar-thumb:hover {
-  background: #454d58;
+  background: var(--scroll-thumb-hover);
   background-clip: padding-box;
 }
 
@@ -62,6 +148,14 @@ body,
   margin: 0;
 }
 
+/* D159: the window's own scale. #root is divided by the same factor so the shell still fills
+   the window instead of overflowing it; the terminal keeps its measured cell size. */
+#root {
+  zoom: var(--ui-scale, 1);
+  width: calc(100% / var(--ui-scale, 1));
+  height: calc(100% / var(--ui-scale, 1));
+}
+
 body {
   background: var(--bg);
   color: var(--text);
@@ -72,19 +166,32 @@ body {
 }
 
 button,
-input {
+input,
+textarea,
+select {
   font: inherit;
   color: inherit;
 }
 
+input[type="checkbox"] {
+  accent-color: var(--accent);
+}
+
 :focus-visible {
-  outline: 2px solid var(--accent);
+  outline: 2px solid var(--focus);
   outline-offset: 1px;
 }
 
+/* The accent, at low alpha, instead of the OS blue. */
+::selection {
+  background: rgba(233, 162, 59, 0.28);
+  color: var(--text);
+}
+
 .shell {
+  position: relative;
   display: grid;
-  grid-template-columns: 48px 320px minmax(0, 1fr);
+  grid-template-columns: 48px var(--list-w, 320px) minmax(0, 1fr);
   grid-template-rows: minmax(0, 1fr) 28px;
   height: 100%;
 }
@@ -110,7 +217,7 @@ input {
   display: flex;
   align-items: center;
   gap: 7px;
-  color: var(--accent);
+  color: var(--accent-text);
 }
 
 .titlebar-brand span {
@@ -198,7 +305,7 @@ input {
   width: 28px;
   height: 28px;
   margin-bottom: 8px;
-  color: var(--accent);
+  color: var(--accent-text);
 }
 
 .rail-btn {
@@ -221,7 +328,7 @@ input {
 
 .rail-btn.active {
   background: var(--raised);
-  color: var(--accent);
+  color: var(--accent-text);
 }
 
 .rail-spacer {
@@ -304,6 +411,13 @@ input {
   font-size: 11px;
 }
 
+/* The input removes its own outline; the box carries the focus instead. */
+.search:focus-within,
+.model-search:focus-within {
+  border-color: rgba(233, 162, 59, 0.5);
+  background: var(--raised);
+}
+
 .rows {
   overflow-y: auto;
   padding: 4px;
@@ -328,6 +442,7 @@ input {
 
 .row.on {
   background: var(--raised);
+  box-shadow: inset 2px 0 var(--accent);
 }
 
 .row-text {
@@ -389,7 +504,7 @@ input {
   color: var(--text);
 }
 .grade-c {
-  color: var(--accent);
+  color: var(--accent-text);
   border-color: rgba(233, 162, 59, 0.35);
 }
 .grade-d,
@@ -417,7 +532,7 @@ input {
 
 .tag.unmeasured {
   border-color: rgba(233, 162, 59, 0.4);
-  color: var(--accent);
+  color: var(--accent-text);
 }
 
 .banner {
@@ -446,11 +561,19 @@ input {
   padding: 24px 28px 32px;
 }
 
+/* The header shares one row while both sides fit, then moves the actions under the title rather
+   than squeezing the title into a column of single words. */
 .detail-head {
   display: flex;
+  flex-wrap: wrap;
   align-items: flex-start;
   justify-content: space-between;
-  gap: 24px;
+  gap: 16px 24px;
+}
+
+.detail-head > div:first-child {
+  flex: 1 1 320px;
+  min-width: 0;
 }
 
 .eyebrow {
@@ -466,6 +589,7 @@ input {
   font-size: 24px;
   font-weight: 600;
   letter-spacing: -0.02em;
+  overflow-wrap: anywhere;
 }
 
 .lede {
@@ -596,7 +720,7 @@ input {
   padding: 1px 5px;
   border: 1px solid rgba(233, 162, 59, 0.35);
   border-radius: 999px;
-  color: var(--accent);
+  color: var(--accent-text);
   font-family: var(--mono);
   font-size: 9px;
   letter-spacing: 0.04em;
@@ -619,13 +743,51 @@ input {
   display: flex;
   flex-direction: column;
   gap: 10px;
-  width: 420px;
+  width: 440px;
   max-width: calc(100vw - 48px);
+  max-height: min(600px, calc(100vh - 120px));
   padding: 12px;
   border: 1px solid var(--hairline);
   border-radius: 8px;
   background: var(--raised);
-  box-shadow: 0 18px 45px rgba(0, 0, 0, 0.45);
+  box-shadow: var(--shadow-popover);
+}
+
+.model-popover-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin: -2px 0 0;
+}
+
+.model-popover-head > span {
+  color: var(--faint);
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.model-close {
+  display: grid;
+  place-items: center;
+  width: 22px;
+  height: 22px;
+  margin: -2px -4px -2px 0;
+  padding: 0;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--faint);
+  font-size: 15px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.model-close:hover {
+  background: var(--surface);
+  color: var(--text);
 }
 
 .model-effort {
@@ -672,7 +834,7 @@ input {
 
 .segmented button.on {
   background: rgba(233, 162, 59, 0.14);
-  color: var(--accent);
+  color: var(--accent-text);
 }
 
 .model-search {
@@ -700,8 +862,59 @@ input {
   outline: none;
 }
 
+/* The chat filter: one checkbox with the count of what it is holding back, so the hidden rows
+   are always one click and one number away rather than gone. */
+.model-chat-only {
+  gap: 8px;
+  font-size: 11px;
+}
+
+.model-chat-only:hover {
+  color: var(--muted);
+}
+
+/* One short fact on the right: the number held back, or the size of the whole roster. */
+.model-chat-only .fine {
+  margin: 0 0 0 auto;
+  max-width: none;
+  white-space: nowrap;
+}
+
+/* The provider chips: the roster can be four figures long, so the doors it came from are one
+   click away instead of a scroll. A wrapped row of chips, not a segmented control, because the
+   number of doors changes with which keys are installed. */
+.model-doors {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+.model-doors button {
+  height: 22px;
+  padding: 0 8px;
+  border: 1px solid var(--hairline);
+  border-radius: 5px;
+  background: transparent;
+  color: var(--faint);
+  font-family: var(--mono);
+  font-size: 10px;
+  cursor: pointer;
+}
+
+.model-doors button:hover {
+  color: var(--text);
+}
+
+.model-doors button.on {
+  border-color: rgba(233, 162, 59, 0.35);
+  background: rgba(233, 162, 59, 0.14);
+  color: var(--accent-text);
+}
+
 .model-list {
-  max-height: 280px;
+  flex: 1 1 auto;
+  min-height: 120px;
+  max-height: 320px;
   overflow-y: auto;
   margin: 0 -4px;
   padding: 4px;
@@ -765,10 +978,12 @@ input {
 
 .model-row.on {
   background: rgba(233, 162, 59, 0.12);
-  color: var(--accent);
+  box-shadow: inset 2px 0 var(--accent);
+  color: var(--accent-text);
 }
 
-.model-popover .fine {
+/* Only the footer note, which is a direct child; the chat filter's count keeps its auto margin. */
+.model-popover > .fine {
   margin: 0;
 }
 
@@ -865,9 +1080,11 @@ input {
   font-size: 12px;
 }
 
+/* Six facts: three columns at the default width gives two even rows instead of a four-plus-two
+   grid with two empty cells. */
 .facts {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
   gap: 1px;
   margin-top: 24px;
   border: 1px solid var(--hairline);
@@ -1022,11 +1239,11 @@ input {
 }
 
 .evidence td.missing {
-  color: var(--accent);
+  color: var(--accent-text);
 }
 
 .evidence a {
-  color: var(--accent);
+  color: var(--accent-text);
 }
 
 .touches li.cap {
@@ -1053,7 +1270,7 @@ input {
 }
 
 .cap-high .sev {
-  color: var(--accent);
+  color: var(--accent-text);
 }
 
 .cap code {
@@ -1096,12 +1313,12 @@ input {
   text-align: left;
   cursor: pointer;
   text-decoration: underline;
-  text-decoration-color: var(--hairline);
+  text-decoration-color: var(--sep);
   text-underline-offset: 2px;
 }
 
 .link:hover {
-  text-decoration-color: var(--accent);
+  text-decoration-color: var(--accent-text);
 }
 
 .variant-repo,
@@ -1117,7 +1334,7 @@ input {
 }
 
 .detail a {
-  color: var(--accent);
+  color: var(--accent-text);
 }
 
 /* ---------- status bar ---------- */
@@ -1140,7 +1357,7 @@ input {
 }
 
 .status .sep {
-  color: var(--hairline);
+  color: var(--sep);
 }
 
 .status .grow {
@@ -1164,7 +1381,7 @@ input {
 /* ---------- session surface (P3) ---------- */
 
 .shell.session {
-  grid-template-columns: 48px 264px minmax(0, 1fr) 304px;
+  grid-template-columns: 48px var(--list-w, 264px) minmax(0, 1fr) var(--insp-w, 304px);
 }
 
 .faint {
@@ -1196,12 +1413,12 @@ input {
 
 .chip.on {
   border-color: rgba(233, 162, 59, 0.45);
-  color: var(--accent);
+  color: var(--accent-text);
 }
 
 .chip.warn {
   border-color: rgba(233, 162, 59, 0.45);
-  color: var(--accent);
+  color: var(--accent-text);
 }
 
 .chip.danger {
@@ -1227,6 +1444,181 @@ input {
   color: var(--faint);
   font-size: 10px;
   line-height: 1.4;
+}
+
+/* D148: sessions and agents share the pane. A tab is a mode, not a seventh rail surface. */
+.session-tabs {
+  display: inline-flex;
+  margin-bottom: 10px;
+}
+
+.session-filters {
+  display: grid;
+  gap: 6px;
+}
+
+.session-filter-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+.session-list-pane,
+.agent-list-pane {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  min-height: 0;
+}
+
+.list-pane[data-pane="sessions"] .agent-list-pane,
+.list-pane[data-pane="agents"] .session-list-pane {
+  display: none;
+}
+
+.session-list-pane .rows {
+  flex: 1;
+  min-height: 0;
+}
+
+/* One row: the text opens the session; pin, rename and archive overlay on hover or focus. */
+.session-row {
+  position: relative;
+  display: flex;
+  border-radius: 6px;
+}
+
+.session-row:hover {
+  background: var(--surface);
+}
+
+.session-row.on {
+  background: var(--raised);
+  box-shadow: inset 2px 0 var(--accent);
+}
+
+.session-open {
+  display: flex;
+  flex: 1;
+  align-items: center;
+  min-width: 0;
+  padding: 7px 8px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  text-align: left;
+  cursor: pointer;
+}
+
+.session-open:focus-visible,
+.session-act:focus-visible,
+.session-tabs button:focus-visible {
+  outline: 2px solid rgba(233, 162, 59, 0.55);
+  outline-offset: -2px;
+}
+
+.session-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.session-meta {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 10px;
+}
+
+.session-state.active {
+  color: var(--accent-text);
+}
+
+.session-state.idle {
+  color: var(--verified);
+}
+
+.session-state.interrupted {
+  color: var(--danger);
+}
+
+.session-state.ended {
+  color: var(--faint);
+}
+
+.pin-flag {
+  color: var(--accent-text);
+  font-size: 10px;
+  line-height: 1;
+}
+
+.session-row-actions {
+  position: absolute;
+  top: 50%;
+  right: 6px;
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  padding-left: 14px;
+  transform: translateY(-50%);
+  background: linear-gradient(90deg, transparent, var(--surface) 14px);
+  opacity: 0;
+  pointer-events: none;
+}
+
+.session-row.on .session-row-actions {
+  background: linear-gradient(90deg, transparent, var(--raised) 14px);
+}
+
+.session-row:hover .session-row-actions,
+.session-row:focus-within .session-row-actions {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+.session-act {
+  height: 18px;
+  padding: 0 4px;
+  border: 1px solid var(--hairline);
+  border-radius: 3px;
+  background: var(--bg);
+  color: var(--muted);
+  font-family: var(--mono);
+  font-size: 9px;
+  cursor: pointer;
+}
+
+.session-act:hover {
+  border-color: var(--faint);
+  color: var(--text);
+}
+
+.session-act[aria-pressed="true"] {
+  border-color: rgba(233, 162, 59, 0.45);
+  color: var(--accent-text);
+}
+
+.session-act:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
+.session-rename {
+  width: 100%;
+  height: 30px;
+  margin: 2px 4px;
+  padding: 0 8px;
+  border: 1px solid rgba(233, 162, 59, 0.5);
+  border-radius: 5px;
+  background: var(--surface);
+  color: var(--text);
+  font-size: 12px;
+}
+
+.session-rename:focus {
+  outline: none;
 }
 
 /* One inline form, not a modal: a new agent is a roster row as soon as it exists. */
@@ -1271,7 +1663,7 @@ input {
 
 .tag.watching {
   border-color: rgba(233, 162, 59, 0.4);
-  color: var(--accent);
+  color: var(--accent-text);
   text-transform: lowercase;
 }
 
@@ -1312,7 +1704,7 @@ input {
 }
 
 .status-dot.running {
-  background: var(--accent);
+  background: var(--accent-text);
   box-shadow: 0 0 0 3px rgba(233, 162, 59, 0.12);
 }
 
@@ -1360,7 +1752,7 @@ input {
   align-items: center;
   justify-content: flex-end;
   gap: 8px;
-  flex: 0 0 auto;
+  flex: 1 1 360px;
 }
 
 .toggle {
@@ -1394,11 +1786,192 @@ input {
 }
 
 /* One scroll for one or two panes: D40's split is a comparison, not two independent windows. */
+/* D136: five views of one transcript. D149 places its map beside the scroller. */
+.transcript-bar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  padding-top: 10px;
+  flex: 0 0 auto;
+}
+
+.filter-count {
+  margin-left: 4px;
+  color: var(--faint);
+  font-variant-numeric: tabular-nums;
+}
+
+.chip.on .filter-count {
+  color: var(--accent-text);
+}
+
+.transcript-shell {
+  display: flex;
+  flex: 1;
+  gap: 10px;
+  min-height: 0;
+}
+
 .transcripts {
   flex: 1;
   min-height: 0;
   overflow-y: auto;
   padding: 14px 0 18px;
+}
+
+/* D149: a minimap of the turn, not a second sidebar. Marks are sized for the rail, and the
+   active turn's group keeps full opacity while the rest stay quiet. */
+.turn-outline {
+  display: flex;
+  flex: 0 0 18px;
+  flex-direction: column;
+  gap: 5px;
+  padding: 14px 0 18px 8px;
+  border-left: 1px solid var(--hairline);
+  overflow-y: auto;
+}
+
+.outline-group {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.outline-mark {
+  width: 8px;
+  height: 4px;
+  padding: 0;
+  border: 0;
+  border-radius: 2px;
+  background: var(--faint);
+  opacity: 0.45;
+  cursor: pointer;
+}
+
+.outline-mark.prompt {
+  height: 6px;
+  background: var(--accent);
+  opacity: 0.7;
+}
+
+.outline-mark.diff {
+  background: var(--verified);
+}
+
+.outline-mark.error {
+  background: var(--danger);
+}
+
+.outline-mark.approval {
+  background: var(--accent-text);
+}
+
+.outline-mark:hover,
+.outline-mark:focus-visible,
+.outline-mark.on {
+  opacity: 1;
+  width: 12px;
+  outline: none;
+}
+
+.outline-mark:focus-visible {
+  box-shadow: 0 0 0 2px rgba(233, 162, 59, 0.35);
+}
+
+.turn-hidden {
+  margin: 6px 0 0;
+  padding-left: 76px;
+  color: var(--faint);
+}
+
+/* D150: a star is quiet until the line is hovered, and stays visible once it is kept. */
+.item-shell {
+  position: relative;
+}
+
+.bookmark-star {
+  position: absolute;
+  top: 0;
+  right: 0;
+  width: 20px;
+  height: 20px;
+  padding: 0;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--faint);
+  font-size: 12px;
+  line-height: 1;
+  opacity: 0;
+  cursor: pointer;
+}
+
+.item-shell:hover .bookmark-star,
+.item-shell:focus-within .bookmark-star,
+.bookmark-star.on {
+  opacity: 1;
+}
+
+.bookmark-star:hover {
+  background: var(--surface);
+  color: var(--accent-text);
+}
+
+.bookmark-star.on {
+  color: var(--accent-text);
+}
+
+.bookmark-star.in-head {
+  position: static;
+  margin-left: auto;
+  opacity: 1;
+}
+
+.item-shell.jump,
+.hunk.jump {
+  box-shadow: inset 2px 0 0 var(--accent);
+}
+
+.bookmark-list {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.bookmark-list li {
+  display: flex;
+  align-items: center;
+  gap: 3px;
+}
+
+.bookmark-jump {
+  display: flex;
+  flex: 1;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  padding: 3px 4px;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--muted);
+  font-size: 11px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.bookmark-jump:hover {
+  background: var(--surface);
+  color: var(--text);
+}
+
+.bookmark-label {
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
 }
 
 .transcript-panes {
@@ -1501,7 +2074,7 @@ input {
 
 .pill.running {
   border-color: rgba(233, 162, 59, 0.45);
-  color: var(--accent);
+  color: var(--accent-text);
 }
 
 .pill.failed,
@@ -1543,7 +2116,7 @@ input {
 .msg-body.streaming::after {
   content: "▍";
   margin-left: 2px;
-  color: var(--accent);
+  color: var(--accent-text);
   animation: blink 1s steps(1) infinite;
 }
 
@@ -1595,7 +2168,7 @@ input {
 }
 
 .tool-name {
-  color: var(--accent);
+  color: var(--accent-text);
 }
 
 .tool-args {
@@ -1723,6 +2296,68 @@ input {
   flex: 0 0 auto;
 }
 
+/* D151: snippets sit beside the add-context menu and insert a draft, never a turn. */
+.composer-snippets {
+  position: relative;
+  display: flex;
+  flex: 0 0 auto;
+}
+
+.composer-snippet-toggle {
+  height: 24px;
+  padding: 0 7px;
+  border: 1px solid var(--hairline);
+  border-radius: 4px;
+  background: transparent;
+  color: var(--muted);
+  font-family: var(--mono);
+  font-size: 10px;
+  cursor: pointer;
+}
+
+.composer-snippet-toggle:hover:not(:disabled),
+.composer-snippet-toggle[aria-expanded="true"] {
+  border-color: var(--faint);
+  background: var(--surface);
+  color: var(--text);
+}
+
+.composer-snippet-toggle:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
+.composer-snippets .composer-menu {
+  width: 280px;
+  max-width: 70vw;
+}
+
+.snippet-row {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+}
+
+.snippet-row .composer-menu-item {
+  flex: 1;
+  min-width: 0;
+}
+
+.snippet-delete {
+  flex: 0 0 auto;
+  width: 20px;
+  height: 20px;
+  border: 0;
+  background: transparent;
+  color: var(--faint);
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.snippet-delete:hover {
+  color: var(--danger);
+}
+
 .composer-plus {
   display: grid;
   place-items: center;
@@ -1739,7 +2374,7 @@ input {
 .composer-plus:hover:not(:disabled),
 .composer-plus[aria-expanded="true"] {
   border-color: rgba(233, 162, 59, 0.5);
-  color: var(--accent);
+  color: var(--accent-text);
 }
 
 .composer-plus:disabled {
@@ -1807,7 +2442,28 @@ input {
   border: 1px solid var(--hairline);
   border-radius: 8px;
   background: var(--raised);
-  box-shadow: 0 16px 40px rgba(0, 0, 0, 0.45);
+  box-shadow: var(--shadow-menu);
+}
+
+/* D152: the template menu opens downward from the session filter row. */
+.template-wrap {
+  position: relative;
+}
+
+.template-menu {
+  top: calc(100% + 6px);
+  bottom: auto;
+  width: 250px;
+}
+
+.template-row {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+}
+
+.template-row .composer-menu-item {
+  min-width: 0;
 }
 
 .composer-menu-label {
@@ -1892,9 +2548,9 @@ input {
   width: 100%;
   height: 26px;
   padding: 0 6px;
-  border: 1px solid var(--line);
+  border: 1px solid var(--hairline);
   border-radius: 6px;
-  background: var(--panel);
+  background: var(--raised);
   color: var(--text);
   font: inherit;
   font-size: 12px;
@@ -1906,7 +2562,7 @@ input {
 
 .chip.swarm {
   border-color: rgba(233, 162, 59, 0.35);
-  color: var(--accent);
+  color: var(--accent-text);
 }
 
 .chip.swarm:hover:not(:disabled) {
@@ -1951,7 +2607,7 @@ input {
 }
 
 .swarm-preflight li input {
-  accent-color: var(--amber, #e9a23b);
+  accent-color: var(--accent);
 }
 
 .swarm-preflight .fine {
@@ -1978,7 +2634,20 @@ input {
 
 .composer-quote.over,
 .composer-quote.over .mono {
-  color: var(--accent);
+  color: var(--accent-text);
+}
+
+/* D153: a range of what a turn has cost, quieter than the first-step quote it sits under. */
+.composer-preflight {
+  flex: 0 0 auto;
+  margin: -6px 0 10px;
+  color: var(--faint);
+  font-size: 11px;
+  line-height: 1.5;
+}
+
+.composer-preflight .mono {
+  color: var(--muted);
 }
 
 /* inspector */
@@ -2041,7 +2710,7 @@ input {
   top: 0;
   width: 1px;
   height: 100%;
-  background: var(--accent);
+  background: var(--accent-text);
   opacity: 0.7;
 }
 
@@ -2080,7 +2749,7 @@ input {
 
 .approval-inline strong {
   display: block;
-  color: var(--accent);
+  color: var(--accent-text);
   font-size: 12px;
 }
 
@@ -2092,6 +2761,33 @@ input {
 .approval-inline .cap-form {
   margin-top: 0;
   flex: 0 0 auto;
+}
+
+/* D155: a quiet summary on focus; it adds no notification path of its own. */
+.away-card {
+  flex: 0 0 auto;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  align-items: center;
+  justify-content: space-between;
+  margin: 0 0 10px;
+  padding: 8px 10px;
+  border: 1px solid var(--hairline);
+  border-radius: 6px;
+  background: var(--raised);
+}
+
+.away-card strong {
+  display: block;
+  color: var(--text);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.away-card span {
+  color: var(--muted);
+  font-size: 11px;
 }
 
 .approval-inline .cap-form input {
@@ -2111,7 +2807,7 @@ input {
 
 .approval-item strong {
   margin-right: 8px;
-  color: var(--accent);
+  color: var(--accent-text);
   font-family: var(--mono);
   font-size: 11px;
 }
@@ -2159,7 +2855,30 @@ input {
 /* ---------- settings ---------- */
 
 .shell.settings {
-  grid-template-columns: 48px 264px minmax(0, 1fr) 304px;
+  grid-template-columns: 48px var(--list-w, 264px) minmax(0, 1fr) var(--insp-w, 304px);
+}
+
+/* Near the window's 960px minimum, the roster and the inspector each give the middle column
+   some room back; both stay visible, so nothing on the page is lost. */
+@media (max-width: 1180px) {
+  .shell.session,
+  .shell.settings {
+    grid-template-columns: 48px var(--list-w, 240px) minmax(0, 1fr) var(--insp-w, 280px);
+  }
+}
+
+/* D159: the inspector folds away before the transcript is squeezed. Its handle goes with it. */
+@media (max-width: 1080px) {
+  .shell.session,
+  .shell.settings {
+    grid-template-columns: 48px var(--list-w, 232px) minmax(0, 1fr);
+  }
+
+  .shell.session .inspector,
+  .shell.settings .inspector,
+  .pane-handle-inspector {
+    display: none;
+  }
 }
 
 /* The settings page reuses .session-main, whose overflow:hidden would trap the
@@ -2235,6 +2954,175 @@ input {
   gap: 8px;
 }
 
+/* The appearance picker: each card previews the theme it selects, so the choice is visible
+   without applying it. The card itself stays on the current theme's surface. */
+.theme-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+  gap: 10px;
+  max-width: 520px;
+}
+
+.theme-option {
+  display: flex;
+  flex-direction: column;
+  /* A button is a flex container with centred children in the UA sheet; without this the
+     swatch shrinks to its 24px padding and the percentage-width bars measure zero. */
+  align-items: stretch;
+  gap: 9px;
+  padding: 9px;
+  border: 1px solid var(--hairline);
+  border-radius: 8px;
+  background: var(--surface);
+  text-align: left;
+  cursor: pointer;
+}
+
+.theme-option:hover:not(:disabled) {
+  border-color: var(--faint);
+}
+
+.theme-option.on {
+  border-color: var(--accent);
+  box-shadow: inset 2px 0 0 var(--accent-text);
+}
+
+.theme-option:disabled {
+  opacity: 0.55;
+  cursor: default;
+}
+
+.theme-swatch {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: 5px;
+  height: 58px;
+  padding: 0 11px;
+  overflow: hidden;
+  border: 1px solid var(--hairline);
+  border-radius: 6px;
+}
+
+.theme-swatch.dark {
+  background: #121417;
+}
+
+.theme-swatch.light {
+  background: #ffffff;
+}
+
+.theme-swatch i {
+  display: block;
+  height: 3px;
+  border-radius: 2px;
+}
+
+.theme-swatch i:nth-child(1) {
+  width: 46%;
+  height: 5px;
+  margin-bottom: 2px;
+}
+
+.theme-swatch i:nth-child(2) {
+  width: 74%;
+}
+
+.theme-swatch i:nth-child(3) {
+  width: 56%;
+}
+
+.theme-swatch.dark i:nth-child(1) {
+  background: rgba(230, 232, 235, 0.85);
+}
+
+.theme-swatch.dark i:nth-child(2),
+.theme-swatch.dark i:nth-child(3) {
+  background: rgba(230, 232, 235, 0.38);
+}
+
+.theme-swatch.light i:nth-child(1) {
+  background: #14161a;
+}
+
+.theme-swatch.light i:nth-child(2),
+.theme-swatch.light i:nth-child(3) {
+  background: #9aa0a7;
+}
+
+/* One amber pip in the corner of both previews: the accent is the constant. */
+.theme-swatch::after {
+  content: "";
+  position: absolute;
+  top: 10px;
+  right: 11px;
+  width: 7px;
+  height: 7px;
+  border-radius: 999px;
+  background: var(--accent);
+}
+
+.theme-option-body {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 0 1px 1px;
+  color: var(--text);
+  font-size: 12px;
+  font-weight: 500;
+}
+
+/* One saved field: its name, the input with its unit beside it, then the hint under both.
+   `auto-fit` keeps a pair of fields side by side on a wide window and stacked on a narrow one. */
+.settings-field-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+  gap: 12px;
+  max-width: 520px;
+}
+
+.settings-field {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.settings-field > span:first-child {
+  color: var(--faint);
+  font-size: 10px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.settings-field-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.settings-field-row input {
+  flex: 1;
+  min-width: 0;
+  padding: 9px 11px;
+  border: 1px solid var(--hairline);
+  border-radius: 6px;
+  background: var(--surface);
+  color: var(--text);
+  font-family: var(--mono);
+  font-size: 12px;
+}
+
+.settings-field-row input::placeholder {
+  color: var(--faint);
+}
+
+.settings-field .fine {
+  margin: 0;
+  max-width: none;
+}
+
 .harness-list {
   display: grid;
   gap: 8px;
@@ -2289,7 +3177,7 @@ input {
 }
 
 .harness-row .needs-key {
-  color: var(--accent);
+  color: var(--accent-text);
 }
 
 .harness-key-list {
@@ -2351,9 +3239,39 @@ input {
 }
 
 .settings-main .fine {
-  max-width: 560px;
+  max-width: 64ch;
   color: var(--faint);
 }
+
+/* One nav row: name and its fact on the first line, the blurb across the full width below.
+   Keeping the fact beside the name is what stops every description truncating at a different
+   place; the accent bar is the page marker. */
+.settings-nav .row {
+  align-items: flex-start;
+  padding: 8px 10px;
+}
+
+.settings-nav .row-name {
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.settings-nav .nav-meta {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 5px;
+  max-width: 132px;
+  overflow: hidden;
+  color: var(--faint);
+  font-family: var(--mono);
+  font-size: 10px;
+  font-variant-numeric: tabular-nums;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+
 
 .settings-main code {
   color: var(--muted);
@@ -2374,7 +3292,7 @@ input {
   border-left: 2px solid var(--accent);
   border-radius: 6px;
   background: var(--raised);
-  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.35);
+  box-shadow: var(--shadow-panel);
   color: var(--muted);
   font-size: 12px;
   transform: translateX(-50%);
@@ -2479,7 +3397,7 @@ input {
 }
 
 .chat-dot.busy {
-  color: var(--accent);
+  color: var(--accent-text);
 }
 
 .chat-dot.up {
@@ -2578,7 +3496,7 @@ input {
 }
 
 .chat-msg .who {
-  color: var(--accent);
+  color: var(--accent-text);
   font-size: 11px;
 }
 
@@ -2665,7 +3583,7 @@ input {
 }
 
 .approval-wait {
-  color: var(--accent);
+  color: var(--accent-text);
   font-family: var(--mono);
   font-size: 10px;
   text-transform: uppercase;
@@ -2766,6 +3684,58 @@ input {
   grid-template-columns: 48px minmax(0, 1fr);
 }
 
+/* D159: the splitter sits over the gutter, not in a grid track. A 7px hit area with a hairline
+   that only draws on hover keeps the page quiet. */
+.pane-handle {
+  position: absolute;
+  z-index: 6;
+  width: 7px;
+  cursor: col-resize;
+  touch-action: none;
+}
+
+.pane-handle::after {
+  content: "";
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 3px;
+  width: 1px;
+  background: transparent;
+}
+
+.pane-handle:hover::after,
+.pane-handle:focus-visible::after {
+  background: var(--accent);
+}
+
+.pane-handle:focus-visible {
+  outline: none;
+}
+
+.shell.diff .pane-handle-list {
+  display: none;
+}
+
+/* D159: compact rows close the gaps, never a line. */
+html[data-density="compact"] .turn {
+  margin-bottom: 10px;
+  padding-bottom: 8px;
+}
+
+html[data-density="compact"] .turn-head {
+  margin-bottom: 4px;
+}
+
+html[data-density="compact"] .item-shell {
+  margin-top: 1px;
+  margin-bottom: 1px;
+}
+
+html[data-density="compact"] .hunk-comments {
+  padding: 6px 8px;
+}
+
 .diff-view {
   display: flex;
   flex-direction: column;
@@ -2857,7 +3827,7 @@ input {
   min-width: 0;
   border: 1px solid var(--hairline);
   border-radius: 6px;
-  background: var(--well);
+  background: var(--bg);
 }
 
 .conflict-side header {
@@ -2950,7 +3920,7 @@ input {
 
 .unverified {
   margin: 8px 0 0;
-  color: var(--accent);
+  color: var(--accent-text);
   font-size: 11px;
 }
 
@@ -3132,6 +4102,76 @@ input {
   white-space: pre;
 }
 
+/* D156: each line is a row the panel can start from; the number is the new-file line. */
+.diff-line {
+  display: flex;
+  gap: 10px;
+  min-height: 15px;
+  cursor: pointer;
+}
+
+.diff-line:hover {
+  background: rgba(233, 162, 59, 0.1);
+}
+
+.diff-line.add .diff-text {
+  color: var(--verified);
+}
+
+.diff-line.del .diff-text {
+  color: var(--danger);
+}
+
+.diff-line.meta .diff-text,
+.diff-line .diff-no {
+  color: var(--faint);
+}
+
+.diff-no {
+  flex: 0 0 34px;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+  user-select: none;
+}
+
+.diff-text {
+  flex: 1;
+  white-space: pre;
+}
+
+.provenance {
+  padding: 8px 10px;
+  border-top: 1px solid var(--hairline);
+  background: var(--raised);
+}
+
+.provenance-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 6px;
+}
+
+.provenance dl {
+  display: grid;
+  grid-template-columns: 54px 1fr;
+  gap: 3px 10px;
+  margin: 0 0 6px;
+  font-size: 11px;
+}
+
+.provenance dt {
+  color: var(--faint);
+  text-transform: uppercase;
+  font-size: 10px;
+  letter-spacing: 0.06em;
+}
+
+.provenance dd {
+  margin: 0;
+  color: var(--muted);
+}
+
 /* One block per `@@`, each with the agent that wrote it (P5.6). */
 .hunk-list {
   display: flex;
@@ -3207,7 +4247,7 @@ input {
 
 .hunk-agent {
   font-size: 11px;
-  color: var(--accent);
+  color: var(--accent-text);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -3256,7 +4296,7 @@ input {
 
 .refine-head .eyebrow {
   margin: 0 0 2px;
-  color: var(--accent);
+  color: var(--accent-text);
 }
 
 .refine-head strong {
@@ -3408,7 +4448,7 @@ html.rigel-cursor * {
   height: 7px;
   background: var(--accent);
   box-shadow:
-    0 0 0 1px rgba(11, 12, 14, 0.7),
+    0 0 0 1px var(--cursor-ring),
     0 0 9px rgba(233, 162, 59, 0.55);
   transition:
     width 120ms ease-out,
@@ -3466,7 +4506,7 @@ html.rigel-cursor-press .rigel-pointer-dot {
   height: 5px;
   border-radius: 999px;
   box-shadow:
-    0 0 0 1px rgba(11, 12, 14, 0.7),
+    0 0 0 1px var(--cursor-ring),
     0 0 12px rgba(233, 162, 59, 0.7);
 }
 
@@ -3522,11 +4562,24 @@ html.rigel-cursor-press .rigel-pointer-dot {
   background: var(--bg);
 }
 
-.terminal-host {
+/* The framed canvas: the shell draws inside a bordered pane rather than edge to edge, so the
+   grid the terminal computes is visibly the thing the app is showing. */
+.terminal-frame {
+  display: flex;
   flex: 1;
   min-height: 0;
+  padding: 12px;
+}
+
+.terminal-host {
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
   padding: 10px 12px;
+  border: 1px solid var(--hairline);
+  border-radius: 8px;
   background: var(--bg);
+  overflow: hidden;
 }
 
 .terminal-host .xterm {
@@ -3537,22 +4590,42 @@ html.rigel-cursor-press .rigel-pointer-dot {
   background: transparent !important;
 }
 
-.terminal-meta {
-  padding: 10px 12px;
+/* The left pane's facts: shell, cwd, state, font. Two columns so the values line up, with the
+   paths wrapping instead of widening the pane. */
+.terminal-status {
+  display: grid;
+  gap: 1px;
+  padding: 8px;
   border-bottom: 1px solid var(--hairline);
 }
 
-.terminal-meta p {
-  margin: 0 0 4px;
+.terminal-status-row {
+  display: grid;
+  grid-template-columns: 44px minmax(0, 1fr);
+  align-items: baseline;
+  gap: 8px;
+  padding: 5px 8px;
 }
 
-.terminal-cwd {
+.terminal-status-row > span:first-child {
   color: var(--faint);
-  word-break: break-all;
+  font-size: 10px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.terminal-status-row code {
+  overflow-wrap: anywhere;
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.terminal-status-row .pill {
+  justify-self: start;
 }
 
 .terminal-error {
-  margin: 6px 0 0;
+  margin: 6px 12px 0;
   color: var(--danger);
   font-size: 11px;
   line-height: 1.4;
@@ -3562,4 +4635,345 @@ html.rigel-cursor-press .rigel-pointer-dot {
   margin-top: auto;
   padding: 10px 12px;
   border-top: 1px solid var(--hairline);
+}
+
+/* ---------- motion ---------- */
+
+/* Colour-only transitions, kept short: a hover should read as alive without moving the layout. */
+.row,
+.chip,
+.primary,
+.load-more,
+.model-row,
+.model-search,
+.model-doors button,
+.segmented button,
+.settings-nav .row,
+.theme-option {
+  transition:
+    background-color 120ms ease-out,
+    border-color 120ms ease-out,
+    color 120ms ease-out;
+}
+
+.primary {
+  transition:
+    background-color 120ms ease-out,
+    filter 120ms ease-out;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.001ms !important;
+    scroll-behavior: auto !important;
+  }
+}
+
+/* ---------- Ctrl+K palette (D147) ---------- */
+
+.palette-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 50;
+  display: flex;
+  align-items: flex-start;
+  justify-content: center;
+  padding: clamp(48px, 12vh, 120px) 16px 24px;
+  background: rgba(0, 0, 0, 0.42);
+}
+
+.palette {
+  display: flex;
+  flex-direction: column;
+  width: min(680px, 100%);
+  max-height: min(70vh, 620px);
+  overflow: hidden;
+  border: 1px solid var(--hairline);
+  border-radius: 10px;
+  background: var(--surface);
+  box-shadow: var(--shadow-popover);
+}
+
+.palette-input-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--hairline);
+}
+
+.palette-glyph {
+  color: var(--faint);
+  font-size: 14px;
+}
+
+.palette-input-row input {
+  flex: 1;
+  min-width: 0;
+  border: 0;
+  outline: none;
+  background: transparent;
+  color: var(--text);
+  font: 13px/1.4 var(--ui);
+}
+
+.palette-input-row input::placeholder {
+  color: var(--faint);
+}
+
+.palette-input-row kbd {
+  padding: 1px 5px;
+  border: 1px solid var(--hairline);
+  border-radius: 4px;
+  color: var(--faint);
+  font: 9px/1.5 var(--mono);
+}
+
+.palette-list {
+  overflow-y: auto;
+  padding: 4px 0 6px;
+}
+
+.palette-section {
+  margin: 8px 12px 3px;
+  color: var(--faint);
+  font-size: 9px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.palette-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  width: 100%;
+  padding: 7px 12px;
+  border: 0;
+  border-left: 2px solid transparent;
+  background: transparent;
+  color: var(--text);
+  text-align: left;
+  cursor: pointer;
+}
+
+.palette-row.on {
+  border-left-color: var(--accent);
+  background: var(--raised);
+}
+
+.palette-row-text {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  gap: 1px;
+  min-width: 0;
+}
+
+.palette-row-title {
+  overflow: hidden;
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.palette-row-subtitle {
+  overflow: hidden;
+  color: var(--faint);
+  font-size: 10px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.palette-row-meta {
+  flex-shrink: 0;
+  color: var(--faint);
+  font-size: 9px;
+}
+
+.palette-empty {
+  margin: 14px 12px;
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.palette-empty.subtle {
+  color: var(--faint);
+}
+
+.palette-foot {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 7px 12px;
+  border-top: 1px solid var(--hairline);
+  color: var(--faint);
+  font-size: 9px;
+}
+
+.palette-foot .grow {
+  flex: 1;
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .palette {
+    animation: palette-in 120ms ease-out;
+  }
+
+  @keyframes palette-in {
+    from {
+      opacity: 0;
+      transform: translateY(-4px);
+    }
+    to {
+      opacity: 1;
+      transform: translateY(0);
+    }
+  }
+}
+
+/* A palette jump marks the row it landed on for a moment, then fades. */
+.turn.jump {
+  box-shadow: inset 2px 0 0 var(--accent);
+}
+
+.patch.jump {
+  box-shadow: inset 2px 0 0 var(--accent);
+}
+
+/* ---------- attention (D154) ---------- */
+
+.rail-btn {
+  position: relative;
+}
+
+/* The badge is the count of unresolved rows, nothing else: it clears when the list does. */
+.rail-count {
+  position: absolute;
+  top: 2px;
+  right: 2px;
+  min-width: 14px;
+  padding: 0 3px;
+  border-radius: 7px;
+  background: var(--accent);
+  color: var(--surface);
+  font-family: var(--mono);
+  font-size: 9px;
+  line-height: 14px;
+  text-align: center;
+}
+
+.attention-view {
+  /* There is no list pane here, so the view takes the list's column too. */
+  grid-column: 2 / -1;
+  display: block;
+}
+
+.attention-groups {
+  display: grid;
+  gap: 18px;
+  margin-top: 22px;
+}
+
+.attention-group {
+  border: 1px solid var(--hairline);
+  border-radius: 8px;
+  background: var(--surface);
+  overflow: hidden;
+}
+
+.attention-group > header {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 14px;
+  border-bottom: 1px solid var(--hairline);
+  background: var(--raised);
+}
+
+.attention-group > header h3 {
+  margin: 0;
+  font-size: 13px;
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+
+.attention-group ul {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.attention-group li + li {
+  border-top: 1px solid var(--hairline);
+}
+
+.attention-row {
+  display: grid;
+  grid-template-columns: 64px minmax(0, 1fr) auto;
+  align-items: baseline;
+  gap: 4px 12px;
+  width: 100%;
+  padding: 9px 14px;
+  border: 0;
+  background: transparent;
+  color: var(--text);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.attention-row:hover {
+  background: var(--raised);
+}
+
+.attention-row:focus-visible {
+  outline: 2px solid var(--accent-text);
+  outline-offset: -2px;
+}
+
+.attention-kind {
+  font-family: var(--mono);
+  font-size: 10px;
+  letter-spacing: 0.04em;
+  text-transform: lowercase;
+  color: var(--faint);
+}
+
+.attention-kind.failed_turn,
+.attention-kind.budget_stop,
+.attention-kind.blocked_merge {
+  color: var(--danger);
+}
+
+.attention-kind.approval,
+.attention-kind.stale_claim,
+.attention-kind.merge_review {
+  color: var(--accent-text);
+}
+
+.attention-label {
+  min-width: 0;
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+
+.attention-detail {
+  grid-column: 2;
+  color: var(--muted);
+  font-size: 11px;
+  overflow-wrap: anywhere;
+}
+
+.attention-when {
+  grid-column: 3;
+  grid-row: 1;
+  color: var(--faint);
+  font-family: var(--mono);
+  font-size: 10px;
+  white-space: nowrap;
 }

@@ -32,14 +32,18 @@ reporting.
 | Skills | A skill body is data. Loading one is visible in the transcript and grants no permission. | `skills/` |
 | Memory | Committed files pass a secret and absolute-path validator before landing in the tree. | `memory.rs` |
 | Updates | On by default. One signed manifest check runs at launch (and on demand); Settings → Updates turns the check or auto-install off. The manifest is Ed25519-verified over `version\nurl\nsha256` (plus the optional MSI fields) before it is read, and the downloaded artifact's SHA-256 must match before anything runs. | `update.rs` |
+| Mail | Opt-in and off until configured. The inbox address lives in `agentmail.json`; the AgentMail API key lives in the OS keychain (`rigel/agentmail`) and never reaches the renderer. Reading needs no confirmation. **Sending is a card first** — recipient, subject and body — and silence is a refusal; a read-only subagent is not offered `email_send` or `email_reply` at all. A reply is addressed to the message's own sender and carries its subject, so it cannot be redirected to a third party. Every message read or listed is returned labelled `untrusted: true`. | `agentmail.rs`, `agent/tools.rs`, `approval.rs` |
+| Cloud | Opt-in and off until configured. The project id and public web API key live in `cloud.json`; the refresh token and the email-verification answer live in the OS keychain and never reach the renderer. Email/password sign-in, sign-up and verification go through Identity Toolkit; a password-reset answer is the same for known and unknown addresses, so the page is not an account oracle. Verification is shown, not enforced: `firestore.rules` checks the uid, not the `email_verified` claim. Firestore rules restrict every document to its owner. **App Check is optional and off until configured:** the attestation URL lives in `cloud.json` (not a secret), its tokens are bearer credentials held in memory only and never serialized, printed or sent to the renderer, and a configured-but-unreachable endpoint fails the request instead of sending it un-attested. The endpoint is the security boundary — an attestation service that mints tokens for anyone adds no protection. Shelf metadata — including deletion tombstones — is uploaded only on **Push shelf**; the local manifest in `cloud-state.json` holds ids and timestamps, never bodies; a session's prompt and assistant text are uploaded only on **Publish to phone** or `rigel cloud publish`, and tool calls, command output, file changes and the local project path are never part of that shape. | `cloud.rs`, `firestore.rules` |
 
 ## Network calls, exhaustively
 
 - The local OmniRoute router on loopback (the native agent), which fans out to providers.
-- The selected provider directly (OpenRouter, Gemini) when configured that way.
+- The selected provider directly — the adapter table's own base URL (OpenRouter, Google AI Studio, Vertex, OpenAI, xAI, Groq, DeepSeek, Mistral, Together, Fireworks) when configured that way.
 - `api.github.com` and `raw.githubusercontent.com` during `rigel skills index`, on demand.
 - SkillsMP and SkillHub during `rigel skills sync`, on demand.
 - The latest GitHub release manifest (`github.com/OkVurb/Rigel/releases/latest/download/latest.json`) and its installer assets. A check runs once at launch and on demand; the installer is downloaded only for an available, signed update. Turning the update switch off stops both.
+- Firebase Authentication (`identitytoolkit.googleapis.com`, `securetoken.googleapis.com`) and Firestore (`firestore.googleapis.com`) **only after** the user configures a project and signs in, and only from `rigel cloud` or Settings → Cloud, and from the iPhone client's Rigel Cloud screen. A signed-out install makes no cloud request. The refresh token is in the OS keychain (or the phone's); the password is used for one request and never stored. When App Check is configured, every one of those requests also carries a token fetched from the user's own attestation endpoint, whose URL is the only thing stored.
+- AgentMail (`api.agentmail.to`) **only after** the user saves an inbox and a key, and only when mail is actually used: `email_list`, `email_read`, `email_send`, or the Settings → Email page. Nothing is polled and no mailbox is watched. A message, or one conversation in full, is fetched only when it is asked for, and no body is written to the project database.
 
 Nothing else. `rigel doctor` and `rigel tools list` spawn local processes and read local files;
 they make no requests. The Phase 7 exit script runs them behind a dead proxy to keep that true.
@@ -69,6 +73,14 @@ it cannot grant itself permission, because the gate is code and the answer comes
 - **A malicious package manager.** Rigel shows the command and records the exit; it does not
   reimplement winget's, Chocolatey's or npm's verification. `install_ledger.verification` states
   what the manager checks.
+- **A stolen Firebase refresh token.** Signing out deletes the local copy but does not call
+  Firebase's revoke endpoint. A machine that is lost should have its refresh tokens revoked in the
+  Firebase console (Authentication → Users → Revoke refresh tokens), which invalidates the copy
+  before it can be used.
+- **Public sign-up on the user's project.** Once Email/Password is enabled, the project's public
+  web API key can create accounts from `rigel cloud sign-up` — or any other client. Rigel does not
+  enforce a registration policy the Firebase project does not; App Check (which Rigel can send
+  tokens for), a blocking function, or keeping sign-up closed is the project owner's decision.
 - **An OS-level attacker with debugger rights.** Nothing user-mode survives that.
 
 ## Unsigned builds

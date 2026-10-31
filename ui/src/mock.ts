@@ -244,10 +244,54 @@ export class PreviewSkillSource implements SkillSource {
     return detailFor(row);
   }
 
+  private sources: SourceStatus[] = [
+    {
+      id: "github",
+      base_url: "https://api.github.com",
+      state: "ok",
+      last_sync_at: seen,
+      error: null,
+    },
+    {
+      id: "skillsmp",
+      base_url: "https://skillsmp.com",
+      state: "stale",
+      last_sync_at: seen,
+      error: null,
+    },
+    {
+      id: "skillhub",
+      base_url: "https://skills.browseract.com",
+      state: "broken",
+      last_sync_at: seen,
+      error: "connection reset",
+    },
+  ];
+
   async status(): Promise<SourceStatus[]> {
-    return [
-      { id: "github", base_url: "https://api.github.com", state: "ok", last_sync_at: seen, error: null },
-      { id: "skillsmp", base_url: "https://skillsmp.com", state: "stale", last_sync_at: seen, error: null },
-    ];
+    return this.sources;
+  }
+
+  /**
+   * Browser preview only: the same pass the window runs, described honestly, with the stale rows
+   * becoming fresh — which is exactly what `rigel skills refresh` does to the real shelf.
+   */
+  async refresh() {
+    const before = this.sources;
+    this.sources = before.map((row) => ({ ...row, state: "ok", error: null }));
+    return {
+      checked: before.length,
+      refreshed: before.filter((row) => row.state !== "ok").length,
+      sources: before.map((row) => ({
+        id: row.id,
+        state: "ok",
+        detail:
+          row.state === "ok"
+            ? "fresh"
+            : row.id === "github"
+              ? "3 repo(s), 7 row(s) updated"
+              : "30 row(s) from the default query",
+      })),
+    };
   }
 }

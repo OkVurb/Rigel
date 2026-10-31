@@ -14,22 +14,28 @@
 //! * they are synchronous and drive the async core with `block_on`, because Tauri's async
 //!   command wrapper cannot express sqlx's higher-ranked `Executor` lifetimes.
 
+use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use rigel_core::agent::approval::{ApprovalBus, PendingApproval};
+use rigel_core::agent::approval::{
+    ApprovalBus, MailApprover, MailDecision, MailRequest, PendingApproval,
+};
+pub use rigel_core::agent::catalog::ModelOption;
 use rigel_core::agent::{Cancels, Coordinator, DEFAULT_MAX_STEPS, fixed_context_chars};
+use rigel_core::agent::{catalog, providers};
 use rigel_core::{
-    Agent, AgentEvent, AppliedReview, ApprovalScope, AttributedHunk, BudgetService, ClaimConflict,
-    ClaimService, CommandApprover, CommandDecision, CommandRequest, ConflictWatcher, EventSink,
-    HunkComment, HunkComments, InterruptSink, MemoryFile, MemoryService, MergeReview, MergeReviews,
-    Model, OpenRouterModel, POLL_INTERVAL, Patch, PatchPipeline, PlanApprover, PlanDecision,
-    PlanRequest, ResumeOutcome, Scopes, Session, SessionService, SkillDetail, SkillIndex,
-    SkillsError, SnapshotService, StopAt, Store, SubagentPolicy, SyncPolicy, TeamAgent, Tools,
-    Turn, TurnQuote, TurnTranscript, UnverifiedChange, Usage, WorktreeService, WriteMode,
-    apply_review, credentials, diagnostics, skills::search::SearchHit,
+    Agent, AgentEvent, AppliedReview, ApprovalScope, Attention, AttributedHunk, Bookmark,
+    BudgetService, ClaimConflict, ClaimService, CommandApprover, CommandDecision, CommandRequest,
+    ConflictWatcher, EventSink, HunkComment, HunkComments, InterruptSink, MemoryFile,
+    MemoryService, MergeReview, MergeReviews, Model, POLL_INTERVAL, Patch, PatchPipeline,
+    PlanApprover, PlanDecision, PlanRequest, Provenance, ResumeOutcome, Scopes, Session,
+    SessionService, SessionTemplate, SessionTemplates, SkillDetail, SkillIndex, SkillsError,
+    SnapshotService, StopAt, Store, SubagentPolicy, SyncPolicy, TeamAgent, Tools, Turn, TurnQuote,
+    TurnTranscript, UnverifiedChange, Usage, WorktreeService, WriteMode, apply_review, credentials,
+    diagnostics, skills::search::SearchHit,
 };
 use serde::{Deserialize, Serialize};
 use tauri::menu::{Menu, MenuItem};
@@ -51,18 +57,25 @@ fn default_model() -> String {
     rigel_core::agent::omniroute::DEFAULT_MODEL.to_string()
 }
 
-/// The model a turn will actually ask for. Settings keep one model across a provider switch,
-/// so an OmniRoute id left behind by `provider = "gemini"` would be rejected by Google; the
-/// provider's own default is the honest fallback.
+/// The model a turn will actually ask for. Settings keep one model across a provider switch, so
+/// an id another provider owns is never sent; the provider's own default is the honest fallback,
+/// and a provider with no default answers `""` so the turn says "pick a model" instead of
+/// sending an empty id.
 fn configured_model(settings: &Settings, provider: &str) -> String {
-    if provider == "gemini" && !rigel_core::agent::gemini::is_model(&settings.model) {
-        return rigel_core::agent::gemini::DEFAULT_MODEL.to_string();
+    match providers::find(provider) {
+        Some(spec) => providers::configured_model(spec, &settings.model),
+        // `settings_set` refuses an unknown provider, so this is a settings file edited by hand;
+        // the saved model is the honest answer there.
+        None => settings.model.trim().to_string(),
     }
-    settings.model.clone()
 }
 
 fn default_provider() -> String {
     "omniroute".to_string()
+}
+
+fn default_ui_scale() -> u16 {
+    100
 }
 
 /// The separate reasoning-effort setting (D28). `medium` matches the old default model.
@@ -77,6 +90,19 @@ fn default_true() -> bool {
 
 fn valid_effort(effort: &str) -> bool {
     matches!(effort, "low" | "medium" | "high")
+}
+
+fn default_terminal_font_size() -> u16 {
+    13
+}
+
+fn default_terminal_scrollback() -> u32 {
+    8_000
+}
+
+/// The coordinator's step bound, as a setting: 10 by default (D19's loop).
+fn default_max_steps() -> u16 {
+    DEFAULT_MAX_STEPS as u16
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -99,6 +125,34 @@ pub struct Settings {
     pub notify_turn_done: bool,
     #[serde(default = "default_true")]
     pub notify_turn_failed: bool,
+    /// The Terminal surface: xterm's font size and scrollback, and the program to open —
+    /// empty means PowerShell on Windows and `$SHELL` elsewhere.
+    #[serde(default = "default_terminal_font_size")]
+    pub terminal_font_size: u16,
+    #[serde(default = "default_terminal_scrollback")]
+    pub terminal_scrollback: u32,
+    #[serde(default)]
+    pub terminal_shell: String,
+    /// Re-sync a skill source whose data is older than the stale window, in the background, so a
+    /// shelf nobody has touched for a day updates itself instead of staying stale.
+    #[serde(default = "default_true")]
+    pub skills_auto_update: bool,
+    /// How many model steps one native turn may take: read → edit → verify → answer, with room
+    /// to recover from a bad tool call.
+    #[serde(default = "default_max_steps")]
+    pub max_steps: u16,
+    /// Whether the model picker opens on chat-eligible rows only. Saved rather than kept per
+    /// popover: a person who works with image or audio models should not re-tick the box on every
+    /// launch.
+    #[serde(default = "default_true")]
+    pub chat_models_only: bool,
+    /// D159: the window's scale, one of 90/100/110/125. Applied to the shell, not the terminal's
+    /// own font, so the PTY keeps its measured cell size.
+    #[serde(default = "default_ui_scale")]
+    pub ui_scale: u16,
+    /// D159: tighter rows in the transcript, list and diff. Layout only; no content is hidden.
+    #[serde(default)]
+    pub compact_density: bool,
 }
 
 impl Default for Settings {
@@ -113,29 +167,75 @@ impl Default for Settings {
             notify_approval: true,
             notify_turn_done: true,
             notify_turn_failed: true,
+            terminal_font_size: default_terminal_font_size(),
+            terminal_scrollback: default_terminal_scrollback(),
+            terminal_shell: String::new(),
+            skills_auto_update: true,
+            max_steps: default_max_steps(),
+            chat_models_only: true,
+            ui_scale: default_ui_scale(),
+            compact_density: false,
         }
     }
 }
 
 #[derive(Debug, Clone, Serialize)]
 pub struct KeyStatus {
-    pub openrouter: bool,
-    pub omniroute: bool,
-    pub openai: bool,
-    pub anthropic: bool,
-    pub cursor: bool,
-    pub gemini: bool,
+    /// `true` per credential name — one entry per provider and one per harness key. A map rather
+    /// than a field per vendor, so the adapter table, `rigel keys status` and this screen cannot
+    /// drift apart. The renderer asks *whether* a key exists and never receives one.
+    pub providers: BTreeMap<String, bool>,
+    /// Whether any **chat** provider has a credential. The launch banner and the composer's hint
+    /// both ask that question, and the adapter table is the only thing that knows the answer —
+    /// a key that belongs to a harness alone does not make a native turn possible.
+    pub native_ready: bool,
 }
 
 fn current_key_status() -> KeyStatus {
+    let store = credentials::KeychainCredentialStore;
     KeyStatus {
-        openrouter: credentials::present(credentials::OPENROUTER),
-        omniroute: credentials::present(credentials::OMNIROUTE),
-        openai: credentials::present(credentials::OPENAI),
-        anthropic: credentials::present(credentials::ANTHROPIC),
-        cursor: credentials::present(credentials::CURSOR),
-        gemini: credentials::present(credentials::GEMINI),
+        providers: credentials::PROVIDERS
+            .iter()
+            .map(|provider| (provider.to_string(), credentials::present(provider)))
+            .collect(),
+        native_ready: providers::all()
+            .iter()
+            .any(|spec| credentials::present_in(&store, spec.id)),
     }
+}
+
+/// One row per adapter, for Settings. Names, hints and whether a credential exists — never a
+/// key, and never the value of one.
+#[derive(Debug, Clone, Serialize)]
+pub struct ProviderRow {
+    pub id: String,
+    pub name: String,
+    pub hint: String,
+    /// The variable a headless run reads the key from.
+    pub env: Option<String>,
+    /// The credential is a short-lived token rather than a key, and the copy says so.
+    pub access_token: bool,
+    pub default_model: Option<String>,
+    pub key_url: Option<String>,
+    pub key_present: bool,
+}
+
+#[tauri::command]
+fn providers_list() -> Result<Vec<ProviderRow>, String> {
+    let store = credentials::KeychainCredentialStore;
+    Ok(providers::all()
+        .iter()
+        .map(|spec| ProviderRow {
+            id: spec.id.to_string(),
+            name: spec.name.to_string(),
+            hint: spec.hint.to_string(),
+            env: credentials::provider_environment_variable(spec.id).map(str::to_string),
+            access_token: spec.access_token,
+            default_model: spec.default_model.map(str::to_string),
+            key_url: spec.key_url.map(str::to_string),
+            key_present: credentials::present_in(&store, spec.id),
+        })
+        .collect())
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -267,6 +367,21 @@ fn skills_index(repo: String, force: bool) -> Result<rigel_core::IngestReport, S
             SyncPolicy::normal()
         };
         index.index_repo(&repo, policy).await.map_err(message)
+    })
+}
+
+/// Re-sync every skill source that is not fresh (`SkillIndex::refresh_stale`). The Shelf page's
+/// Refresh button and the launch-time auto-update both call this; it makes network calls, so it
+/// is never on the path of a search.
+#[tauri::command]
+fn skills_refresh() -> Result<rigel_core::skills::RefreshReport, String> {
+    tauri::async_runtime::block_on(async move {
+        SkillIndex::open(&index_dir())
+            .await
+            .map_err(message)?
+            .refresh_stale()
+            .await
+            .map_err(message)
     })
 }
 
@@ -436,6 +551,129 @@ fn session_list(project: String) -> Result<Vec<Session>, String> {
     })
 }
 
+/// D148: the session list's three edits. Each returns the row as stored, so the window renders
+/// the database's answer instead of its own optimism.
+#[tauri::command]
+fn session_rename(project: String, id: String, title: Option<String>) -> Result<Session, String> {
+    tauri::async_runtime::block_on(async move {
+        SessionService::open(Path::new(&project))
+            .await
+            .map_err(message)?
+            .rename(&id, title.as_deref())
+            .await
+            .map_err(message)
+    })
+}
+
+#[tauri::command]
+fn session_pin(project: String, id: String, pinned: bool) -> Result<Session, String> {
+    tauri::async_runtime::block_on(async move {
+        SessionService::open(Path::new(&project))
+            .await
+            .map_err(message)?
+            .set_pinned(&id, pinned)
+            .await
+            .map_err(message)
+    })
+}
+
+#[tauri::command]
+fn session_archive(project: String, id: String, archived: bool) -> Result<Session, String> {
+    tauri::async_runtime::block_on(async move {
+        SessionService::open(Path::new(&project))
+            .await
+            .map_err(message)?
+            .set_archived(&id, archived)
+            .await
+            .map_err(message)
+    })
+}
+
+/// D154: the project's unresolved work. Open approvals lead the list as one block; their rows
+/// carry the session, agent and turn the asking surface recorded, so the view can open the
+/// transcript row. Everything below it is grouped by session.
+#[tauri::command]
+fn attention_list(project: String) -> Result<Attention, String> {
+    tauri::async_runtime::block_on(async move {
+        let service = SessionService::open(Path::new(&project))
+            .await
+            .map_err(message)?;
+        let view = rigel_core::attention::attention(service.pool(), rigel_core::migrate::now_ms())
+            .await
+            .map_err(message)?;
+        let open = ApprovalBus::new(index_dir()).pending_for(Path::new(&project));
+        Ok(view.with_approvals(&open, Path::new(&project)))
+    })
+}
+
+/// D152: project-local session templates. The file lives beside the session database and is
+/// never committed; the three commands are the only way the window touches it.
+#[tauri::command]
+fn template_list(project: String) -> Result<Vec<SessionTemplate>, String> {
+    SessionTemplates::open(Path::new(&project))
+        .list()
+        .map_err(message)
+}
+
+#[tauri::command]
+fn template_save(project: String, template: SessionTemplate) -> Result<SessionTemplate, String> {
+    SessionTemplates::open(Path::new(&project))
+        .save(template)
+        .map_err(message)
+}
+
+#[tauri::command]
+fn template_delete(project: String, id: String) -> Result<(), String> {
+    SessionTemplates::open(Path::new(&project))
+        .delete(&id)
+        .map_err(message)
+}
+
+/// D156: the recorded chain behind one patch, read-only. A missing link comes back empty; the
+/// window prints "unknown" for it rather than a guess.
+#[tauri::command]
+fn patch_provenance(project: String, patch_id: String) -> Result<Provenance, String> {
+    tauri::async_runtime::block_on(async move {
+        let service = SessionService::open(Path::new(&project))
+            .await
+            .map_err(message)?;
+        rigel_core::provenance::patch(service.pool(), &patch_id)
+            .await
+            .map_err(message)
+    })
+}
+
+/// D150: one list per session, and a toggle so the star is the same command on and off.
+#[tauri::command]
+fn bookmark_list(project: String, session: String) -> Result<Vec<Bookmark>, String> {
+    tauri::async_runtime::block_on(async move {
+        SessionService::open(Path::new(&project))
+            .await
+            .map_err(message)?
+            .bookmarks(&session)
+            .await
+            .map_err(message)
+    })
+}
+
+#[tauri::command]
+fn bookmark_toggle(
+    project: String,
+    session: String,
+    kind: String,
+    target_id: String,
+    label: String,
+) -> Result<Option<Bookmark>, String> {
+    tauri::async_runtime::block_on(async move {
+        SessionService::open(Path::new(&project))
+            .await
+            .map_err(message)?
+            .toggle_bookmark(&session, &kind, &target_id, &label)
+            .await
+            .map_err(message)
+    })
+}
+
 #[tauri::command]
 fn session_get(project: String, id: String) -> Result<Session, String> {
     tauri::async_runtime::block_on(async move {
@@ -457,6 +695,73 @@ fn session_transcript(project: String, id: String) -> Result<Vec<TurnTranscript>
             .transcript(&id)
             .await
             .map_err(message)
+    })
+}
+
+/// D147: the palette's one read. Skills come from the local index; sessions, turns and patches
+/// from this project's database. The current session sorts first, and every section is capped so
+/// a one-letter query cannot return the whole history. A missing index is not a failed search —
+/// the workspace half still answers.
+#[derive(Debug, Clone, Serialize)]
+pub struct PaletteSkill {
+    pub id: String,
+    pub name: String,
+    pub description: String,
+    pub grade: Option<String>,
+    pub source: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct PaletteResults {
+    pub skills: Vec<PaletteSkill>,
+    pub sessions: Vec<rigel_core::SessionHit>,
+    pub turns: Vec<rigel_core::TurnHit>,
+    pub patches: Vec<rigel_core::PatchHit>,
+}
+
+#[tauri::command]
+fn search_all(
+    project: Option<String>,
+    query: String,
+    current_session: Option<String>,
+) -> Result<PaletteResults, String> {
+    tauri::async_runtime::block_on(async move {
+        let mut skills = Vec::new();
+        if !query.trim().is_empty() {
+            if let Ok(index) = SkillIndex::open(&index_dir()).await {
+                if let Ok(hits) = index.search(&query, 6).await {
+                    skills = hits
+                        .into_iter()
+                        .map(|hit| PaletteSkill {
+                            id: hit.id,
+                            name: hit.name,
+                            description: hit.description,
+                            grade: hit.grade,
+                            source: hit.source,
+                        })
+                        .collect();
+                }
+            }
+        }
+
+        let workspace = match project.as_deref().filter(|root| !root.is_empty()) {
+            Some(root) => {
+                let service = SessionService::open(Path::new(root))
+                    .await
+                    .map_err(message)?;
+                rigel_core::search::workspace(service.pool(), &query, current_session.as_deref(), 6)
+                    .await
+                    .map_err(message)?
+            }
+            None => rigel_core::WorkspaceHits::default(),
+        };
+
+        Ok(PaletteResults {
+            skills,
+            sessions: workspace.sessions,
+            turns: workspace.turns,
+            patches: workspace.patches,
+        })
     })
 }
 
@@ -852,32 +1157,21 @@ fn turn_send(
         });
     }
 
-    // A local router that is down is a process to launch, not a configuration error: the
-    // first turn after a reboot starts OmniRoute before it sends anything.
-    let model: Arc<dyn Model> = match provider.as_str() {
-        "openrouter" => {
-            let key = credentials::get(credentials::OPENROUTER)
-                .map_err(|error| format!("{error}. Add an OpenRouter key in Settings."))?;
-            Arc::new(OpenRouterModel::new(key))
-        }
-        "gemini" => {
-            let key = credentials::get(credentials::GEMINI)
-                .map_err(|error| format!("{error}. Add a Gemini key in Settings."))?;
-            Arc::new(rigel_core::agent::gemini::model(key))
-        }
-        "omniroute" => {
-            let key = credentials::get(credentials::OMNIROUTE)
-                .map_err(|error| format!("{error}. Add an OmniRoute key in Settings."))?;
-            tauri::async_runtime::block_on(rigel_core::agent::omniroute::ensure_server())
-                .map_err(|error| format!("{error} Start it from Settings."))?;
-            Arc::new(rigel_core::agent::omniroute::model(key))
-        }
-        other => {
-            return Err(format!(
-                "unknown provider `{other}`; use omniroute, openrouter or gemini"
-            ));
-        }
-    };
+    // A provider with no default (its roster is read live by the picker) refuses an empty model
+    // id: the provider's own 400 would say less than this does.
+    if model_name.trim().is_empty() {
+        return Err(format!(
+            "no model chosen for `{provider}`; pick one in the model picker"
+        ));
+    }
+
+    // One row of the adapter table says where the turn goes: the key, the base URL and the
+    // request profile all come from it. A local router that is down is a process to launch, not
+    // a configuration error, and `build` starts it before it sends anything.
+    let model: Arc<dyn Model> = tauri::async_runtime::block_on(providers::build(
+        &provider,
+        &credentials::KeychainCredentialStore,
+    ))?;
 
     let cancels = state.cancels.clone();
     let budget = Arc::new(BudgetService::new(
@@ -903,10 +1197,26 @@ fn turn_send(
     .with_command_approval(Arc::new(WindowApprover {
         app: app.clone(),
         bus: ApprovalBus::new(index_dir()),
+        session_id: session.clone(),
+        agent_id: agent.clone(),
+        turn_id: turn.id.clone(),
+        project_root: root.clone(),
     }))
     .with_plan_approval(Arc::new(WindowApprover {
         app: app.clone(),
         bus: ApprovalBus::new(index_dir()),
+        session_id: session.clone(),
+        agent_id: agent.clone(),
+        turn_id: turn.id.clone(),
+        project_root: root.clone(),
+    }))
+    .with_mail_approval(Arc::new(WindowApprover {
+        app: app.clone(),
+        bus: ApprovalBus::new(index_dir()),
+        session_id: session.clone(),
+        agent_id: agent.clone(),
+        turn_id: turn.id.clone(),
+        project_root: root.clone(),
     }));
     let coordinator = Coordinator {
         session: service.clone(),
@@ -918,7 +1228,7 @@ fn turn_send(
         project_root: root,
         model_name,
         effort: Some(effort),
-        max_steps: DEFAULT_MAX_STEPS,
+        max_steps: usize::from(settings.max_steps),
         subagents: SubagentPolicy::default(),
         depth: 0,
         parent_cancel: None,
@@ -988,14 +1298,24 @@ fn turn_send(
 struct WindowApprover {
     app: tauri::AppHandle,
     bus: ApprovalBus,
+    /// D154: the turn this approver answers for. One is built per `turn_send`, so every
+    /// question it publishes can point back at the transcript row that asked.
+    session_id: String,
+    agent_id: String,
+    turn_id: String,
+    /// D154: the project this question belongs to; Attention only shows its own.
+    project_root: PathBuf,
 }
 
 #[async_trait::async_trait]
 impl CommandApprover for WindowApprover {
     async fn approve(&self, request: &CommandRequest) -> CommandDecision {
         let key = format!("command:{}", request.command);
-        let pending = PendingApproval::now("command", &key, &request.command).with_detail(
-            serde_json::json!({
+        let pending = PendingApproval::now("command", &key, &request.command)
+            .in_project(&self.project_root)
+            .in_session(&self.session_id, &self.agent_id)
+            .on_turn(&self.turn_id)
+            .with_detail(serde_json::json!({
                 "cwd": request.cwd.display().to_string(),
                 "project_root": request.project_root.display().to_string(),
                 "timeout_secs": request.timeout_secs,
@@ -1010,8 +1330,7 @@ impl CommandApprover for WindowApprover {
                         }).collect::<Vec<_>>(),
                     })
                 }),
-            }),
-        );
+            }));
         // Nudge the card immediately; it also polls, so a missed event is not a lost question.
         let _ = self.app.emit("rigel://approval", &pending);
         match self
@@ -1021,6 +1340,36 @@ impl CommandApprover for WindowApprover {
         {
             Ok(scope) => CommandDecision::Allow(scope),
             Err(_) => CommandDecision::Deny,
+        }
+    }
+}
+
+/// One outgoing email is a question on the same card. A sent message cannot be recalled, so the
+/// recipient, subject and body are all put in front of the user; silence is a refusal, exactly
+/// as it is for a command.
+#[async_trait::async_trait]
+impl MailApprover for WindowApprover {
+    async fn approve(&self, request: &MailRequest) -> MailDecision {
+        let key = format!("mail:{}:{}", request.to, request.subject);
+        let title = format!("Send email to {}", request.to);
+        let pending = PendingApproval::now("mail", &key, &title)
+            .in_project(&self.project_root)
+            .in_session(&self.session_id, &self.agent_id)
+            .on_turn(&self.turn_id)
+            .with_detail(serde_json::json!({
+                "from": request.from,
+                "to": request.to,
+                "subject": request.subject,
+                "text": request.text,
+            }));
+        let _ = self.app.emit("rigel://approval", &pending);
+        match self
+            .bus
+            .ask(pending, std::time::Duration::from_secs(600))
+            .await
+        {
+            Ok(_) => MailDecision::Allow,
+            Err(_) => MailDecision::Deny,
         }
     }
 }
@@ -1044,6 +1393,9 @@ impl PlanApprover for WindowApprover {
             format!("plan:{}:{}", request.session_id, request.agents.len()),
             format!("writable agents: {roles}"),
         )
+        .in_project(&self.project_root)
+        .in_session(&self.session_id, &self.agent_id)
+        .on_turn(&self.turn_id)
         .with_detail(serde_json::json!({
             "session_id": request.session_id,
             "agents": request.agents,
@@ -1055,10 +1407,11 @@ impl PlanApprover for WindowApprover {
     }
 }
 
-/// Every open question, oldest first. The card polls this after a turn starts.
+/// D154: every open question for this project, oldest first. The card polls this after a turn
+/// starts; another project's question is not this window's to answer.
 #[tauri::command]
-fn approval_pending() -> Vec<PendingApproval> {
-    ApprovalBus::new(index_dir()).pending()
+fn approval_pending(project: String) -> Vec<PendingApproval> {
+    ApprovalBus::new(index_dir()).pending_for(Path::new(&project))
 }
 
 /// Answer one question. `None` is a refusal, which is also what an unknown scope means: an
@@ -1769,149 +2122,15 @@ fn omniroute_start() -> Result<rigel_core::ServerStatus, String> {
     tauri::async_runtime::block_on(rigel_core::agent::omniroute::ensure_server())
 }
 
-/// One row in the model picker. The provider travels with the id so choosing a model also
-/// chooses where the turn goes; the window never has to know which key is configured.
-#[derive(Debug, Clone, serde::Serialize)]
-pub struct ModelOption {
-    pub id: String,
-    pub provider: String,
-    /// The provider's human name for the model, when it publishes one.
-    pub name: Option<String>,
-    /// OpenRouter marks zero-priced rows; free rows stay visible in the picker.
-    pub free: bool,
-}
-
-fn is_zero(value: Option<&serde_json::Value>) -> bool {
-    value
-        .and_then(serde_json::Value::as_str)
-        .map(|price| price.trim().parse::<f64>().is_ok_and(|price| price == 0.0))
-        .unwrap_or(false)
-}
-
-/// The catalogue for one provider. The key is read in Rust and only becomes a bearer header; the
-/// window never sees it. OpenRouter's public list is read even without a key so its full roster,
-/// including the free models, is visible to an OmniRoute install.
-async fn fetch_catalog(provider: &str) -> Result<Vec<ModelOption>, String> {
-    if provider == "gemini" {
-        return Ok(vec![ModelOption {
-            id: rigel_core::agent::gemini::DEFAULT_MODEL.to_string(),
-            provider: "gemini".to_string(),
-            name: Some("Gemini default".to_string()),
-            free: false,
-        }]);
-    }
-
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(20))
-        .build()
-        .map_err(message)?;
-
-    let response = match provider {
-        "openrouter" => {
-            let mut request = client.get("https://openrouter.ai/api/v1/models");
-            if let Ok(key) = credentials::get(credentials::OPENROUTER) {
-                request = request.bearer_auth(key);
-            }
-            request.send().await
-        }
-        "omniroute" => {
-            let key = credentials::get(credentials::OMNIROUTE)
-                .map_err(|error| format!("{error}. Add an OmniRoute key in Settings."))?;
-            rigel_core::agent::omniroute::ensure_server().await?;
-            let base = rigel_core::agent::omniroute::base_url();
-            client
-                .get(format!("{base}/models"))
-                .bearer_auth(key)
-                .send()
-                .await
-        }
-        other => return Err(format!("unknown provider `{other}`")),
-    }
-    .map_err(|error| format!("could not read the model catalogue: {error}"))?;
-
-    if !response.status().is_success() {
-        return Err(format!(
-            "the model catalogue answered {}",
-            response.status()
-        ));
-    }
-
-    let value: serde_json::Value = response
-        .json()
-        .await
-        .map_err(|error| format!("the model catalogue returned unreadable data: {error}"))?;
-    let mut models: Vec<ModelOption> = value
-        .get("data")
-        .and_then(serde_json::Value::as_array)
-        .map(|rows| {
-            rows.iter()
-                .filter_map(|row| {
-                    let id = row.get("id").and_then(serde_json::Value::as_str)?;
-                    let name = row
-                        .get("name")
-                        .and_then(serde_json::Value::as_str)
-                        .map(str::to_string)
-                        .filter(|name| name != id);
-                    let pricing = row.get("pricing");
-                    let free = id.ends_with(":free")
-                        || (is_zero(pricing.and_then(|price| price.get("prompt")))
-                            && is_zero(pricing.and_then(|price| price.get("completion"))));
-                    Some(ModelOption {
-                        id: id.to_string(),
-                        provider: provider.to_string(),
-                        name,
-                        free,
-                    })
-                })
-                .collect()
-        })
-        .unwrap_or_default();
-    models.sort_by(|one, other| one.id.cmp(&other.id));
-    models.dedup_by(|one, other| one.id == other.id);
-    if models.is_empty() {
-        return Err("the provider returned no models".to_string());
-    }
-    Ok(models)
-}
-
+/// The model picker's rows. The catalogue itself lives in the core (`agent::catalog`) so the
+/// window and `rigel models` cannot disagree about what a provider offers.
 #[tauri::command]
 fn models_list() -> Result<Vec<ModelOption>, String> {
     let provider = load_settings().provider.trim().to_lowercase();
-    tauri::async_runtime::block_on(async move {
-        let mut catalog = Vec::new();
-        let mut problems = Vec::new();
-        match fetch_catalog(&provider).await {
-            Ok(rows) => catalog.extend(rows),
-            Err(error) => problems.push(error),
-        }
-        // The whole OpenRouter roster, free models included, is offered beside the current
-        // provider. Picking one switches the provider, so there is no separate switch to find.
-        if provider != "openrouter" && credentials::present(credentials::OPENROUTER) {
-            match fetch_catalog("openrouter").await {
-                Ok(rows) => catalog.extend(rows),
-                Err(error) => problems.push(error),
-            }
-        }
-        if catalog.is_empty() {
-            return Err(if problems.is_empty() {
-                "no provider catalogue was reachable".to_string()
-            } else {
-                problems.join("; ")
-            });
-        }
-
-        let mut seen = std::collections::HashSet::new();
-        catalog.retain(|option| seen.insert(option.id.clone()));
-        // Current provider first, then free rows, then name order: the useful end of a long
-        // roster stays reachable without typing a search first.
-        catalog.sort_by(|one, other| {
-            (one.provider != provider)
-                .cmp(&(other.provider != provider))
-                .then_with(|| other.free.cmp(&one.free))
-                .then_with(|| one.id.to_lowercase().cmp(&other.id.to_lowercase()))
-        });
-        Ok(catalog)
-    })
+    tauri::async_runtime::block_on(catalog::roster(
+        &provider,
+        &credentials::KeychainCredentialStore,
+    ))
 }
 
 /// Effort is its own setting (D28). OmniRoute happens to encode the same value in the model
@@ -2039,33 +2258,15 @@ fn prompt_refine(
         &settings.effort,
         &provider,
     );
-    let (model, model_name): (Arc<dyn Model>, String) = match provider.as_str() {
-        "openrouter" => {
-            let key = credentials::get(credentials::OPENROUTER)
-                .map_err(|error| format!("{error}. Add an OpenRouter key in Settings."))?;
-            (Arc::new(OpenRouterModel::new(key)), model_name)
-        }
-        "omniroute" => {
-            let key = credentials::get(credentials::OMNIROUTE)
-                .map_err(|error| format!("{error}. Add an OmniRoute key in Settings."))?;
-            tauri::async_runtime::block_on(rigel_core::agent::omniroute::ensure_server())
-                .map_err(|error| format!("{error} Start it from Settings."))?;
-            (
-                Arc::new(rigel_core::agent::omniroute::model(key)),
-                model_name,
-            )
-        }
-        "gemini" => {
-            let key = credentials::get(credentials::GEMINI)
-                .map_err(|error| format!("{error}. Add a Gemini key in Settings."))?;
-            (Arc::new(rigel_core::agent::gemini::model(key)), model_name)
-        }
-        other => {
-            return Err(format!(
-                "unknown provider `{other}`; use omniroute, openrouter or gemini"
-            ));
-        }
-    };
+    if model_name.trim().is_empty() {
+        return Err(format!(
+            "no model chosen for `{provider}`; pick one in the model picker"
+        ));
+    }
+    let model: Arc<dyn Model> = tauri::async_runtime::block_on(providers::build(
+        &provider,
+        &credentials::KeychainCredentialStore,
+    ))?;
 
     let refiner = rigel_core::agent::PromptRefiner::new(model, model_name);
     let root = project.map(PathBuf::from);
@@ -2088,15 +2289,9 @@ fn settings_get() -> Result<Settings, String> {
 
 /// Write settings, creating the app data directory if this is a first run.
 #[tauri::command]
-fn settings_set(settings: Settings) -> Result<Settings, String> {
-    if !matches!(
-        settings.provider.as_str(),
-        "omniroute" | "openrouter" | "gemini"
-    ) {
-        return Err(format!(
-            "unknown provider `{}`; use omniroute, openrouter or gemini",
-            settings.provider
-        ));
+fn settings_set(mut settings: Settings) -> Result<Settings, String> {
+    if providers::find(&settings.provider).is_none() {
+        return Err(providers::unknown_provider(&settings.provider));
     }
     if !valid_effort(&settings.effort) {
         return Err(format!(
@@ -2104,6 +2299,17 @@ fn settings_set(settings: Settings) -> Result<Settings, String> {
             settings.effort
         ));
     }
+    // A settings file is editable by hand, so the numbers are clamped here rather than trusted:
+    // a 3-pixel terminal or a 10 000-step turn is a bug report, not a preference.
+    settings.terminal_font_size = settings.terminal_font_size.clamp(10, 20);
+    settings.terminal_scrollback = settings.terminal_scrollback.clamp(1_000, 100_000);
+    settings.terminal_shell = settings.terminal_shell.trim().to_string();
+    settings.max_steps = settings.max_steps.clamp(1, 50);
+    // D159: four steps, so a hand-edited 117 is a mistake rather than a new mode.
+    if !matches!(settings.ui_scale, 90 | 100 | 110 | 125) {
+        settings.ui_scale = default_ui_scale();
+    }
+
     let path = settings_path();
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).map_err(message)?;
@@ -2217,6 +2423,211 @@ fn installed_per_machine() -> bool {
         .filter_map(std::env::var_os)
         .map(|root| PathBuf::from(root).to_string_lossy().to_lowercase())
         .any(|root| !root.is_empty() && exe.starts_with(&root))
+}
+
+/* ----------------------------------- mail ----------------------------------- */
+
+/// The inbox and whether a key is stored. No network call: the page has to render an
+/// unconfigured app rather than fail to open.
+#[tauri::command]
+fn mail_status() -> Result<rigel_core::MailStatus, String> {
+    Ok(rigel_core::Mail::status_at(&index_dir()))
+}
+
+/// Save the inbox address in `agentmail.json`. The address is not a secret.
+#[tauri::command]
+fn mail_configure(inbox: String) -> Result<rigel_core::MailStatus, String> {
+    let config = rigel_core::MailConfig::new(inbox).map_err(message)?;
+    rigel_core::MailConfig::save(&index_dir(), &config).map_err(message)?;
+    Ok(rigel_core::Mail::status_at(&index_dir()))
+}
+
+/// The API key is written to the OS keychain and never read back into this window.
+#[tauri::command]
+fn mail_set_key(api_key: String) -> Result<rigel_core::MailStatus, String> {
+    let api_key = api_key.trim();
+    if api_key.is_empty() {
+        return Err("the AgentMail API key is empty".to_string());
+    }
+    credentials::set(credentials::AGENTMAIL, api_key).map_err(|error| error.to_string())?;
+    Ok(rigel_core::Mail::status_at(&index_dir()))
+}
+
+/// The conversations in the inbox. Subjects and counts only: no body is fetched until one is
+/// opened, so checking the mailbox costs a single request.
+#[tauri::command]
+async fn mail_threads(limit: Option<usize>) -> Result<Vec<rigel_core::ThreadSummary>, String> {
+    let mail = rigel_core::Mail::open(&index_dir()).map_err(message)?;
+    mail.threads(limit.unwrap_or(10)).await.map_err(message)
+}
+
+/// One conversation, oldest message first. This is the read path the page shows, and the one
+/// that fills in any body the thread listing left out.
+#[tauri::command]
+async fn mail_thread(thread_id: String) -> Result<rigel_core::ThreadView, String> {
+    let mail = rigel_core::Mail::open(&index_dir()).map_err(message)?;
+    mail.thread(&thread_id).await.map_err(message)
+}
+
+/// A send the user asked for from the page. An agent's send goes through the approval card
+/// instead; this is the case where the click itself is the consent.
+#[tauri::command]
+async fn mail_send(
+    to: String,
+    subject: String,
+    text: String,
+) -> Result<rigel_core::SentMail, String> {
+    let mail = rigel_core::Mail::open(&index_dir()).map_err(message)?;
+    mail.send(&to, &subject, &text).await.map_err(message)
+}
+
+/* ---------------------------------- cloud ---------------------------------- */
+
+/// The project and the account, read without a network call. An unconfigured app answers with
+/// `configured: false` so the page can say what to set instead of failing to open.
+#[tauri::command]
+fn cloud_status() -> Result<rigel_core::cloud::CloudStatus, String> {
+    rigel_core::cloud::Cloud::status_at(&index_dir()).map_err(message)
+}
+
+/// Save the Firebase project id and web API key in `cloud.json`. The key is public by design;
+/// the Firestore rules, not this file, decide who may read a document.
+#[tauri::command]
+fn cloud_configure(
+    project: String,
+    api_key: String,
+) -> Result<rigel_core::cloud::CloudStatus, String> {
+    let config = rigel_core::cloud::CloudConfig::new(project, api_key).map_err(message)?;
+    rigel_core::cloud::CloudConfig::save(&index_dir(), &config).map_err(message)?;
+    rigel_core::cloud::Cloud::status_at(&index_dir()).map_err(message)
+}
+
+/// One sign-in. The password is used for this call and is never stored; only the refresh token
+/// reaches the OS keychain.
+#[tauri::command]
+async fn cloud_login(
+    email: String,
+    password: String,
+) -> Result<rigel_core::cloud::CloudStatus, String> {
+    rigel_core::cloud::Cloud::open(&index_dir())
+        .map_err(message)?
+        .sign_in(&email, &password)
+        .await
+        .map_err(message)
+}
+
+/// Create the account and keep the session Firebase issues for it — a new account is signed in,
+/// not sent back to the form.
+#[tauri::command]
+async fn cloud_signup(
+    email: String,
+    password: String,
+) -> Result<rigel_core::cloud::CloudStatus, String> {
+    rigel_core::cloud::Cloud::open(&index_dir())
+        .map_err(message)?
+        .sign_up(&email, &password)
+        .await
+        .map_err(message)
+}
+
+/// Ask Firebase to email a reset link. The answer is the same for an unknown address, so the
+/// page cannot be used to probe for accounts.
+#[tauri::command]
+async fn cloud_reset_password(email: String) -> Result<String, String> {
+    rigel_core::cloud::Cloud::open(&index_dir())
+        .map_err(message)?
+        .send_password_reset(&email)
+        .await
+        .map_err(message)
+}
+
+/// Ask Firebase to email a verification link to the signed-in account. Sending again is the
+/// resend control; the link, its template and its expiry belong to Firebase.
+#[tauri::command]
+async fn cloud_send_verification() -> Result<String, String> {
+    rigel_core::cloud::Cloud::open(&index_dir())
+        .map_err(message)?
+        .send_verification_email()
+        .await
+        .map_err(message)
+}
+
+/// Re-read the verification state from Firebase and keep it in the keychain session.
+#[tauri::command]
+async fn cloud_check_verification() -> Result<rigel_core::cloud::CloudStatus, String> {
+    rigel_core::cloud::Cloud::open(&index_dir())
+        .map_err(message)?
+        .check_email_verification()
+        .await
+        .map_err(message)
+}
+
+/// Point App Check at the user's attestation endpoint, or turn it off with `None` or an empty
+/// string. The endpoint is not secret; the tokens it returns are, and never reach the renderer.
+#[tauri::command]
+fn cloud_app_check(url: Option<String>) -> Result<rigel_core::cloud::CloudStatus, String> {
+    let mut config = rigel_core::cloud::CloudConfig::load(&index_dir())
+        .map_err(message)?
+        .ok_or_else(|| message(rigel_core::cloud::CloudError::NotConfigured))?;
+    config.app_check = url
+        .map(|url| url.trim().to_string())
+        .filter(|url| !url.is_empty())
+        .map(|attest_url| rigel_core::cloud::AppCheckConfig { attest_url });
+    rigel_core::cloud::CloudConfig::save(&index_dir(), &config).map_err(message)?;
+    rigel_core::cloud::Cloud::status_at(&index_dir()).map_err(message)
+}
+
+#[tauri::command]
+fn cloud_logout() -> Result<rigel_core::cloud::CloudStatus, String> {
+    rigel_core::cloud::Cloud::open(&index_dir())
+        .map_err(message)?
+        .sign_out()
+        .map_err(message)
+}
+
+/// Mirror the shelf's metadata into the user's project. Bodies stay in the local blob store.
+///
+/// Sync rather than `async fn`: the SQLite future's `&Path` borrow is not `Send` enough for the
+/// command macro's boxed future, the same reason the session commands block on their runtime.
+#[tauri::command]
+fn cloud_push() -> Result<rigel_core::cloud::PushReport, String> {
+    let dir = index_dir();
+    tauri::async_runtime::block_on(async move {
+        let cloud = rigel_core::cloud::Cloud::open(&dir).map_err(message)?;
+        let index = rigel_core::SkillIndex::open(&dir).await.map_err(message)?;
+        cloud.push(&index).await.map_err(message)
+    })
+}
+
+/// Publish one session's prompts and assistant text to the user's Firestore project, where the
+/// phone lists and reads them. Tool calls, file changes and the project path never leave here.
+#[tauri::command]
+fn cloud_publish_session(
+    project: String,
+    session: String,
+) -> Result<rigel_core::cloud::PublishReport, String> {
+    let dir = index_dir();
+    tauri::async_runtime::block_on(async move {
+        let cloud = rigel_core::cloud::Cloud::open(&dir).map_err(message)?;
+        let service = SessionService::open(Path::new(&project))
+            .await
+            .map_err(message)?;
+        cloud
+            .publish_session(&service, &session)
+            .await
+            .map_err(message)
+    })
+}
+
+/// Bring down rows this machine does not have. A local body is never replaced.
+#[tauri::command]
+fn cloud_pull() -> Result<rigel_core::cloud::PullReport, String> {
+    let dir = index_dir();
+    tauri::async_runtime::block_on(async move {
+        let cloud = rigel_core::cloud::Cloud::open(&dir).map_err(message)?;
+        let index = rigel_core::SkillIndex::open(&dir).await.map_err(message)?;
+        cloud.pull(&index).await.map_err(message)
+    })
 }
 
 /// Replay-ready usage for the status bar: one place computes the money and tokens.
@@ -2335,14 +2746,41 @@ fn warm_chat(project: Option<String>) {
         .ok();
 }
 
+/// Re-sync every skill source that is not fresh, in the background, when the shelf's auto-update
+/// switch is on (it defaults to on). Same contract as `warm_router`: a thread, a dropped error,
+/// and the shelf as the place the result appears — a source that fails is marked `broken` with
+/// its reason rather than interrupting the launch. A source inside the stale window is not
+/// touched, so this is one tree call per source per day, not a request per launch.
+fn warm_skills() {
+    if !load_settings().skills_auto_update {
+        return;
+    }
+    std::thread::Builder::new()
+        .name("rigel-skills".to_string())
+        .spawn(|| {
+            let Ok(runtime) = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+            else {
+                return;
+            };
+            let _ = runtime.block_on(async move {
+                let index = SkillIndex::open(&index_dir()).await?;
+                index.refresh_stale().await
+            });
+        })
+        .ok();
+}
+
 /// Every local service a session can need, started as the window opens and again once the
 /// remembered project is restored (the chat checkout sits beside it). The window calls this
-/// once; neither start blocks the launch, and a service that cannot start is a status the
+/// once; none of the starts blocks the launch, and a service that cannot start is a status the
 /// relevant tab explains rather than an error at boot.
 #[tauri::command]
 fn servers_start(project: Option<String>) {
     warm_router();
     warm_chat(project);
+    warm_skills();
 }
 
 /// A close request hides the window rather than quitting while the tray exists. The flag flips
@@ -2443,8 +2881,19 @@ pub fn run() {
             attachment_import,
             session_start,
             session_list,
+            session_rename,
+            session_pin,
+            session_archive,
+            bookmark_list,
+            bookmark_toggle,
+            patch_provenance,
+            template_list,
+            template_save,
+            template_delete,
+            attention_list,
             session_get,
             session_transcript,
+            search_all,
             session_resume,
             diagnostics_export,
             session_export,
@@ -2495,6 +2944,7 @@ pub fn run() {
             spend_report,
             task_cap_set,
             harness_probe,
+            providers_list,
             servers_start,
             omniroute_status,
             omniroute_start,
@@ -2521,12 +2971,31 @@ pub fn run() {
             update_set,
             update_check,
             update_install,
+            cloud_status,
+            cloud_configure,
+            cloud_login,
+            cloud_signup,
+            cloud_reset_password,
+            cloud_send_verification,
+            cloud_check_verification,
+            cloud_app_check,
+            cloud_logout,
+            mail_status,
+            mail_configure,
+            mail_set_key,
+            mail_threads,
+            mail_thread,
+            mail_send,
+            cloud_push,
+            cloud_pull,
+            cloud_publish_session,
             usage_summary,
             skills_search,
             skills_count,
             skills_load,
             skills_status,
-            skills_index
+            skills_index,
+            skills_refresh
         ])
         .build(tauri::generate_context!())
         .expect("rigel: failed to build the window")
@@ -2612,5 +3081,15 @@ mod tests {
             .expect_err("a directory must be refused");
 
         assert!(error.contains("is not a file"), "{error}");
+    }
+
+    #[test]
+    fn an_older_settings_file_gains_the_chat_filter() {
+        // A settings file written before D124 has no `chat_models_only`. The picker must still
+        // open on chat rows, and the missing field must not cost the rest of the file.
+        let old = "theme = \"dark\"\ndefault_budget_cents = 500\nunattended_default = false\n";
+        let settings: Settings = toml::from_str(old).expect("an older file should still parse");
+        assert!(settings.chat_models_only);
+        assert_eq!(settings.default_budget_cents, 500);
     }
 }
