@@ -73,6 +73,20 @@ pub enum CloudCommand {
         json: bool,
     },
 
+    /// Queue one turn for Rigel's runner and print the run's id.
+    ///
+    /// The prompt is stored once, under this account, and nothing else is collected with it.
+    Run {
+        /// The prompt. Quote it, or pass several words.
+        #[arg(required = true)]
+        prompt: Vec<String>,
+        /// Ceiling on the runner's work, in minutes. The queue records it; the runner enforces it.
+        #[arg(long, default_value_t = 15)]
+        minutes: u32,
+        #[arg(long)]
+        json: bool,
+    },
+
     /// Point App Check at an attestation endpoint, or turn it off.
     ///
     /// The endpoint is a service you run; it answers with a token the Firebase Admin SDK minted
@@ -592,6 +606,35 @@ pub async fn run(dir: &Path, command: CloudCommand) -> ExitCode {
                         println!(
                             "sent       prompts and assistant text; tool calls, file changes and \
                              the project path stay local"
+                        );
+                    }
+                    ExitCode::SUCCESS
+                }
+                Err(error) => failure(error, as_json),
+            }
+        }
+
+        CloudCommand::Run {
+            prompt,
+            minutes,
+            json: as_json,
+        } => {
+            let cloud = match Cloud::open(dir) {
+                Ok(cloud) => cloud,
+                Err(error) => return failure(error, as_json),
+            };
+            match cloud.enqueue_run(&prompt.join(" "), minutes).await {
+                Ok(id) => {
+                    if as_json {
+                        println!(
+                            "{}",
+                            json!({ "id": id, "state": "queued", "maxMinutes": minutes })
+                        );
+                    } else {
+                        println!("queued     {id} · {minutes} min ceiling");
+                        println!("state      queued");
+                        println!(
+                            "next       no runner leases this queue yet, so the run stays queued"
                         );
                     }
                     ExitCode::SUCCESS

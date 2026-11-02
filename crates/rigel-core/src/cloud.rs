@@ -1398,6 +1398,35 @@ impl Cloud {
         self.decode(response).await
     }
 
+    /// Queue one turn for the runner, and return the run's id.
+    ///
+    /// A run is a document under the account's own subtree, so the existing rules cover it:
+    /// only this account can create or read it, and a token carrying the admin claim can read
+    /// it to lease work. Nothing executes here; state stays queued until a runner takes it.
+    pub async fn enqueue_run(&self, prompt: &str, max_minutes: u32) -> Result<String, CloudError> {
+        let session = self.token().await?;
+        let created_at = crate::migrate::now_ms();
+        let id = format!("{created_at:x}-{:x}", std::process::id());
+        let document = format!(
+            "projects/{}/databases/(default)/documents/users/{}/runs/{}",
+            self.config.project_id, session.uid, id
+        );
+        let write = json!({
+            "update": {
+                "name": document,
+                "fields": {
+                    "prompt": { "stringValue": prompt },
+                    "state": { "stringValue": "queued" },
+                    "maxMinutes": { "integerValue": max_minutes.to_string() },
+                    "createdAtMs": { "integerValue": created_at.to_string() },
+                    "sponsor": { "nullValue": null },
+                },
+            }
+        });
+        self.commit(&session, vec![write]).await?;
+        Ok(id)
+    }
+
     /* ------------------------------------ HTTP ------------------------------------ */
 
     /// The value of `X-Firebase-AppCheck`, or `None` when App Check is off.

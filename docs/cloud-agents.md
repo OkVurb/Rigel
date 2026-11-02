@@ -90,3 +90,24 @@ Not built, in dependency order:
 
 Step 2 is the honest first slice: it is observable, it fails loudly when there is no runner, and it
 does not require anyone to approve a bill before it can be tested.
+
+## The queue document
+
+A run is one Firestore document at
+
+```
+users/{uid}/runs/{id}
+  prompt:       string      the turn, stored once and never used for targeting
+  state:        string      queued | leased | running | done | failed
+  maxMinutes:   integer     ceiling the runner enforces, recorded at enqueue time
+  createdAtMs:  integer     when the desktop queued it
+  sponsor:      null        set only when a sponsor's bucket pays for the run
+```
+
+No rules change was needed: firestore.rules already allows an account to read and write its
+own subtree and lets a token carrying the admin claim read any subtree, which is exactly the
+shape a runner needs to lease work without impersonating anyone.
+
+rigel cloud run "..." --minutes 15 writes this document and prints its id. With no runner
+attached the state stays queued, which is the honest result and the useful test: the write
+path, the rules and the auth are exercised before any bill can exist.
