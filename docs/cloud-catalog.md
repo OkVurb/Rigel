@@ -65,6 +65,17 @@ node scripts/publish-catalog.mjs                # skills + MCP servers
 node scripts/publish-catalog.mjs --skills-only  # after a sweep
 ```
 
+A fresh machine can start from the published rows instead of crawling:
+
+```bash
+rigel skills seed            # metadata only: no bodies, nothing graded
+rigel skills seed --limit 50 # a quick look
+```
+
+Seeded rows render as `not scanned` and `not fetched`, and `write_skill` only ever fills a body
+or a grade it does not already have — so seeding can never make an unreviewed skill look reviewed,
+and re-indexing the repository later upgrades the row in place.
+
 `publish-catalog.mjs` writes in chunks of 800 through `firebase database:update`, so a mid-run failure
 leaves the earlier chunks in place and a re-run is idempotent — every row is keyed by its own hash.
 
@@ -94,3 +105,14 @@ What is real today:
   SkillsMP rate-limited at 50 requests/day. Indexing repositories costs 2 GitHub API calls each at
   60/hour unauthenticated — one repo roughly every two minutes — or 5,000/hour with a token.
 - Reaching 100k+ means a token, a multi-hour crawl, and ~35% of the raw rows collapsing as duplicates.
+
+## The standing answer to "where are the 300,000 skills?"
+
+Use this sentence verbatim; do not re-derive it per release and never round up.
+
+> The catalogue holds 11,587 skills measured from public sources. Independent censuses put the
+> entire public universe at roughly 238,000 unique skills, so a larger number would be padding
+> rather than coverage.
+
+The count is served from `/catalog/v1/meta.json` and the landing page reads it at load, so the
+number in the FAQ and the number in the database cannot disagree.

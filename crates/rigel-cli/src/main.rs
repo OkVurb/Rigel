@@ -265,6 +265,18 @@ enum SkillCommand {
         json: bool,
     },
 
+    /// Seed the shelf from the published catalogue: metadata only, no bodies, nothing reviewed.
+    Seed {
+        /// Override the catalogue URL (a local fixture, or another project's database).
+        #[arg(long)]
+        url: Option<String>,
+        /// Stop after this many rows; 0 seeds everything.
+        #[arg(long, default_value_t = 0)]
+        limit: usize,
+        #[arg(long)]
+        json: bool,
+    },
+
     /// Walk a GitHub repository (or URL) into the index.
     Index {
         target: String,
@@ -550,6 +562,55 @@ async fn run_skills(dir: &Path, command: SkillCommand) -> ExitCode {
     };
 
     match command {
+
+        SkillCommand::Seed { url, limit, json } => {
+
+            let index = match SkillIndex::open(dir).await {
+
+                Ok(index) => index,
+
+                Err(error) => return skills_failure(error, json),
+
+            };
+
+            let target = url.unwrap_or_else(|| SkillIndex::CATALOG_URL.to_string());
+
+            match index.seed_catalog(&target, limit).await {
+
+                Ok(report) => {
+
+                    if json {
+
+                        println!("{}", serde_json::to_string_pretty(&report).unwrap_or_default());
+
+                    } else {
+
+                        println!(
+
+                            "seeded {} of {} rows from the published catalogue ({} had no id)",
+
+                            report.written, report.rows, report.skipped
+
+                        );
+
+                        println!(
+
+                            "no bodies were downloaded: seeded rows stay `not scanned` until their repo is indexed"
+
+                        );
+
+                    }
+
+                    ExitCode::SUCCESS
+
+                }
+
+                Err(error) => skills_failure(error, json),
+
+            }
+
+        }
+
         SkillCommand::Search {
             query,
             limit,

@@ -51,6 +51,16 @@ pub struct IngestReport {
 }
 
 #[derive(Debug, Clone, Serialize)]
+pub struct SeedReport {
+    /// Rows present in the reply.
+    pub rows: usize,
+    /// Rows written to this index.
+    pub written: usize,
+    /// Rows without an id, which the publisher should never have written.
+    pub skipped: usize,
+}
+
+#[derive(Debug, Clone, Serialize)]
 pub struct ImportReport {
     pub imported: usize,
     pub skipped: usize,
@@ -251,6 +261,59 @@ impl SkillIndex {
             truncated: snapshot.truncated,
             clusters,
         })
+    }
+
+    /// The shared, published catalogue. Metadata only: rows carry no body, so a seeded skill is
+    /// browsable and searchable while staying explicitly unreviewed.
+    pub const CATALOG_URL: &'static str =
+        "https://rigel-25128-default-rtdb.firebaseio.com/catalog/v1/skills.json";
+
+    /// Seed the shelf from the published catalogue. `write_skill` COALESCEs `body_sha` and
+    /// `grade`, so seeding can never downgrade a row this machine already fetched and scanned.
+    pub async fn seed_catalog(&self, url: &str, limit: usize) -> Result<SeedReport, SkillsError> {
+        // Borrowed only for its cached HTTP client: the catalogue is one 5.7 MB GET, and the
+        // blob cache means a second seed inside the TTL costs nothing.
+        let source = self.github().await?;
+        let body = source.http().get_json(url, true).await?;
+        let nodes = body
+            .as_object()
+            .ok_or_else(|| SkillsError::Other("the catalogue reply was not an object".into()))?;
+
+        let mut written = 0usize;
+        let mut skipped = 0usize;
+        for node in nodes.values() {
+            if limit > 0 && written >= limit {
+                break;
+            }
+            let field = |key: &str| node.get(key).cloned().unwrap_or(serde_json::Value::Null);
+            let id = field("i").as_str().unwrap_or_default().to_string();
+            if id.is_empty() {
+                skipped += 1;
+                continue;
+            }
+            let record = SkillRecord {
+                id,
+                name: field("n").as_str().unwrap_or_default().to_string(),
+                description: field("d").as_str().unwrap_or_default().to_string(),
+                source: field("s").as_str().unwrap_or("catalog").to_string(),
+                repo: field("r").as_str().filter(|v| !v.is_empty()).map(ToOwned::to_owned),
+                path: field("p").as_str().filter(|v| !v.is_empty()).map(ToOwned::to_owned),
+                url: field("u").as_str().filter(|v| !v.is_empty()).map(ToOwned::to_owned),
+                body_sha: None,
+                grade: None,
+                grade_scope: None,
+                license: None,
+                stars: field("st").as_i64(),
+                installs: field("in").as_i64(),
+                tokens: field("tk").as_i64(),
+                capabilities: Vec::new(),
+                simhash: None,
+            };
+            self.write_skill(&record).await?;
+            written += 1;
+        }
+
+        Ok(SeedReport { rows: nodes.len(), written, skipped })
     }
 
     /// Write one skill. Used for both scanned bodies and bare marketplace rows.

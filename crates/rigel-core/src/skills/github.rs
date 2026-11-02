@@ -287,6 +287,10 @@ impl GitHubSource {
         // lifetime that `async_trait` requires, and borrowing `path` from the tree is what
         // makes that impossible.
         let stars = meta["stargazers_count"].as_i64().unwrap_or(0);
+        // `branch` is mutable, and raw.githubusercontent serves a mutable URL from a CDN that can
+        // hand back the previous commit for minutes after a push. The tree response carries the
+        // commit sha, and a sha-addressed raw URL is immutable — the same path cannot go stale.
+        let commit = tree["sha"].as_str().unwrap_or(&branch).to_string();
         let jobs: Vec<(String, String, String, String, String, i64)> = candidates
             .iter()
             .map(|(path, _)| {
@@ -296,7 +300,7 @@ impl GitHubSource {
                         self.raw,
                         reference.owner,
                         reference.repo,
-                        branch,
+                        commit,
                         encode_path(path)
                     ),
                     reference.owner.clone(),

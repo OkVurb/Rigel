@@ -224,3 +224,19 @@
     }
   });
 })();
+
+/* ---------- catalogue count ----------
+   The FAQ says how many skills the catalogue holds. It reads the published meta instead of
+   hard-coding a number, so the sentence cannot drift from what is actually served. */
+(function () {
+  const node = document.querySelector("[data-skill-count]");
+  if (!node) return;
+  fetch("https://rigel-25128-default-rtdb.firebaseio.com/catalog/v1/meta.json", { cache: "no-store" })
+    .then((response) => (response.ok ? response.json() : null))
+    .then((meta) => {
+      if (meta && Number.isFinite(meta.skills)) node.textContent = meta.skills.toLocaleString("en-US");
+    })
+    .catch(() => {
+      /* the static number stays; a blocked request is not an error worth showing */
+    });
+})();
