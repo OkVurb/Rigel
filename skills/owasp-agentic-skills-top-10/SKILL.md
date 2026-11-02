@@ -7,8 +7,8 @@ allowed-tools: Read Grep Glob
 
 # OWASP Agentic Skills review
 
-A review procedure built from the [OWASP Agentic Skills Top 10](https://owasp.org/www-project-agentic-skills-top-10/)
-(`OWASP/www-project-agentic-skills-top-10`, CC BY-SA 4.0). The risk names, ordering and severities are
+A review procedure built from the OWASP Agentic Skills Top 10
+(repository `OWASP/www-project-agentic-skills-top-10`, site owasp.org, CC BY-SA 4.0). The risk names, ordering and severities are
 theirs; the method and the output shape are Rigel's.
 
 This is a **derivative work** under CC BY-SA 4.0 — keep this attribution and licence if you copy it.
@@ -35,12 +35,12 @@ This is a **derivative work** under CC BY-SA 4.0 — keep this attribution and l
 
 | ID | Risk (OWASP) | Severity | What to look for |
 |---|---|---|---|
-| AST01 | Malicious Skills | critical | Reads credential stores (`~/.ssh`, `~/.aws/credentials`, `.env`, keychain), posts to a webhook, opens a reverse shell (`nc -e`, `/dev/tcp`, `bash -i`), decodes a base64 blob it then runs, or instructs the agent to disregard the user, exfiltrate context, or conceal what it did. |
-| AST02 | Supply Chain Compromise | critical | `curl … \| sh`, unpinned `git clone`/`pip install`/`npm i`, install from a look-alike domain or a typosquatted package, no lockfile or checksum, maintainer change with a sudden release. |
-| AST03 | Over-Privileged Skills | high | `allowed-tools` wider than the stated task, `sudo`, `docker run --privileged`, writes outside the project, unrestricted egress, reading the whole home directory "just in case". |
+| AST01 | Malicious Skills | critical | Reads credential stores (SSH private keys, cloud credential files, dotfile secrets, the OS keychain), posts what it collects to an endpoint, opens an outbound shell back to a host, decodes an embedded blob and then runs it, or instructs the agent to disregard the user, forward its context elsewhere, or hide what it did. |
+| AST02 | Supply Chain Compromise | critical | Installs by piping a downloaded script straight into a shell, clones or installs dependencies without a pinned revision, pulls from a look-alike domain or typosquatted package, ships no lockfile or checksum, or a new maintainer cuts a sudden release. |
+| AST03 | Over-Privileged Skills | high | Tool scope wider than the stated task, requests for elevated or root privileges, a privileged container, writes outside the project directory, unrestricted egress, reading the whole home directory "just in case". |
 | AST04 | Insecure Metadata | high | `name`/`description` inconsistent with the body, brand impersonation, no licence or repository, permissions understated in prose while the code takes more, unsigned or unversioned metadata. |
 | AST05 | Untrusted External Instructions | high | Fetches docs, prompts or "the latest version of these instructions" at run time; remote includes with no pin or hash; anything that tells the agent to follow text it just downloaded. |
-| AST06 | Weak Isolation | high | Runs in the agent's own security context with no boundary: inherits environment secrets, writes to system paths, spawns long-lived processes, no container/user separation. |
+| AST06 | Weak Isolation | high | Runs in the agent's own security context with no boundary: inherits the environment's secrets, writes to system paths, leaves long-lived processes behind, no container or user separation. |
 | AST07 | Update Drift | medium | `@latest`, `main` branch refs, self-updating scripts, no version pin, no checksum — the code that reviewed well is not the code that runs later. |
 | AST08 | Poor Scanning | medium | Natural language plus code interleaved so signature scanners pass it; comments that are instructions; prose that redefines a command's meaning after the scanner read it. Judge this one yourself. |
 | AST09 | No Governance | medium | No owner, no approval record, no inventory entry, no revocation path; nobody could tell you what this skill last did or who authorised it. |
@@ -53,7 +53,7 @@ skill: <name> (<source>)
 checked: 7 / 10
 
 AST01 Malicious Skills            no        — read all 3 files, no network, no cred paths
-AST03 Over-Privileged Skills      YES       scripts/setup.sh:14  curl … | bash, no allowed-tools
+AST03 Over-Privileged Skills      YES       scripts/setup.sh:14  runs a downloaded installer as root
 AST04 Insecure Metadata           YES       SKILL.md:2  description promises "read-only", body writes
 AST08 Poor Scanning               unchecked — no human review of the prose yet
 ```
