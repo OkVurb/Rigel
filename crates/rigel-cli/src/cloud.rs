@@ -87,6 +87,20 @@ pub enum CloudCommand {
         json: bool,
     },
 
+    /// List the runs this account has queued.
+    Runs {
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Show one queued run.
+    Show {
+        /// The id the queue printed.
+        id: String,
+        #[arg(long)]
+        json: bool,
+    },
+
     /// Point App Check at an attestation endpoint, or turn it off.
     ///
     /// The endpoint is a service you run; it answers with a token the Firebase Admin SDK minted
@@ -643,6 +657,59 @@ pub async fn run(dir: &Path, command: CloudCommand) -> ExitCode {
             }
         }
 
+        CloudCommand::Runs { json: as_json } => {
+            let cloud = match Cloud::open(dir) {
+                Ok(cloud) => cloud,
+                Err(error) => return failure(error, as_json),
+            };
+            match cloud.runs(50).await {
+                Ok(runs) => {
+                    if as_json {
+                        println!(
+                            "{}",
+                            serde_json::to_string_pretty(&runs).unwrap_or_default()
+                        );
+                    } else if runs.is_empty() {
+                        println!("no runs queued");
+                    } else {
+                        for run in &runs {
+                            println!(
+                                "{}  {:<8} {:>2}m  {}",
+                                run.id,
+                                run.state,
+                                run.max_minutes,
+                                one_line(&run.prompt)
+                            );
+                        }
+                    }
+                    ExitCode::SUCCESS
+                }
+                Err(error) => failure(error, as_json),
+            }
+        }
+
+        CloudCommand::Show { id, json: as_json } => {
+            let cloud = match Cloud::open(dir) {
+                Ok(cloud) => cloud,
+                Err(error) => return failure(error, as_json),
+            };
+            match cloud.run(&id).await {
+                Ok(run) => {
+                    if as_json {
+                        println!("{}", serde_json::to_string_pretty(&run).unwrap_or_default());
+                    } else {
+                        println!("run        {}", run.id);
+                        println!("state      {}", run.state);
+                        println!("ceiling    {} min", run.max_minutes);
+                        println!("sponsor    {}", run.sponsor.as_deref().unwrap_or("none"));
+                        println!("prompt     {}", one_line(&run.prompt));
+                    }
+                    ExitCode::SUCCESS
+                }
+                Err(error) => failure(error, as_json),
+            }
+        }
+
         CloudCommand::Sync { json: as_json } => {
             let (cloud, index) = match open(dir).await {
                 Ok(pair) => pair,
@@ -697,6 +764,16 @@ async fn open(dir: &Path) -> Result<(Cloud, SkillIndex), CloudError> {
     let cloud = Cloud::open(dir)?;
     let index = SkillIndex::open(dir).await?;
     Ok((cloud, index))
+}
+
+/// The first line of a prompt, cut to something a terminal row can hold.
+fn one_line(prompt: &str) -> String {
+    let line = prompt.lines().next().unwrap_or("").trim();
+    let mut cut: String = line.chars().take(60).collect();
+    if line.chars().count() > 60 {
+        cut.push('…');
+    }
+    cut
 }
 
 fn print_pull(report: &rigel_core::cloud::PullReport, as_json: bool) {

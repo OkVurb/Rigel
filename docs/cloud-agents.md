@@ -1,4 +1,8 @@
-# Cloud agents, paid for by someone else
+#
+rigel cloud runs lists what is waiting, and rigel cloud show <id> prints one run in full. Both
+read the same documents back through the same rules, so a run that exists and cannot be listed
+is a rules or path bug, not a display bug.
+ Cloud agents, paid for by someone else
 
 The idea: a user without a provider key can send one turn to Rigel's runner, watch it stream back
 into the same window, and pay nothing — a sponsor covers the tokens. This is the Freebuff shape,

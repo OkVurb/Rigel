@@ -361,6 +361,54 @@ fn base_url(variable: &str, fallback: &str) -> String {
 
 /* ---------------------------------- the session ---------------------------------- */
 
+/// One run as the desktop wrote it, read back from Firestore.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct QueuedRun {
+    pub id: String,
+    pub prompt: String,
+    pub state: String,
+    pub max_minutes: u32,
+    pub created_at_ms: i64,
+    /// The sponsor paying for this run, once one exists. Absent means nobody is paying yet.
+    pub sponsor: Option<String>,
+}
+
+impl QueuedRun {
+    /// Read one Firestore document. A document written by another version may be missing keys,
+    /// so a partial document reads as absent rather than as an empty run.
+    fn from_document(document: &Value) -> Option<QueuedRun> {
+        let name = document.get("name")?.as_str()?;
+        let fields = document.get("fields")?;
+        let text = |key: &str| {
+            fields
+                .get(key)?
+                .get("stringValue")?
+                .as_str()
+                .map(str::to_owned)
+        };
+        let number = |key: &str| {
+            fields
+                .get(key)?
+                .get("integerValue")?
+                .as_str()?
+                .parse::<i64>()
+                .ok()
+        };
+        Some(QueuedRun {
+            id: name.rsplit('/').next()?.to_owned(),
+            prompt: text("prompt")?,
+            state: text("state")?,
+            max_minutes: number("maxMinutes")? as u32,
+            created_at_ms: number("createdAtMs").unwrap_or(0),
+            sponsor: fields
+                .get("sponsor")
+                .and_then(|value| value.get("stringValue"))
+                .and_then(Value::as_str)
+                .map(str::to_owned),
+        })
+    }
+}
+
 /// A signed-in account. The two tokens never reach the renderer or a log line: [`CloudStatus`] is
 /// what the window and the CLI see.
 #[derive(Clone, Serialize, Deserialize)]
@@ -1427,6 +1475,51 @@ impl Cloud {
         Ok(id)
     }
 
+    /// The runs this account has queued.
+    pub async fn runs(&self, limit: u32) -> Result<Vec<QueuedRun>, CloudError> {
+        let session = self.token().await?;
+        let url = format!(
+            "{}/v1/projects/{}/databases/(default)/documents/users/{}/runs",
+            self.endpoints.firestore, self.config.project_id, session.uid
+        );
+        let mut request = self
+            .http
+            .get(&url)
+            .bearer_auth(&session.id_token)
+            .query(&[("pageSize", limit.clamp(1, 100).to_string())]);
+        if let Some(token) = self.app_check_token().await? {
+            request = request.header("X-Firebase-AppCheck", token);
+        }
+        let answer: Value = self.decode(request.send().await?).await?;
+        Ok(answer
+            .get("documents")
+            .and_then(Value::as_array)
+            .map(|documents| {
+                documents
+                    .iter()
+                    .filter_map(QueuedRun::from_document)
+                    .collect()
+            })
+            .unwrap_or_default())
+    }
+
+    /// One run, by the id the queue printed.
+    pub async fn run(&self, id: &str) -> Result<QueuedRun, CloudError> {
+        let session = self.token().await?;
+        let url = format!(
+            "{}/v1/{}",
+            self.endpoints.firestore,
+            run_document(&self.config.project_id, &session.uid, id)
+        );
+        let mut request = self.http.get(&url).bearer_auth(&session.id_token);
+        if let Some(token) = self.app_check_token().await? {
+            request = request.header("X-Firebase-AppCheck", token);
+        }
+        let document: Value = self.decode(request.send().await?).await?;
+        QueuedRun::from_document(&document)
+            .ok_or_else(|| CloudError::Malformed("run document is missing fields".into()))
+    }
+
     /* ------------------------------------ HTTP ------------------------------------ */
 
     /// The value of `X-Firebase-AppCheck`, or `None` when App Check is off.
@@ -1727,6 +1820,10 @@ fn session_title(session: &ProjectSession) -> String {
         .filter(|title| !title.trim().is_empty())
         .unwrap_or("Untitled session")
         .to_string()
+}
+
+fn run_document(project_id: &str, uid: &str, run_id: &str) -> String {
+    format!("projects/{project_id}/databases/(default)/documents/users/{uid}/runs/{run_id}")
 }
 
 fn session_document(project_id: &str, uid: &str, session_id: &str) -> String {
@@ -2399,6 +2496,31 @@ mod tests {
             "Firebase needs a password of at least 6 characters"
         );
         assert_eq!(firebase_message("not json"), "not json");
+    }
+
+    #[test]
+    fn a_run_document_reads_back_as_the_queue_wrote_it() {
+        let document = json!({
+            "name": "projects/p/databases/(default)/documents/users/u/runs/r-1",
+            "fields": {
+                "prompt": { "stringValue": "fix the build" },
+                "state": { "stringValue": "queued" },
+                "maxMinutes": { "integerValue": "15" },
+                "createdAtMs": { "integerValue": "1700000000000" },
+                "sponsor": { "nullValue": null },
+            }
+        });
+        let run = QueuedRun::from_document(&document).expect("a written run must parse");
+        assert_eq!(run.id, "r-1");
+        assert_eq!(run.state, "queued");
+        assert_eq!(run.max_minutes, 15);
+        assert_eq!(run.created_at_ms, 1_700_000_000_000);
+        assert_eq!(run.sponsor, None);
+        assert_eq!(
+            QueuedRun::from_document(&json!({ "name": "projects/p" })),
+            None,
+            "a document with no fields is not an empty run"
+        );
     }
 
     #[test]
