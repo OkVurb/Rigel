@@ -1,0 +1,10 @@
+{
+  "dependencies": {
+    "@genkit-ai/googleai": "^1.28.0",
+    "genkit": "^1.43.0"
+  },
+  "allowScripts": {
+    "@firebase/util@1.15.3": true,
+    "protobufjs@7.6.6": true
+  }
+}

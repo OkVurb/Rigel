@@ -1,0 +1,14 @@
+{
+  "rules": {
+    ".read": false,
+    ".write": false,
+    "catalog": {
+      ".read": true,
+      "v1": {
+        "meta": { ".read": true },
+        "skills": { ".read": true },
+        "mcps": { ".read": true }
+      }
+    }
+  }
+}

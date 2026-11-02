@@ -23,6 +23,19 @@ ui/playwright-report/
 !.env.example
 *.log
 
+# Imported chat attachments: conversations and images for one session, never repository state
+.cloud-attachments/
+
+# Generated at deploy time: the Firebase project id belongs to whoever deploys, not the repo
+web/app/config.js
+
+# The assembled hosting output, including the generated config
+.deploy/
+
+# GA4 Measurement Protocol secret: server-side only, never in the repository
+.ga-secret
+*.ga-secret
+
 # AgentMail list output contains message bodies and verification codes; never repository state
 /am_list.json
 
@@ -65,3 +78,12 @@ ACTIVE-WORK.md
 
 # scratch space for local runs and one-off previews
 /tmp/
+
+# installed dependencies for the Firebase Functions codebase
+functions/node_modules/
+
+# generated MCP catalogue: rebuild with scripts/fetch-mcp-catalog.mjs
+data/mcp-catalog.json
+
+# one-shot reCAPTCHA assessment body from Google's console flow
+request.json

@@ -3,7 +3,8 @@
  *
  * The view owns no list of its own: `attention_list` reads the ledger and the open approval
  * bus, and a row disappears when the thing it names is resolved in the surface that owns it —
- * a retry, a release, a merge, an answer. The rail count is the same read, polled by App.
+ * a retry, a release, a merge, an answer. The rail count is the same read: App refreshes it on
+ * the approval channel's event and on its own poll.
  *
  * Approvals lead the list in one block. A `PendingApproval` carries the session, agent and turn
  * the asking surface recorded, so its row opens that turn; an older question with no origin
@@ -12,7 +13,7 @@
 
 import { useCallback, useEffect, useState } from "react";
 
-import { api, when, type Attention } from "./api";
+import { api, isTauri, when, type Attention } from "./api";
 
 export interface AttentionJump {
   sessionId: string;
@@ -62,7 +63,23 @@ export default function AttentionView({
   useEffect(() => {
     void load();
     const timer = window.setInterval(() => void load(), 5000);
-    return () => window.clearInterval(timer);
+    // D154: the app's approval watcher pushes a change, so an open question joins the view
+    // without waiting for the poll; the poll remains the fallback.
+    let live = true;
+    let release: (() => void) | undefined;
+    if (isTauri()) {
+      void (async () => {
+        const { listen } = await import("@tauri-apps/api/event");
+        const unlisten = await listen("rigel://approval", () => void load());
+        if (live) release = unlisten;
+        else unlisten();
+      })();
+    }
+    return () => {
+      live = false;
+      window.clearInterval(timer);
+      release?.();
+    };
   }, [load]);
 
   const open = (item: Attention["groups"][number]["items"][number]) => {

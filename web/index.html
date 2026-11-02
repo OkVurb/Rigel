@@ -1,0 +1,520 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Rigel — one window for several coding agents</title>
+    <meta
+      name="description"
+      content="Rigel indexes agent skills offline, reviews them before you install, and runs Codex, Claude Code, Cursor and Cline against one working tree — with claims, a three-way merge and the bill in one place."
+    />
+    <meta name="theme-color" content="#08090b" />
+    <meta property="og:title" content="Rigel — one window for several coding agents" />
+    <meta
+      property="og:description"
+      content="An offline catalogue for agent skills, with an honest measured-vs-advertised column, and several agents working one tree."
+    />
+    <meta property="og:type" content="website" />
+    <link rel="icon" type="image/svg+xml" href="/rigel.svg" />
+    <!-- Google tag (gtag.js) — measurement for this marketing page only. -->
+    <script async src="https://www.googletagmanager.com/gtag/js?id=G-XCN9DVHGV7"></script>
+    <script src="/gtag.js" defer></script>
+    <!-- reCAPTCHA Enterprise. The token is minted only when the contact form is submitted, so
+         there is no badge to click and nothing to slow the first paint. -->
+    <script
+      src="https://www.google.com/recaptcha/enterprise.js?render=6Lc7CAwuAAAAABFNlJiGKGyMDPaKOoAeTpwaVKkr"
+      defer
+    ></script>
+    <link rel="stylesheet" href="/site.css" />
+    <script src="/site.js" defer></script>
+  </head>
+  <body>
+    <a class="skip" href="#main">Skip to content</a>
+
+    <header class="topbar">
+      <div class="shell bar">
+        <a class="brand" href="/">
+          <img src="/rigel.svg" width="28" height="28" alt="" />
+          <span>Rigel</span>
+        </a>
+        <nav aria-label="Sections">
+          <a href="#how">How it works</a>
+          <a href="#screens">Screenshots</a>
+          <a href="#features">Features</a>
+          <a href="#faq">FAQ</a>
+          <a href="https://github.com/OkVurb/Rigel">GitHub</a>
+        </nav>
+        <a class="button small" href="/app/">Open web app</a>
+      </div>
+    </header>
+
+    <main id="main">
+      <section class="hero">
+        <div class="aurora" aria-hidden="true">
+          <span class="a1"></span><span class="a2"></span><span class="a3"></span>
+        </div>
+        <div class="shell hero-inner">
+          <p class="eyebrow">Local-first · offline by default · Windows</p>
+          <h1>
+            Several coding agents.<br />
+            <span class="grad">One tree. One bill.</span><br />
+            One transcript.
+          </h1>
+          <p class="lede">
+            Rigel runs Codex, Claude Code, Cursor, Cline and its own coordinator against the same
+            working tree. Claims keep them out of each other's files, a three-way merge settles the
+            collisions, and every turn's cost is recorded per agent instead of as one opaque total.
+          </p>
+          <div class="actions">
+            <a
+              class="button"
+              id="download"
+              data-version="0.1.4"
+              href="https://github.com/OkVurb/Rigel/releases/latest"
+              rel="noopener"
+            >
+              <span id="download-label">Get Rigel</span>
+            </a>
+            <a class="button ghost" href="#screens">See it running</a>
+          </div>
+          <p class="release" id="release">
+            <span id="release-meta">Windows 10/11 · MSI installer</span>
+            <span aria-hidden="true">·</span>
+            <a href="https://github.com/OkVurb/Rigel/releases" rel="noopener">All releases</a>
+          </p>
+
+          <ul class="pills">
+            <li>Runs your own CLIs</li>
+            <li>No telemetry in the app</li>
+            <li>MIT OR Apache-2.0</li>
+          </ul>
+
+          <figure class="window">
+            <div class="window-bar" aria-hidden="true">
+              <span class="dot"></span><span class="dot"></span><span class="dot"></span>
+              <span class="window-title">Rigel — session</span>
+              <span class="window-glow"></span>
+            </div>
+            <div class="window-body">
+              <video
+                src="/shots/rigel-tour-2026.mp4"
+                poster="/shots/2026-session.png"
+                width="1440"
+                height="900"
+                autoplay
+                muted
+                loop
+                playsinline
+                aria-label="Screen recording of the current Rigel build: the shelf, the command palette, a session transcript, the chat room, the diff view, the terminal and the settings pages"
+              ></video>
+            </div>
+            <figcaption>
+              Recorded from the current build — shelf, palette, session, chat, diff, terminal,
+              settings.
+            </figcaption>
+          </figure>
+        </div>
+      </section>
+
+      <section class="strip" aria-label="Properties">
+        <div class="marquee">
+          <div class="marquee-track">
+            <span>No telemetry</span><span>No account</span><span>SQLite + FTS5</span>
+            <span>MIT OR Apache-2.0</span><span>Rust core</span><span>Windows-first</span>
+            <span>Offline by default</span>
+            <span aria-hidden="true">No telemetry</span><span aria-hidden="true">No account</span>
+            <span aria-hidden="true">SQLite + FTS5</span>
+            <span aria-hidden="true">MIT OR Apache-2.0</span><span aria-hidden="true">Rust core</span>
+            <span aria-hidden="true">Windows-first</span><span aria-hidden="true">Offline by default</span>
+          </div>
+        </div>
+      </section>
+
+      <section class="stats" aria-label="At a glance">
+        <div class="shell stats-grid">
+          <div class="stat reveal">
+            <strong>4</strong>
+            <span>agent harnesses in one session</span>
+          </div>
+          <div class="stat reveal">
+            <strong>3-way</strong>
+            <span>merge when two agents touch one file</span>
+          </div>
+          <div class="stat reveal">
+            <strong>0</strong>
+            <span>events the desktop app sends</span>
+          </div>
+          <div class="stat reveal">
+            <strong>1</strong>
+            <span>window for the whole session</span>
+          </div>
+        </div>
+      </section>
+
+      <section id="how" class="band">
+        <div class="shell">
+          <header class="band-head reveal">
+            <span class="band-n">01 — How it works</span>
+            <h2>Index once. Review before you trust. Then let agents work.</h2>
+          </header>
+          <ol class="steps">
+            <li class="reveal">
+              <span class="step-n">01</span>
+              <h3>One catalogue, built locally</h3>
+              <p>
+                <code>rigel skills index anthropics/skills</code> crawls a source, stores bodies in
+                a local blob store and an FTS5 index beside them. Nothing is uploaded, and a second
+                run refreshes from an ETag instead of re-downloading.
+              </p>
+            </li>
+            <li class="reveal">
+              <span class="step-n">02</span>
+              <h3>A review with a paper trail</h3>
+              <p>
+                Six capability rules flag privilege escalation, network egress and destructive
+                commands — each with the <code>file:line</code> that triggered it. A grade says what
+                it covered, so a green row never claims more than it checked.
+              </p>
+            </li>
+            <li class="reveal">
+              <span class="step-n">03</span>
+              <h3>Agents that cannot silently collide</h3>
+              <p>
+                A file claim is advisory, never a lock. When two agents touch one path, the stale
+                side goes to a three-way merge with base, ours and theirs on screen, and the result
+                lands through a CAS journal with an attributed diff.
+              </p>
+            </li>
+          </ol>
+        </div>
+      </section>
+
+      <section id="screens" class="band alt">
+        <div class="shell">
+          <header class="band-head reveal">
+            <span class="band-n">02 — Screenshots</span>
+            <h2>The real window, not a mockup</h2>
+            <p class="sub">Every image below is a capture of the built app. Click one to enlarge it.</p>
+            <a class="button ghost small ad-link" href="/shots/rigel-ad-2026.mp4">Watch the 36-second ad</a>
+          </header>
+
+          <div class="gallery" id="gallery">
+            <figure class="shot wide reveal">
+              <button class="zoom" type="button" aria-label="Enlarge: one tree, several agents">
+                <img
+                  src="/shots/2026-session.png"
+                  alt="The Rigel window: the agent roster on the left, a transcript with a command waiting on approval, and the budget in the right-hand inspector"
+                  loading="lazy"
+                />
+              </button>
+              <figcaption>
+                <strong>One tree, several agents.</strong> Roster, role-gutter transcript and the
+                approval card in one window.
+              </figcaption>
+            </figure>
+            <figure class="shot reveal">
+              <button class="zoom" type="button" aria-label="Enlarge: the shelf, opened">
+                <img
+                  src="/shots/2026-shelf-detail.png"
+                  alt="The shelf: search over six sample skills on the left, and the opened pdf row with its grade, evidence table and static review on the right"
+                  loading="lazy"
+                />
+              </button>
+              <figcaption>
+                <strong>Shelf, opened.</strong> Grade, source, stars and the static review sit
+                beside the row, offline.
+              </figcaption>
+            </figure>
+            <figure class="shot reveal">
+              <button class="zoom" type="button" aria-label="Enlarge: conflicts, not locks">
+                <img
+                  src="/shots/2026-diff.png"
+                  alt="The merged diff view: a conflict on one file with three versions available, claims with a stale row, and subagent worktrees with their reviews"
+                  loading="lazy"
+                />
+              </button>
+              <figcaption>
+                <strong>Conflicts, not locks.</strong> A claim is advisory; the collision is shown
+                with both sides, never refused.
+              </figcaption>
+            </figure>
+            <figure class="shot reveal">
+              <button class="zoom" type="button" aria-label="Enlarge: the room">
+                <img
+                  src="/shots/2026-chat.png"
+                  alt="The chat room: a general channel with agent messages, a review tab, and who is in the room"
+                  loading="lazy"
+                />
+              </button>
+              <figcaption>
+                <strong>The room.</strong> Agents share one channel, and the human's message is a
+                message too.
+              </figcaption>
+            </figure>
+            <figure class="shot reveal">
+              <button class="zoom" type="button" aria-label="Enlarge: the terminal">
+                <img
+                  src="/shots/2026-terminal.png"
+                  alt="The terminal surface with a prompt echoed locally in the browser preview"
+                  loading="lazy"
+                />
+              </button>
+              <figcaption>
+                <strong>A real shell.</strong> The browser preview echoes locally; the desktop runs
+                it against the project.
+              </figcaption>
+            </figure>
+            <figure class="shot reveal">
+              <button class="zoom" type="button" aria-label="Enlarge: the command palette">
+                <img
+                  src="/shots/2026-palette.png"
+                  alt="The command palette open over the shelf, filtered to sessions"
+                  loading="lazy"
+                />
+              </button>
+              <figcaption>
+                <strong>Ctrl+K.</strong> Every surface and every session is two keystrokes away.
+              </figcaption>
+            </figure>
+          </div>
+        </div>
+      </section>
+
+      <section id="features" class="band">
+        <div class="shell">
+          <header class="band-head reveal">
+            <span class="band-n">03 — Features</span>
+            <h2>Built, not planned</h2>
+            <p class="sub">
+              Each of these is exercised by tests in the repository — the
+              <a href="https://github.com/OkVurb/Rigel/blob/main/docs/what-works.md">what-works
+              table</a> says exactly how far each one goes.
+            </p>
+          </header>
+
+          <div class="cards">
+            <article class="reveal">
+              <h3>Duplicate detection</h3>
+              <p>
+                SimHash clusters near-copies, so twenty forks of one prompt read as one row with a
+                variant list instead of twenty results.
+              </p>
+            </article>
+            <article class="reveal">
+              <h3>Claims, not locks</h3>
+              <p>
+                A live claim names who is editing what. It never blocks a write — it makes a
+                collision visible before it becomes a lost change.
+              </p>
+            </article>
+            <article class="reveal">
+              <h3>Three-way merge</h3>
+              <p>
+                Base, ours and theirs rendered side by side; the merged result is editable and
+                writes through the same CAS pipeline as everything else.
+              </p>
+            </article>
+            <article class="reveal">
+              <h3>Per-agent bill</h3>
+              <p>
+                Usage is recorded per turn and per child agent, so a fan-out shows what each helper
+                cost rather than one number that hides the expensive one.
+              </p>
+            </article>
+            <article class="reveal">
+              <h3>Writable subagents</h3>
+              <p>
+                A helper gets its own worktree, a claim on each file and a plan you approve. Its work
+                lands only through a merge a clean-context reviewer signed off.
+              </p>
+            </article>
+            <article class="reveal">
+              <h3>Opt-in cloud sync</h3>
+              <p>
+                Point Rigel at a Firebase project you own and shelf metadata mirrors across machines.
+                Bodies never leave the disk; a deletion travels as a tombstone.
+              </p>
+            </article>
+            <article class="reveal">
+              <h3>Doctor with an exit code</h3>
+              <p>
+                <code>rigel doctor</code> prints one row per check: <code>0</code> clear,
+                <code>1</code> warnings, <code>2</code> failures. It is meant for CI as much as for
+                your terminal.
+              </p>
+            </article>
+            <article class="reveal">
+              <h3>A phone reader</h3>
+              <p>
+                Publish one session and the iPhone app reads its prompts and replies from the same
+                project — never tool calls, command output or your project path.
+              </p>
+            </article>
+          </div>
+        </div>
+      </section>
+
+      <section id="start" class="band alt">
+        <div class="shell">
+          <header class="band-head reveal">
+            <span class="band-n">04 — Quick start</span>
+            <h2>From a clean machine</h2>
+          </header>
+          <div class="start-grid">
+            <div class="code-card reveal">
+              <h3>Build the desktop app</h3>
+              <pre><code>git clone https://github.com/OkVurb/Rigel
+cd Rigel
+cd ui &amp;&amp; npm install &amp;&amp; npm run build &amp;&amp; cd ..
+cargo build --workspace
+cargo run -p rigel-app</code></pre>
+              <p class="fine">
+                The Tauri shell embeds <code>ui/dist</code> at compile time, so the renderer is built
+                before the workspace.
+              </p>
+            </div>
+            <div class="code-card reveal">
+              <h3>Or just the CLI</h3>
+              <pre><code>cargo install --path crates/rigel-cli
+rigel skills index anthropics/skills --limit 20
+rigel skills search "pdf"
+rigel doctor</code></pre>
+              <p class="fine">
+                The installer ships MSI and NSIS builds for Windows 10 1809 and newer — no Node, no
+                Python, no Rust needed once installed.
+              </p>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section class="band">
+        <div class="shell narrow reveal">
+          <span class="band-n">05 — Web app</span>
+          <h2>Read what you published</h2>
+          <p class="sub">
+            Sign in with the Firebase project your desktop already syncs to and read the sessions
+            you published — titles, projects, prompts and replies. It is a reader, not a second
+            control surface: it cannot run an agent, and the rules only ever let it see your own
+            documents.
+          </p>
+          <p class="actions left"><a class="button" href="/app/">Open the web app</a></p>
+        </div>
+      </section>
+
+      <section id="faq" class="band alt">
+        <div class="shell narrow">
+          <header class="band-head reveal">
+            <span class="band-n">06 — FAQ</span>
+            <h2>Questions worth answering</h2>
+          </header>
+          <details>
+            <summary>Does Rigel need the internet?</summary>
+            <p>
+              No. The index, the shelf, the agents and the transcripts are local. The one optional
+              online path is Rigel Cloud, and it stays off until you point it at a Firebase project
+              you own.
+            </p>
+          </details>
+          <details>
+            <summary>What actually leaves the machine?</summary>
+            <p>
+              Nothing, unless you press a button that says so. Push sends shelf metadata — never a
+              body. Publish sends one session's prompts and the assistant's own words — never tool
+              calls, command output or your project path.
+            </p>
+          </details>
+          <details>
+            <summary>Which agents does it run?</summary>
+            <p>
+              Codex, Claude Code, Cursor and Cline through their own CLIs, plus a native coordinator
+              with path-checked tools. Each harness gets its own key, held in the OS keychain.
+            </p>
+          </details>
+          <details>
+            <summary>Windows only?</summary>
+            <p>
+              Windows-first: MSI and NSIS installers for Windows 10 1809 and newer. The core is a
+              Rust workspace and the phone client is iOS; other desktop targets are not a supported
+              surface today.
+            </p>
+          </details>
+          <details>
+            <summary>Is the cloud a subscription?</summary>
+            <p>
+              No. Rigel is a binary you run, and the cloud is your own Firebase project on your own
+              bill — or nothing at all.
+            </p>
+          </details>
+        </div>
+      </section>
+
+      <section class="band closer">
+        <div class="shell narrow center reveal">
+          <h2><span class="grad">One window, several agents,<br />no surprises</span></h2>
+          <p class="sub">MIT OR Apache-2.0. Built in the open, one commit at a time.</p>
+          <p class="actions">
+            <a class="button" href="https://github.com/OkVurb/Rigel">View on GitHub</a>
+            <a class="button ghost" href="/app/">Open the web app</a>
+          </p>
+          <form class="contact" id="contact-form" novalidate>
+            <label class="fine" for="contact-message"
+              >A wrong number, a skill we should index, anything else — send a note.</label
+            >
+            <textarea
+              id="contact-message"
+              name="message"
+              rows="3"
+              maxlength="2000"
+              required
+              placeholder="What did you find?"
+            ></textarea>
+            <input
+              id="contact-email"
+              name="email"
+              type="email"
+              maxlength="200"
+              autocomplete="email"
+              aria-label="Email, optional"
+              placeholder="you@example.com (optional)"
+            />
+            <p class="contact-actions">
+              <button class="button small" type="submit">Send</button>
+              <span class="fine status" id="contact-status" role="status" aria-live="polite"
+              ></span>
+            </p>
+          </form>
+        </div>
+      </section>
+    </main>
+
+    <footer class="foot">
+      <div class="shell foot-inner">
+        <div>
+          <a class="brand" href="/">
+            <img src="/rigel.svg" width="22" height="22" alt="" />
+            <span>Rigel</span>
+          </a>
+          <p class="fine">One window for several coding agents on one project.</p>
+        </div>
+        <nav aria-label="Footer">
+          <a href="#how">How it works</a>
+          <a href="#screens">Screenshots</a>
+          <a href="#features">Features</a>
+          <a href="#faq">FAQ</a>
+          <a href="/app/">Web app</a>
+          <a href="https://github.com/OkVurb/Rigel">GitHub</a>
+        </nav>
+        <p class="fine legal">
+          MIT OR Apache-2.0. This page uses Google Analytics; the app does not — no telemetry, no
+          account, no anonymous identifier unless you turn cloud sync on yourself.
+        </p>
+      </div>
+    </footer>
+
+    <div class="lightbox" hidden role="dialog" aria-modal="true" aria-label="Screenshot">
+      <button class="lightbox-close" type="button" aria-label="Close">×</button>
+      <img alt="" />
+    </div>
+  </body>
+</html>

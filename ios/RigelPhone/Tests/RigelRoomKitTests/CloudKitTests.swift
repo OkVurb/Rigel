@@ -36,6 +36,72 @@ final class CloudKitTests: XCTestCase {
                 appCheckURL: URL(string: "ftp://example.com/app-check")
             )
         )
+        XCTAssertNil(
+            FirebaseProject(
+                id: "rigel-cloud-test",
+                apiKey: "web-key",
+                appCheckURL: URL(string: "http://example.com/app-check")
+            ),
+            "a client token must not cross a plaintext remote hop"
+        )
+        XCTAssertNotNil(
+            FirebaseProject(
+                id: "rigel-cloud-test",
+                apiKey: "web-key",
+                appCheckURL: URL(string: "http://127.0.0.1:8080/app-check")
+            )
+        )
+    }
+
+    /// The endpoint may require a per-install credential; it is sent as a bearer token and a
+    /// project without one sends no Authorization header at all.
+    func testAppCheckSendsTheInstallationCredential() async throws {
+        let endpoint = try XCTUnwrap(URL(string: "https://example.com/app-check"))
+        let expires = Int(Date().timeIntervalSince1970) + 3_600
+        let body = #"{"token":"app-check-1","expires_at":\#(expires)}"#
+
+        let enrolled = AppCheckTokens(
+            url: endpoint,
+            clientToken: " install-token-1 ",
+            now: { Date() },
+            fetch: { request in
+                XCTAssertEqual(
+                    request.value(forHTTPHeaderField: "Authorization"),
+                    "Bearer install-token-1"
+                )
+                XCTAssertEqual(request.httpMethod, "GET")
+                let response = try XCTUnwrap(
+                    HTTPURLResponse(
+                        url: endpoint,
+                        statusCode: 200,
+                        httpVersion: nil,
+                        headerFields: nil
+                    )
+                )
+                return (Data(body.utf8), response)
+            }
+        )
+        let enrolledToken = try await enrolled.token()
+        XCTAssertEqual(enrolledToken, "app-check-1")
+
+        let anonymous = AppCheckTokens(
+            url: endpoint,
+            now: { Date() },
+            fetch: { request in
+                XCTAssertNil(request.value(forHTTPHeaderField: "Authorization"))
+                let response = try XCTUnwrap(
+                    HTTPURLResponse(
+                        url: endpoint,
+                        statusCode: 200,
+                        httpVersion: nil,
+                        headerFields: nil
+                    )
+                )
+                return (Data(body.utf8), response)
+            }
+        )
+        let anonymousToken = try await anonymous.token()
+        XCTAssertEqual(anonymousToken, "app-check-1")
     }
 
     /// The token is fetched once, reused until it is close to expiry, and refreshed before it

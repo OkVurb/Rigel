@@ -15,6 +15,10 @@ final class CloudModel {
     var keyText: String = ""
     /// The custom App Check provider's endpoint, when the project enforces App Check.
     var appCheckText: String = ""
+    /// A new client credential typed on this screen. It is written to the keychain and cleared.
+    var appCheckTokenText: String = ""
+    /// Whether the keychain holds this installation's App Check client token. Never the token.
+    private(set) var appCheckTokenPresent = false
     var emailText: String = ""
     var passwordText: String = ""
 
@@ -29,6 +33,7 @@ final class CloudModel {
     private static let projectKey = "rigel.phone.cloud.project"
     private static let apiKeyKey = "rigel.phone.cloud.api-key"
     private static let appCheckURLKey = "rigel.phone.cloud.app-check-url"
+    private static let appCheckTokenKey = "firebase-app-check-client"
     private static let accountKey = "firebase-session"
 
     var isSignedIn: Bool { account != nil }
@@ -43,6 +48,7 @@ final class CloudModel {
         projectText = defaults.string(forKey: Self.projectKey) ?? ""
         keyText = defaults.string(forKey: Self.apiKeyKey) ?? ""
         appCheckText = defaults.string(forKey: Self.appCheckURLKey) ?? ""
+        appCheckTokenPresent = Self.storedAppCheckToken() != nil
         guard let text = KeychainStore.read(account: Self.accountKey),
               let data = text.data(using: .utf8),
               let stored = try? JSONDecoder().decode(StoredAccount.self, from: data)
@@ -83,7 +89,8 @@ final class CloudModel {
         guard let project = FirebaseProject(
             id: projectText,
             apiKey: keyText,
-            appCheckURL: appCheckURL
+            appCheckURL: appCheckURL,
+            appCheckToken: Self.storedAppCheckToken()
         ) else {
             error = "Enter the Firebase project id and its web API key."
             return
@@ -170,8 +177,39 @@ final class CloudModel {
         FirebaseProject(
             id: projectText,
             apiKey: keyText,
-            appCheckURL: Self.appCheckURL(from: appCheckText)
+            appCheckURL: Self.appCheckURL(from: appCheckText),
+            appCheckToken: Self.storedAppCheckToken()
         )
+    }
+
+    /// Store a new credential for the attestation endpoint. The value is never logged or shown
+    /// again; `appCheckTokenText` is cleared as soon as the keychain accepts it.
+    func saveAppCheckToken() {
+        let token = appCheckTokenText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !token.isEmpty, token.count <= 512, !token.contains(where: { $0.isWhitespace }) else {
+            error = "Paste the App Check client token without spaces."
+            return
+        }
+        guard KeychainStore.save(token, account: Self.appCheckTokenKey) else {
+            error = "The keychain refused the App Check client token."
+            return
+        }
+        appCheckTokenText = ""
+        appCheckTokenPresent = true
+        error = nil
+    }
+
+    func clearAppCheckToken() {
+        KeychainStore.delete(account: Self.appCheckTokenKey)
+        appCheckTokenText = ""
+        appCheckTokenPresent = false
+        error = nil
+    }
+
+    private static func storedAppCheckToken() -> String? {
+        let stored = KeychainStore.read(account: appCheckTokenKey)?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        return stored?.isEmpty == false ? stored : nil
     }
 
     private static func appCheckURL(from text: String) -> URL? {

@@ -1,0 +1,180 @@
+mutation CreateUser @auth(level: USER) {
+  user_insert(data: {
+    id_expr: "auth.uid",
+    email: "user@example.com",
+    displayName: "New User"
+  })
+}
+
+mutation UpdateUser @auth(level: USER) {
+  user_update(key: { id_expr: "auth.uid" }, data: { displayName: "Updated Name" })
+}
+
+mutation DeleteUser @auth(level: USER) {
+  user_delete(key: { id_expr: "auth.uid" })
+}
+
+query GetUser @auth(level: USER) {
+  user(key: { id_expr: "auth.uid" }) {
+    email
+    displayName
+  }
+}
+
+query ListUsers @auth(level: PUBLIC, insecureReason: "Publicly accessible user directory") {
+  users {
+    id
+    displayName
+  }
+}
+
+mutation CreateCelestialBody @auth(level: PUBLIC, insecureReason: "Public catalog of celestial bodies") {
+  celestialBody_insert(data: {
+    commonName: "Proxima Centauri",
+    scientificName: "Alpha Centauri C",
+    objectType: "Star",
+    magnitude: 11.05
+  })
+}
+
+mutation UpdateCelestialBody @auth(level: PUBLIC, insecureReason: "Public catalog allows community updates") {
+  celestialBody_update(id: "550e8400-e29b-41d4-a716-446655440000", data: { magnitude: 11.06 })
+}
+
+mutation DeleteCelestialBody @auth(level: PUBLIC, insecureReason: "Public catalog allows deletion of invalid entries") {
+  celestialBody_delete(id: "550e8400-e29b-41d4-a716-446655440000")
+}
+
+query GetCelestialBody @auth(level: PUBLIC, insecureReason: "Publicly accessible") {
+  celestialBody(id: "550e8400-e29b-41d4-a716-446655440000") {
+    commonName
+    scientificName
+  }
+}
+
+query ListCelestialBodies @auth(level: PUBLIC, insecureReason: "Publicly accessible") {
+  celestialBodies {
+    commonName
+    objectType
+  }
+}
+
+mutation CreateEvent @auth(level: PUBLIC, insecureReason: "Public astronomical events") {
+  event_insert(data: {
+    eventName: "Meteor Shower",
+    startTime: "2025-01-01T00:00:00Z",
+    endTime: "2025-01-02T00:00:00Z"
+  })
+}
+
+mutation UpdateEvent @auth(level: PUBLIC, insecureReason: "Public astronomical events") {
+  event_update(id: "550e8400-e29b-41d4-a716-446655440000", data: { description: "Updated info" })
+}
+
+mutation DeleteEvent @auth(level: PUBLIC, insecureReason: "Public astronomical events") {
+  event_delete(id: "550e8400-e29b-41d4-a716-446655440000")
+}
+
+query GetEvent @auth(level: PUBLIC, insecureReason: "Publicly accessible") {
+  event(id: "550e8400-e29b-41d4-a716-446655440000") {
+    eventName
+    description
+  }
+}
+
+query ListEvents @auth(level: PUBLIC, insecureReason: "Publicly accessible") {
+  events {
+    eventName
+    startTime
+  }
+}
+
+mutation CreateSession @auth(level: USER) {
+  session_insert(data: {
+    sessionName: "Summer Trip",
+    userId_expr: "auth.uid"
+  })
+}
+
+mutation UpdateSession @auth(level: USER) {
+  session_update(id: "550e8400-e29b-41d4-a716-446655440000", data: { sessionName: "Winter Trip" })
+}
+
+mutation DeleteSession @auth(level: USER) {
+  session_delete(id: "550e8400-e29b-41d4-a716-446655440000")
+}
+
+query GetSession @auth(level: USER) {
+  session(id: "550e8400-e29b-41d4-a716-446655440000") {
+    sessionName
+    user { email }
+  }
+}
+
+query ListMySessions @auth(level: USER) {
+  sessions(where: { userId: { eq_expr: "auth.uid" } }) {
+    sessionName
+    startDate
+  }
+}
+
+mutation CreateObservation @auth(level: USER) {
+  observation_insert(data: {
+    userId_expr: "auth.uid",
+    celestialBodyId: "550e8400-e29b-41d4-a716-446655440000",
+    observationTimestamp: "2025-01-01T12:00:00Z"
+  })
+}
+
+mutation UpdateObservation @auth(level: USER) {
+  observation_update(id: "550e8400-e29b-41d4-a716-446655440000", data: { notes: "Great view" })
+}
+
+mutation DeleteObservation @auth(level: USER) {
+  observation_delete(id: "550e8400-e29b-41d4-a716-446655440000")
+}
+
+query GetObservation @auth(level: USER) {
+  observation(id: "550e8400-e29b-41d4-a716-446655440000") {
+    notes
+    celestialBody { commonName }
+  }
+}
+
+query ListMyObservations @auth(level: USER) {
+  observations(where: { userId: { eq_expr: "auth.uid" } }) {
+    observationTimestamp
+    notes
+  }
+}
+
+mutation CreatePhotoSetting @auth(level: USER) {
+  photoSetting_insert(data: {
+    observationId: "550e8400-e29b-41d4-a716-446655440000",
+    cameraModel: "Canon EOS",
+    exposureSeconds: 30.0,
+    iso: 1600
+  })
+}
+
+mutation UpdatePhotoSetting @auth(level: USER) {
+  photoSetting_update(id: "550e8400-e29b-41d4-a716-446655440000", data: { aperture: 2.8 })
+}
+
+mutation DeletePhotoSetting @auth(level: USER) {
+  photoSetting_delete(id: "550e8400-e29b-41d4-a716-446655440000")
+}
+
+query GetPhotoSetting @auth(level: USER) {
+  photoSetting(id: "550e8400-e29b-41d4-a716-446655440000") {
+    cameraModel
+    iso
+  }
+}
+
+query ListMyPhotoSettings @auth(level: USER) {
+  photoSettings(where: { observation: { userId: { eq_expr: "auth.uid" } } }) {
+    cameraModel
+    exposureSeconds
+  }
+}

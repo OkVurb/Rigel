@@ -12,6 +12,7 @@ use std::process::ExitCode;
 use clap::Subcommand;
 use rigel_core::SkillIndex;
 use rigel_core::cloud::{AppCheckConfig, Cloud, CloudConfig, CloudError};
+use rigel_core::credentials;
 use serde_json::json;
 
 #[derive(Subcommand)]
@@ -76,12 +77,20 @@ pub enum CloudCommand {
     ///
     /// The endpoint is a service you run; it answers with a token the Firebase Admin SDK minted
     /// and the Unix second at which that token expires. Rigel attaches the token to every
-    /// Firebase request. An endpoint that mints tokens for anyone is not attestation.
+    /// Firebase request. An endpoint that mints tokens for anyone is not attestation, so the
+    /// endpoint may also require this installation's client credential; `--client-token` stores
+    /// it in the OS keychain, never in cloud.json.
     AppCheck {
         /// The attestation URL. Omit to print the current setting.
         #[arg(long, value_name = "URL")]
         url: Option<String>,
-        /// Stop sending App Check tokens.
+        /// Read this installation's client credential from stdin and store it in the keychain.
+        #[arg(long, conflicts_with = "clear_client_token")]
+        client_token: bool,
+        /// Remove this installation's stored client credential.
+        #[arg(long, conflicts_with = "client_token")]
+        clear_client_token: bool,
+        /// Stop sending App Check tokens. The stored client credential is kept.
         #[arg(long, conflicts_with = "url")]
         clear: bool,
         #[arg(long)]
@@ -171,10 +180,20 @@ pub async fn run(dir: &Path, command: CloudCommand) -> ExitCode {
                         .unwrap_or_else(|| "never".to_string());
                     println!("last sync  push {pushed} · pull {pulled}");
                     match &status.app_check {
-                        Some(check) => println!(
-                            "app check  {} · Firebase requests carry a token",
-                            check.attest_url
-                        ),
+                        Some(check) => {
+                            println!(
+                                "app check  {} · Firebase requests carry a token",
+                                check.attest_url
+                            );
+                            println!(
+                                "client     {}",
+                                if check.client_token_present {
+                                    "token stored in the OS keychain"
+                                } else {
+                                    "no token — an endpoint that checks clients will refuse this install"
+                                }
+                            );
+                        }
                         None => println!("app check  off"),
                     }
                     println!("config     {}", CloudConfig::path(dir).display());
@@ -399,6 +418,8 @@ pub async fn run(dir: &Path, command: CloudCommand) -> ExitCode {
 
         CloudCommand::AppCheck {
             url,
+            client_token,
+            clear_client_token,
             clear,
             json: as_json,
         } => {
@@ -407,6 +428,26 @@ pub async fn run(dir: &Path, command: CloudCommand) -> ExitCode {
                 Ok(None) => return failure(CloudError::NotConfigured, as_json),
                 Err(error) => return failure(error, as_json),
             };
+            if client_token {
+                let token = match read_secret("App Check client token") {
+                    Ok(token) => token.trim().to_string(),
+                    Err(message) => return user_error(&message, as_json),
+                };
+                if token.is_empty() || token.len() > 512 || token.chars().any(char::is_whitespace) {
+                    return user_error(
+                        "the App Check client token is empty, too long, or contains whitespace",
+                        as_json,
+                    );
+                }
+                if let Err(error) = credentials::set(credentials::APP_CHECK, &token) {
+                    return user_error(&error.to_string(), as_json);
+                }
+            }
+            if clear_client_token {
+                if let Err(error) = credentials::delete(credentials::APP_CHECK) {
+                    return user_error(&error.to_string(), as_json);
+                }
+            }
             let changed = clear || url.is_some();
             if clear {
                 config.app_check = None;
@@ -434,6 +475,14 @@ pub async fn run(dir: &Path, command: CloudCommand) -> ExitCode {
                     } else if let Some(check) = &status.app_check {
                         println!("app check  {}", check.attest_url);
                         println!("           Firebase requests carry a token from this endpoint");
+                        println!(
+                            "client     {}",
+                            if check.client_token_present {
+                                "token stored in the OS keychain"
+                            } else {
+                                "no token — set one with --client-token (reads stdin)"
+                            }
+                        );
                     } else {
                         println!("app check  off");
                     }

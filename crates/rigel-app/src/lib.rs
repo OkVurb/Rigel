@@ -1195,7 +1195,6 @@ fn turn_send(
     )
     .with_scopes(Scopes::new(&root, index_dir()))
     .with_command_approval(Arc::new(WindowApprover {
-        app: app.clone(),
         bus: ApprovalBus::new(index_dir()),
         session_id: session.clone(),
         agent_id: agent.clone(),
@@ -1203,7 +1202,6 @@ fn turn_send(
         project_root: root.clone(),
     }))
     .with_plan_approval(Arc::new(WindowApprover {
-        app: app.clone(),
         bus: ApprovalBus::new(index_dir()),
         session_id: session.clone(),
         agent_id: agent.clone(),
@@ -1211,7 +1209,6 @@ fn turn_send(
         project_root: root.clone(),
     }))
     .with_mail_approval(Arc::new(WindowApprover {
-        app: app.clone(),
         bus: ApprovalBus::new(index_dir()),
         session_id: session.clone(),
         agent_id: agent.clone(),
@@ -1296,7 +1293,6 @@ fn turn_send(
 /// this is ever called; here every question is new. End of turn, a closed window or ten minutes of
 /// silence all end as a refusal.
 struct WindowApprover {
-    app: tauri::AppHandle,
     bus: ApprovalBus,
     /// D154: the turn this approver answers for. One is built per `turn_send`, so every
     /// question it publishes can point back at the transcript row that asked.
@@ -1331,8 +1327,6 @@ impl CommandApprover for WindowApprover {
                     })
                 }),
             }));
-        // Nudge the card immediately; it also polls, so a missed event is not a lost question.
-        let _ = self.app.emit("rigel://approval", &pending);
         match self
             .bus
             .ask(pending, std::time::Duration::from_secs(600))
@@ -1362,7 +1356,6 @@ impl MailApprover for WindowApprover {
                 "subject": request.subject,
                 "text": request.text,
             }));
-        let _ = self.app.emit("rigel://approval", &pending);
         match self
             .bus
             .ask(pending, std::time::Duration::from_secs(600))
@@ -1400,7 +1393,6 @@ impl PlanApprover for WindowApprover {
             "session_id": request.session_id,
             "agents": request.agents,
         }));
-        let _ = self.app.emit("rigel://approval", &pending);
         self.bus
             .ask_plan(pending, std::time::Duration::from_secs(600))
             .await
@@ -1412,6 +1404,50 @@ impl PlanApprover for WindowApprover {
 #[tauri::command]
 fn approval_pending(project: String) -> Vec<PendingApproval> {
     ApprovalBus::new(index_dir()).pending_for(Path::new(&project))
+}
+
+/// How often the window looks for a change in the approval channel. The channel is a directory
+/// of small files, and the surfaces keep their own poll as the fallback.
+const APPROVAL_POLL: std::time::Duration = std::time::Duration::from_millis(250);
+
+/// D154: tell the window when the shared approval channel changes, so the Session card and the
+/// Attention count refresh on the question itself instead of on their next poll.
+///
+/// The channel is a directory — one JSON file per open question — so watching its entries covers
+/// every publisher, including the MCP sidecar, which has no window handle and publishes from
+/// another process. A file's name and length are the whole signal: a new question, an answer
+/// that removed one, and the last write completing a file all register as a change.
+fn spawn_approval_watcher(app: tauri::AppHandle) {
+    std::thread::Builder::new()
+        .name("rigel-approvals".to_string())
+        .spawn(move || {
+            let dir = ApprovalBus::new(index_dir()).pending_dir();
+            let mut seen: Option<Vec<(String, u64)>> = None;
+            loop {
+                let mut now = std::fs::read_dir(&dir)
+                    .map(|entries| {
+                        entries
+                            .flatten()
+                            .map(|entry| {
+                                let length = entry.metadata().map(|meta| meta.len()).unwrap_or(0);
+                                (entry.file_name().to_string_lossy().into_owned(), length)
+                            })
+                            .collect::<Vec<_>>()
+                    })
+                    .unwrap_or_default();
+                now.sort();
+                if seen.as_ref() != Some(&now) {
+                    // The first look is only the baseline: a question already waiting is read
+                    // when a surface mounts. After that, every change is worth a refresh.
+                    if seen.is_some() {
+                        let _ = app.emit("rigel://approval", ());
+                    }
+                    seen = Some(now);
+                }
+                std::thread::sleep(APPROVAL_POLL);
+            }
+        })
+        .ok();
 }
 
 /// Answer one question. `None` is a refusal, which is also what an unknown scope means: an
@@ -2577,6 +2613,28 @@ fn cloud_app_check(url: Option<String>) -> Result<rigel_core::cloud::CloudStatus
     rigel_core::cloud::Cloud::status_at(&index_dir()).map_err(message)
 }
 
+/// Store this installation's App Check client credential. The endpoint receives it as a bearer
+/// token; the renderer never reads it back, and it is not written to `cloud.json`.
+#[tauri::command]
+fn cloud_app_check_client_token(token: String) -> Result<rigel_core::cloud::CloudStatus, String> {
+    let token = token.trim();
+    if token.is_empty() || token.len() > 512 || token.chars().any(char::is_whitespace) {
+        return Err(
+            "The App Check client token is empty, too long, or contains whitespace.".to_string(),
+        );
+    }
+    rigel_core::credentials::set(rigel_core::credentials::APP_CHECK, token)
+        .map_err(|error| error.to_string())?;
+    rigel_core::cloud::Cloud::status_at(&index_dir()).map_err(message)
+}
+
+#[tauri::command]
+fn cloud_app_check_clear_client_token() -> Result<rigel_core::cloud::CloudStatus, String> {
+    rigel_core::credentials::delete(rigel_core::credentials::APP_CHECK)
+        .map_err(|error| error.to_string())?;
+    rigel_core::cloud::Cloud::status_at(&index_dir()).map_err(message)
+}
+
 #[tauri::command]
 fn cloud_logout() -> Result<rigel_core::cloud::CloudStatus, String> {
     rigel_core::cloud::Cloud::open(&index_dir())
@@ -2860,6 +2918,7 @@ pub fn run() {
                 eprintln!("rigel: tray icon not installed: {problem}");
             }
             warm_router();
+            spawn_approval_watcher(app.handle().clone());
             spawn_conflict_watcher(app.handle().clone());
             Ok(())
         })
@@ -2979,6 +3038,8 @@ pub fn run() {
             cloud_send_verification,
             cloud_check_verification,
             cloud_app_check,
+            cloud_app_check_client_token,
+            cloud_app_check_clear_client_token,
             cloud_logout,
             mail_status,
             mail_configure,

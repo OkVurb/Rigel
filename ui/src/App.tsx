@@ -166,6 +166,7 @@ export default function App() {
       return;
     }
     let live = true;
+    let release: (() => void) | undefined;
     const read = () =>
       api
         .attention(root)
@@ -173,9 +174,20 @@ export default function App() {
         .catch(() => live && setAttention(0));
     void read();
     const timer = window.setInterval(read, 10_000);
+    // D154: the app's approval watcher pushes a change, so a question raised in the background
+    // reaches the badge at once; the ten-second poll remains the fallback.
+    if (isTauri()) {
+      void (async () => {
+        const { listen } = await import("@tauri-apps/api/event");
+        const unlisten = await listen("rigel://approval", () => void read());
+        if (live) release = unlisten;
+        else unlisten();
+      })();
+    }
     return () => {
       live = false;
       window.clearInterval(timer);
+      release?.();
     };
   }, [project?.root]);
 

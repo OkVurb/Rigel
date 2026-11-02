@@ -34,6 +34,8 @@ struct FakeFirebase {
     verification_tokens: Mutex<Vec<String>>,
     /// `X-Firebase-AppCheck` on every request that is not an attestation call, oldest first.
     app_check_headers: Mutex<Vec<String>>,
+    /// The authorization header of every attestation call, oldest first.
+    attest_authorizations: Mutex<Vec<String>>,
     /// How many times the fake attestation endpoint was called.
     attest_calls: AtomicUsize,
 }
@@ -137,7 +139,13 @@ async fn handle(mut socket: TcpStream, state: Arc<FakeFirebase>) -> std::io::Res
         .lock()
         .expect("requests")
         .push(format!("{method} {path}"));
-    if !path.starts_with("/app-check/") {
+    if path.starts_with("/app-check/") {
+        state
+            .attest_authorizations
+            .lock()
+            .expect("attest authorizations")
+            .push(authorization.clone());
+    } else {
         state
             .app_check_headers
             .lock()
@@ -825,17 +833,28 @@ async fn app_check_tokens_are_fetched_once_and_attached_to_every_request() {
         Endpoints::same(origin),
         Arc::new(MemorySessionStore::new()),
     )
-    .expect("cloud");
+    .expect("cloud")
+    .with_app_check_client(Some("install-token-1".into()));
 
     let status = cloud.status().expect("status");
-    assert_eq!(
-        status.app_check.map(|check| check.attest_url),
-        Some(attest_url)
+    let check = status.app_check.expect("app check status");
+    assert_eq!(check.attest_url, attest_url);
+    assert!(
+        check.client_token_present,
+        "the credential is reported, never printed"
     );
     assert_eq!(
         server.attest_calls.load(Ordering::SeqCst),
         0,
         "reading the status must not call the endpoint"
+    );
+    assert!(
+        server
+            .attest_authorizations
+            .lock()
+            .expect("attest authorizations")
+            .is_empty(),
+        "opening a client does not call the endpoint"
     );
 
     cloud
@@ -860,11 +879,20 @@ async fn app_check_tokens_are_fetched_once_and_attached_to_every_request() {
         1,
         "the sign-in and every commit share one cached token"
     );
+    assert_eq!(
+        server
+            .attest_authorizations
+            .lock()
+            .expect("attest authorizations")
+            .clone(),
+        vec!["Bearer install-token-1".to_string()],
+        "the endpoint sees the installation's credential"
+    );
 
     let serialized = serde_json::to_string(&cloud.status().expect("status")).expect("json");
     assert!(
-        !serialized.contains("app-check-1"),
-        "the token is never part of the status: {serialized}"
+        !serialized.contains("app-check-1") && !serialized.contains("install-token-1"),
+        "neither the App Check token nor the client credential is in the status: {serialized}"
     );
 }
 
@@ -898,6 +926,15 @@ async fn a_broken_attestation_endpoint_stops_the_request_before_firebase() {
         "a failed attestation must not fall through to an un-attested request"
     );
     assert!(server.app_check_headers.lock().expect("headers").is_empty());
+    assert!(
+        server
+            .attest_authorizations
+            .lock()
+            .expect("attest authorizations")
+            .iter()
+            .all(String::is_empty),
+        "an unenrolled client sends no credential"
+    );
 }
 
 #[tokio::test]

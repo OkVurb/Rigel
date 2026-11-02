@@ -72,8 +72,8 @@ struct CloudSessionsView: View {
             Text(
                 "Sign in to the Firebase project your computer publishes to. The project id and "
                     + "web API key are under Firebase Project settings; the key is public by design. "
-                    + "If the project enforces App Check, use the same attestation endpoint the "
-                    + "desktop has."
+                    + "If the project enforces App Check, use the same attestation endpoint and "
+                    + "client token the desktop has. The token is stored in the keychain."
             )
             .font(Type.body(12.5))
             .foregroundStyle(Theme.inkMuted)
@@ -88,6 +88,29 @@ struct CloudSessionsView: View {
                         text: $cloud.appCheckText,
                         prompt: "https://…/app-check"
                     )
+                    secureField(
+                        "App Check client token (optional)",
+                        text: $cloud.appCheckTokenText
+                    )
+                    HStack(spacing: 10) {
+                        Button("Save token") { cloud.saveAppCheckToken() }
+                            .font(Type.body(12, .semibold))
+                            .foregroundStyle(Theme.accent)
+                            .disabled(
+                                cloud.appCheckTokenText
+                                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                                    .isEmpty
+                            )
+                        if cloud.appCheckTokenPresent {
+                            Button("Forget") { cloud.clearAppCheckToken() }
+                                .font(Type.body(12, .semibold))
+                                .foregroundStyle(Theme.problem)
+                        }
+                        Spacer()
+                        Text(cloud.appCheckTokenPresent ? "token stored" : "no token")
+                            .font(Type.body(11.5))
+                            .foregroundStyle(Theme.inkFaint)
+                    }
                     FadingRule()
                     emailField($cloud.emailText)
                     secureField("Password", text: $cloud.passwordText)

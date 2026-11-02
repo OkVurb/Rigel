@@ -185,8 +185,11 @@ export interface CloudStatus {
    * the check existed until `cloudCheckVerification` re-reads it.
    */
   email_verified: boolean;
-  /** The App Check attestation endpoint, when this machine sends App Check tokens. */
-  app_check: { attest_url: string } | null;
+  /**
+   * The App Check attestation endpoint, when this machine sends App Check tokens. The client
+   * credential itself never reaches the renderer; this only says whether one is stored.
+   */
+  app_check: { attest_url: string; client_token_present: boolean } | null;
   /** The local manifest's clock: when this machine last pushed and pulled the shelf. */
   last_push_at: number | null;
   last_pull_at: number | null;
@@ -1888,6 +1891,20 @@ export const api = {
   async cloudAppCheck(url: string | null): Promise<CloudStatus> {
     if (!isTauri()) throw new Error("Rigel Cloud configures App Check in the desktop app.");
     return call<CloudStatus>("cloud_app_check", { url });
+  },
+
+  /**
+   * Store this installation's App Check client credential in the OS keychain. The endpoint
+   * verifies it before minting a token; the value is never returned to this process.
+   */
+  async cloudAppCheckClientToken(token: string): Promise<CloudStatus> {
+    if (!isTauri()) throw new Error("Rigel Cloud stores App Check credentials in the desktop app.");
+    return call<CloudStatus>("cloud_app_check_client_token", { token });
+  },
+
+  async cloudClearAppCheckClientToken(): Promise<CloudStatus> {
+    if (!isTauri()) throw new Error("Rigel Cloud stores App Check credentials in the desktop app.");
+    return call<CloudStatus>("cloud_app_check_clear_client_token");
   },
 
   async cloudLogout(): Promise<CloudStatus> {

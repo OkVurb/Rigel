@@ -39,6 +39,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 use sha2::{Digest, Sha256};
 
+use crate::credentials;
 use crate::migrate::now_ms;
 use crate::session::{
     Agent, Item, Session as ProjectSession, SessionError, SessionService, TurnTranscript,
@@ -99,7 +100,7 @@ pub enum CloudError {
     #[error("not signed in: run `rigel cloud login --email <address>`")]
     NotSignedIn,
 
-    #[error("the App Check attestation URL `{0}` is not an http(s) URL")]
+    #[error("the App Check attestation URL `{0}` must be https (http is allowed only on loopback)")]
     InvalidAppCheck(String),
 
     #[error("App Check could not attest this client: {0}")]
@@ -163,6 +164,10 @@ pub struct CloudConfig {
     /// requests go out as they did before; an old `cloud.json` reads as absent.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub app_check: Option<AppCheckConfig>,
+    /// Browser push, when this machine has been given the web app's config. Absent means browser
+    /// notifications are off; every value in here is public by design.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub push: Option<PushConfig>,
 }
 
 /// The client half of a Firebase App Check custom provider.
@@ -175,6 +180,17 @@ pub struct AppCheckConfig {
     pub attest_url: String,
 }
 
+/// The three public values a browser needs to subscribe to this project's push service: `app_id`
+/// and `sender_id` from Project settings -> Your apps -> Web app, and `vapid_key` from Cloud
+/// Messaging -> Web Push certificates. None of them is a secret; the rule is that a subscription
+/// can only be read by the account that registered it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PushConfig {
+    pub app_id: String,
+    pub sender_id: String,
+    pub vapid_key: String,
+}
+
 impl CloudConfig {
     pub fn new(
         project_id: impl Into<String>,
@@ -184,6 +200,7 @@ impl CloudConfig {
             project_id: project_id.into().trim().to_string(),
             api_key: api_key.into().trim().to_string(),
             app_check: None,
+            push: None,
         };
         config.validate()?;
         Ok(config)
@@ -215,6 +232,19 @@ impl CloudConfig {
             .map(|url| url.trim().to_string())
             .filter(|url| !url.is_empty())
             .map(|attest_url| AppCheckConfig { attest_url });
+        // All three or none: a subscription with half a config fails inside the browser.
+        config.push = match (
+            std::env::var("RIGEL_FIREBASE_PUSH_APP_ID"),
+            std::env::var("RIGEL_FIREBASE_PUSH_SENDER_ID"),
+            std::env::var("RIGEL_FIREBASE_VAPID_KEY"),
+        ) {
+            (Ok(app_id), Ok(sender_id), Ok(vapid_key)) => Some(PushConfig {
+                app_id: app_id.trim().to_string(),
+                sender_id: sender_id.trim().to_string(),
+                vapid_key: vapid_key.trim().to_string(),
+            }),
+            _ => None,
+        };
         config.validate().ok()?;
         Some(config)
     }
@@ -245,11 +275,42 @@ impl CloudConfig {
         }
         if let Some(check) = &self.app_check {
             let url = check.attest_url.trim();
-            let parsed = reqwest::Url::parse(url)
-                .ok()
-                .filter(|url| matches!(url.scheme(), "http" | "https"));
-            if parsed.is_none() || url.len() > 2_048 {
+            // The client token is a bearer secret, so it must not cross a plaintext hop. `http`
+            // stays available for a loopback test server, never for a remote endpoint.
+            let parsed = reqwest::Url::parse(url).ok();
+            let secure = parsed.as_ref().is_some_and(|url| {
+                url.scheme() == "https"
+                    || (url.scheme() == "http"
+                        && matches!(
+                            url.host_str(),
+                            Some("localhost" | "127.0.0.1" | "::1" | "[::1]")
+                        ))
+            });
+            if !secure || url.len() > 2_048 {
                 return Err(CloudError::InvalidAppCheck(url.to_string()));
+            }
+        }
+        if let Some(push) = &self.push {
+            let app = push.app_id.trim();
+            let sender = push.sender_id.trim();
+            let key = push.vapid_key.trim();
+            // An app id looks like `1:1080888135168:web:fbceb3e…`; the sender id is the project
+            // number inside it; a VAPID key is a base64url P-256 point (65 bytes, ~87 chars). A
+            // malformed value fails inside the browser with no useful error, so refuse it here.
+            let app_shaped =
+                app.len() <= 200 && app.matches(':').count() >= 2 && !app.contains('/');
+            let sender_shaped = !sender.is_empty()
+                && sender.len() <= 20
+                && sender.chars().all(|c| c.is_ascii_digit());
+            let key_shaped = (40..=200).contains(&key.len())
+                && key
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '=');
+            if !(app_shaped && sender_shaped && key_shaped) {
+                return Err(CloudError::Input(
+                    "browser push needs an app id, a numeric sender id and a base64url VAPID key"
+                        .to_string(),
+                ));
             }
         }
         Ok(())
@@ -309,7 +370,9 @@ pub struct Session {
     /// The project that minted this session. A stored session for another project is ignored
     /// rather than sent to a project it was not issued by.
     pub project_id: String,
-    #[serde(rename = "idToken")]
+    /// The bearer token, which lives only in memory: [`KeychainSessionStore`] drops it before
+    /// saving, so a stored session reads back without one and refreshes on first use.
+    #[serde(rename = "idToken", default)]
     id_token: String,
     #[serde(rename = "refreshToken")]
     refresh_token: String,
@@ -332,10 +395,14 @@ impl std::fmt::Debug for Session {
     }
 }
 
-/// What the window may know about App Check: the endpoint, never the token it holds.
+/// What the window may know about App Check: the endpoint and whether a client credential is
+/// stored, never the token it holds or the credential itself.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct AppCheckStatus {
     pub attest_url: String,
+    /// Whether this installation has a client credential in the keychain. The endpoint needs it
+    /// to tell a Rigel install from a script; the value never leaves the core.
+    pub client_token_present: bool,
 }
 
 /// What the window and the CLI may know: who is signed in, never how.
@@ -353,6 +420,9 @@ pub struct CloudStatus {
     /// The App Check attestation endpoint, when this machine sends App Check tokens. Never the
     /// token itself: it is a bearer credential and stays in memory.
     pub app_check: Option<AppCheckStatus>,
+    /// The browser push config, when this machine has one. Public by design; the window needs it
+    /// to subscribe a browser, and nothing else does.
+    pub push: Option<PushConfig>,
     /// When this machine last pushed the shelf, and last pulled it. Read from the local
     /// manifest, not the network; `last_sync_at` is the later of the two.
     pub last_push_at: Option<i64>,
@@ -371,6 +441,7 @@ impl CloudStatus {
             expires_at: None,
             email_verified: false,
             app_check: None,
+            push: None,
             last_push_at: None,
             last_pull_at: None,
             last_sync_at: None,
@@ -426,7 +497,7 @@ impl SessionStore for KeychainSessionStore {
     fn save(&self, session: &Session) -> Result<(), CloudError> {
         let entry = keyring::Entry::new(KEYCHAIN_SERVICE, KEYCHAIN_USER)
             .map_err(|error| CloudError::Keychain(error.to_string()))?;
-        let text = serde_json::to_string(session)?;
+        let text = stored_json(session)?;
         entry
             .set_password(&text)
             .map_err(|error| CloudError::Keychain(error.to_string()))
@@ -440,6 +511,18 @@ impl SessionStore for KeychainSessionStore {
             Err(error) => Err(CloudError::Keychain(error.to_string())),
         }
     }
+}
+
+/// What the keychain holds: the session without its bearer token.
+///
+/// Windows stores a generic credential as UTF-16 and refuses anything over 2560 bytes, and the
+/// ID token alone is a JWT of well over a kilobyte, so storing the whole session fails there. It
+/// costs nothing to drop: [`Cloud::token`] mints a new one from the refresh token before the next
+/// request. Split out from the store so a test can check the size without an OS keychain.
+fn stored_json(session: &Session) -> Result<String, CloudError> {
+    let mut stored = session.clone();
+    stored.id_token.clear();
+    Ok(serde_json::to_string(&stored)?)
 }
 
 /// A session kept in one process. Tests use it; nothing else should.
@@ -537,6 +620,9 @@ pub struct PullReport {
 /// never serialized, logged or sent to the renderer.
 struct AppCheck {
     attest_url: String,
+    /// The per-install credential the endpoint checks before minting a token. `None` means this
+    /// installation has not been enrolled; the endpoint decides whether that is acceptable.
+    client_token: Option<String>,
     http: reqwest::Client,
     cached: AsyncMutex<Option<CachedAppCheckToken>>,
 }
@@ -547,12 +633,17 @@ struct CachedAppCheckToken {
 }
 
 impl AppCheck {
-    fn new(attest_url: String, http: reqwest::Client) -> Self {
+    fn new(attest_url: String, client_token: Option<String>, http: reqwest::Client) -> Self {
         Self {
             attest_url,
+            client_token: client_token.filter(|token| !token.trim().is_empty()),
             http,
             cached: AsyncMutex::new(None),
         }
+    }
+
+    fn has_client_token(&self) -> bool {
+        self.client_token.is_some()
     }
 
     /// A token good for at least another minute, fetching one when the cache is empty or close
@@ -599,17 +690,18 @@ impl AppCheck {
     }
 
     async fn fetch(&self) -> Result<AppCheckAnswer, CloudError> {
-        let response = self
+        let mut request = self
             .http
             .get(&self.attest_url)
-            .header("accept", "application/json")
-            .send()
-            .await
-            .map_err(|error| {
-                CloudError::AppCheck(format!(
-                    "the attestation endpoint is not reachable: {error}"
-                ))
-            })?;
+            .header("accept", "application/json");
+        if let Some(token) = &self.client_token {
+            request = request.bearer_auth(token);
+        }
+        let response = request.send().await.map_err(|error| {
+            CloudError::AppCheck(format!(
+                "the attestation endpoint is not reachable: {error}"
+            ))
+        })?;
         let status = response.status();
         let text = response.text().await.map_err(|error| {
             CloudError::AppCheck(format!(
@@ -618,7 +710,17 @@ impl AppCheck {
         })?;
         if !status.is_success() {
             let detail = text.trim();
-            let message = if detail.is_empty() {
+            let message = if matches!(status.as_u16(), 401 | 403) {
+                if self.has_client_token() {
+                    format!(
+                        "the attestation endpoint refused this client ({status}); the stored client token is not on its allowlist"
+                    )
+                } else {
+                    format!(
+                        "the attestation endpoint refused this client ({status}); set the App Check client token for this installation"
+                    )
+                }
+            } else if detail.is_empty() {
                 format!("the attestation endpoint answered {status}")
             } else {
                 format!(
@@ -671,7 +773,7 @@ impl Cloud {
         let app_check = config
             .app_check
             .as_ref()
-            .map(|check| AppCheck::new(check.attest_url.clone(), http.clone()));
+            .map(|check| AppCheck::new(check.attest_url.clone(), None, http.clone()));
         Ok(Self {
             config,
             endpoints,
@@ -684,25 +786,53 @@ impl Cloud {
 
     pub fn open(dir: &Path) -> Result<Self, CloudError> {
         let config = CloudConfig::load(dir)?.ok_or(CloudError::NotConfigured)?;
-        Self::new_at(
+        let mut cloud = Self::new_at(
             dir,
             config,
             Endpoints::from_env(),
             Arc::new(KeychainSessionStore),
-        )
+        )?;
+        cloud.load_app_check_client();
+        Ok(cloud)
+    }
+
+    /// Give this client a credential without reading the OS keychain. Tests use it; the window
+    /// and the CLI let [`Cloud::open`] read the stored one.
+    pub fn with_app_check_client(mut self, client_token: Option<String>) -> Self {
+        if let Some(check) = &self.config.app_check {
+            self.app_check = Some(AppCheck::new(
+                check.attest_url.clone(),
+                client_token,
+                self.http.clone(),
+            ));
+        }
+        self
+    }
+
+    /// Read `rigel/firebase-app-check-client` once, when the client is opened. A missing entry is
+    /// not an error here: the endpoint is the thing that decides whether it needs one.
+    fn load_app_check_client(&mut self) {
+        let token = credentials::get(credentials::APP_CHECK).ok();
+        self.app_check = self
+            .app_check
+            .take()
+            .map(|check| AppCheck::new(check.attest_url.clone(), token, self.http.clone()));
     }
 
     /// Read the stored account without a network call. An unconfigured app answers instead of
     /// failing, because the settings page has to render that state.
     pub fn status_at(dir: &Path) -> Result<CloudStatus, CloudError> {
         match CloudConfig::load(dir)? {
-            Some(config) => Self::new_at(
-                dir,
-                config,
-                Endpoints::from_env(),
-                Arc::new(KeychainSessionStore),
-            )?
-            .status(),
+            Some(config) => {
+                let mut cloud = Self::new_at(
+                    dir,
+                    config,
+                    Endpoints::from_env(),
+                    Arc::new(KeychainSessionStore),
+                )?;
+                cloud.load_app_check_client();
+                cloud.status()
+            }
             None => Ok(CloudStatus::unconfigured()),
         }
     }
@@ -742,7 +872,12 @@ impl Cloud {
                 .is_some_and(|session| session.email_verified),
             app_check: self.config.app_check.as_ref().map(|check| AppCheckStatus {
                 attest_url: check.attest_url.clone(),
+                client_token_present: self
+                    .app_check
+                    .as_ref()
+                    .is_some_and(AppCheck::has_client_token),
             }),
+            push: self.config.push.clone(),
             last_push_at,
             last_pull_at,
             last_sync_at,
@@ -946,6 +1081,35 @@ impl Cloud {
     pub fn sign_out(&self) -> Result<CloudStatus, CloudError> {
         self.store.clear()?;
         self.status()
+    }
+
+    /// Remember one browser's push token under the account, so a Cloud Function can reach it.
+    ///
+    /// The token names a browser install, not a person: it is revocable by deleting the document,
+    /// and it lives under `users/{uid}/devices/{id}`, which the rules already keep to the owner.
+    /// Registering the same browser twice updates one document rather than adding a second.
+    pub async fn register_device(
+        &self,
+        token: &str,
+        label: Option<&str>,
+    ) -> Result<(), CloudError> {
+        let token = token.trim();
+        if token.len() < 32 || token.len() > 4_096 || token.chars().any(char::is_whitespace) {
+            return Err(CloudError::Input(
+                "the push token is empty, too short, too long, or contains whitespace".to_string(),
+            ));
+        }
+        let session = self.token().await?;
+        let write = device_write(&self.config.project_id, &session.uid, token, label);
+        self.commit(&session, vec![write]).await
+    }
+
+    /// Forget one browser's token. Delivery stops with the document; a token FCM has already
+    /// refused stays refused, which is why the sending function prunes those too.
+    pub async fn forget_device(&self, token: &str) -> Result<(), CloudError> {
+        let session = self.token().await?;
+        let write = json!({ "delete": device_name(&self.config.project_id, &session.uid, token) });
+        self.commit(&session, vec![write]).await
     }
 
     /// Mirror the local shelf's metadata into the user's Firestore project.
@@ -1161,7 +1325,9 @@ impl Cloud {
         if session.project_id != self.config.project_id {
             return Err(CloudError::NotSignedIn);
         }
-        if session.expires_at > now_ms() + TOKEN_MARGIN_MS {
+        // A session read back from the keychain carries no ID token, so a restart mints one before
+        // the first request instead of trusting a token it no longer holds.
+        if !session.id_token.is_empty() && session.expires_at > now_ms() + TOKEN_MARGIN_MS {
             return Ok(session);
         }
 
@@ -1627,6 +1793,36 @@ fn skill_tombstone_write(project_id: &str, uid: &str, skill_id: &str) -> Value {
     })
 }
 
+/// A device document's name. One per token, so re-registering a browser updates it in place.
+fn device_name(project_id: &str, uid: &str, token: &str) -> String {
+    format!(
+        "projects/{project_id}/databases/(default)/documents/users/{uid}/devices/{}",
+        document_id(token.trim())
+    )
+}
+
+/// One browser's registration. The token is what the sending function needs; the rest is there so
+/// a person reading the console can tell two browsers apart.
+fn device_write(project_id: &str, uid: &str, token: &str, label: Option<&str>) -> Value {
+    let mut fields = Map::new();
+    insert_string(&mut fields, "token", Some(token.trim()));
+    insert_string(&mut fields, "label", label);
+    insert_string(&mut fields, "platform", Some(std::env::consts::OS));
+    fields.insert(
+        "updated_at".into(),
+        json!({ "timestampValue": rfc3339(now_ms()) }),
+    );
+    fields.insert("app".into(), json!({ "stringValue": "Rigel" }));
+    fields.insert("schema".into(), json!({ "integerValue": "1" }));
+
+    json!({
+        "update": {
+            "name": device_name(project_id, uid, token),
+            "fields": Value::Object(fields),
+        }
+    })
+}
+
 fn insert_string(fields: &mut Map<String, Value>, key: &str, value: Option<&str>) {
     if let Some(value) = value.filter(|value| !value.is_empty()) {
         fields.insert(key.to_string(), json!({ "stringValue": value }));
@@ -1874,26 +2070,31 @@ mod tests {
     }
 
     #[test]
-    fn an_app_check_endpoint_must_be_an_http_url() {
+    fn an_app_check_endpoint_must_be_https_or_loopback() {
         let mut config = CloudConfig::new("rigel-cloud", "key").unwrap();
-        config.app_check = Some(AppCheckConfig {
-            attest_url: "ftp://example.com/token".into(),
-        });
-        assert!(matches!(
-            config.validate(),
-            Err(CloudError::InvalidAppCheck(_))
-        ));
-        config.app_check = Some(AppCheckConfig {
-            attest_url: "not a url".into(),
-        });
-        assert!(matches!(
-            config.validate(),
-            Err(CloudError::InvalidAppCheck(_))
-        ));
-        config.app_check = Some(AppCheckConfig {
-            attest_url: "https://example.com/app-check".into(),
-        });
-        assert!(config.validate().is_ok());
+        for url in [
+            "ftp://example.com/token",
+            "not a url",
+            "http://example.com/token",
+        ] {
+            config.app_check = Some(AppCheckConfig {
+                attest_url: url.into(),
+            });
+            assert!(
+                matches!(config.validate(), Err(CloudError::InvalidAppCheck(_))),
+                "{url} must not carry a client credential"
+            );
+        }
+        for url in [
+            "https://example.com/app-check",
+            "http://127.0.0.1:8080/app-check",
+            "http://localhost:8080/app-check",
+        ] {
+            config.app_check = Some(AppCheckConfig {
+                attest_url: url.into(),
+            });
+            assert!(config.validate().is_ok(), "{url} must stay usable");
+        }
     }
 
     #[test]
@@ -2218,5 +2419,30 @@ mod tests {
         assert!(!session.email_verified);
         assert!(!CloudStatus::unconfigured().email_verified);
         assert!(CloudStatus::unconfigured().app_check.is_none());
+    }
+
+    #[test]
+    fn a_stored_session_keeps_the_refresh_token_and_drops_the_bearer() {
+        let session = Session {
+            uid: "uid-1".into(),
+            email: "ada@example.com".into(),
+            project_id: "rigel-cloud".into(),
+            id_token: "id-secret".repeat(200),
+            refresh_token: "refresh-secret".into(),
+            expires_at: 1,
+            email_verified: true,
+        };
+        let text = stored_json(&session).unwrap();
+        assert!(
+            !text.contains("id-secret"),
+            "the bearer token must not be written to the keychain"
+        );
+        assert!(text.contains("refresh-secret"));
+        // Windows stores a credential as UTF-16, so 1280 characters is the hard ceiling.
+        assert!(
+            text.len() < 1280,
+            "{} characters would overflow a Windows credential",
+            text.len()
+        );
     }
 }

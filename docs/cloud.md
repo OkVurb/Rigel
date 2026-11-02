@@ -92,6 +92,68 @@ sent unless you press the button. A session is only published when you press **P
    [App Check](#app-check). Configure and test it on every client **before** you press Enforce in
    the Firebase console, or the un-attested clients stop working.
 
+## Verifying a live project
+
+`scripts/cloud-verify.mjs` runs the checks above against your project and fails on the first
+answer that disagrees with the contract. It is the same sequence as a hand verification, with the
+assertions written down, so a regression names the step that broke instead of looking like a new
+outage.
+
+Prerequisites, once: Email/Password enabled, a Firestore database created, and `firestore.rules`
+deployed — setup steps 1–4. Then, from the repository root:
+
+```bash
+export RIGEL_FIREBASE_PROJECT_ID=<project-id>
+read -r -s -p 'Web API key: ' RIGEL_FIREBASE_API_KEY; echo; export RIGEL_FIREBASE_API_KEY
+read -r -s -p 'Test account password: ' RIGEL_CLOUD_PASSWORD; echo; export RIGEL_CLOUD_PASSWORD
+export RIGEL_CLOUD_EMAIL='you+rigeltest@example.com'
+
+node scripts/cloud-verify.mjs --wait-verified 180
+```
+
+| Step | What it proves |
+|---|---|
+| `preflight` | The four inputs are present and the CLI is rebuilt from this tree |
+| `configure` | Two throwaway data directories take the project and start signed out |
+| `account` | Sign-up creates the account (or the existing account signs in) and the uid matches `cloud status` |
+| `duplicate` | A second sign-up for the same address is refused and the session survives |
+| `email verification` | A link is sent, and `--check` reads the answer back once it is opened |
+| `password reset` | A known and an unknown address get the identical sentence; with `RIGEL_CLOUD_NEW_PASSWORD` set, the old password stops working and the new one signs in |
+| `firestore` | The `(default)` database exists, read through the Firebase CLI |
+| `clean cloud` | Optional `--clean-cloud` empties `users/<uid>` before seeding |
+| `seed shelf` | `skills index` puts real rows with bodies in directory A |
+| `push` | Every row is mirrored, with no tombstone and no truncation |
+| `pull` | Directory B receives the same rows, **with no bodies**, on the shared keychain session |
+| `tombstone` | Removing a row locally and pushing deletes it in B, at the same document path |
+| `sync clocks` | Each directory's `last_sync_at` follows its own last push or pull |
+| `cleanup` | Signs out and deletes `users/<uid>` unless `--keep` is passed; also runs after a failed step |
+
+The run is destructive by design: it uses `tmp/cloud-verify/` for both directories, deletes the
+account's Firestore subtree when it finishes, and sends up to two real reset emails. Point it at a
+disposable account, not the one you use daily. The Firebase Authentication user itself has no CLI
+delete, so the summary names the console page that removes it.
+
+The Firebase session is one OS keychain entry shared by every data directory — that sharing is
+what lets directory B reuse directory A's sign-in — so the run **signs this machine out of Rigel
+Cloud** when it starts and again at cleanup. Sign in again afterwards, or pass `--keep` to leave
+the test session in place. Set `RIGEL_BIN` to test a prebuilt CLI instead of rebuilding from the
+current tree.
+
+`--keep` leaves both directories, the Firestore documents and the session in place, which is what
+you want when inspecting the documents in the console; `--skip-mail` drops both mail steps;
+`--json` prints one machine-readable summary and is what a wrapper script should parse. Exit `0`
+means every step passed, `1` means a step failed, `2` means the script could not run at all.
+
+What it cannot check, because a script cannot click: the emailed links (unopened, the
+verification step is reported as skipped), the two-account rules check in the Rules Playground,
+and the window's own Settings → Cloud page. Those stay in the runbook above.
+
+To exercise the script without a project at all, start the Auth and Firestore emulators and point
+`RIGEL_FIREBASE_IDENTITY_BASE`, `RIGEL_FIREBASE_TOKEN_BASE` and `RIGEL_FIREBASE_FIRESTORE_BASE` at
+their ports; the CLI reads those overrides from the environment, and a `demo-` project id keeps the
+whole run offline. The Auth emulator needs an `auth` block in `firebase.json` — or a `--config` of
+its own — before it will start.
+
 ## Where things live
 
 | Thing | Location | Secret? |
@@ -100,6 +162,8 @@ sent unless you press the button. A session is only published when you press **P
 | Refresh token, account and verification state | OS keychain, entry `rigel/firebase-session` | Yes — never printed, never sent to the renderer |
 | ID token | Memory only; refreshed within 30 s of expiry | Yes |
 | App Check attestation URL | `<data dir>/cloud.json` | No; the endpoint is not a secret |
+| App Check client token | OS keychain (`rigel/firebase-app-check-client`); the phone's keychain | Yes — never printed, serialized or sent to the renderer |
+| App Check rate-limit buckets | Firestore, `rigelAppCheckLimits`; hashed label/address and counts | No; no credential or raw address is stored |
 | App Check tokens | Memory only, one per hour on average; refreshed 60 s before expiry | Yes — never printed or serialized |
 | Shelf metadata | Firestore, `users/{uid}/skills` | Protected by `firestore.rules` |
 | Shelf manifest and sync clock | `<data dir>/cloud-state.json` | No; holds ids, not bodies or tokens |
@@ -138,73 +202,94 @@ is refused before it reaches Firestore or Authentication.
 
 A desktop binary cannot attest itself the way an App Store app can: there is no Play Integrity
 equivalent, and any secret shipped in the build is extractable. Rigel therefore uses App Check's
-**custom provider**. You run a small endpoint that decides which clients are yours — a licence
-key checked against your database, a notarization receipt verified server-side, a per-install
-enrolment code, whatever fits — and it returns a short-lived App Check token minted with the
-Firebase Admin SDK. Rigel stores only the endpoint URL; it fetches and caches tokens itself and
-attaches `X-Firebase-AppCheck` to every Firebase request it sends.
+**custom provider**. The repository ships that provider in [`functions/index.js`](../functions/index.js): a Cloud
+Functions v2 endpoint that verifies a per-install credential, rate-limits it in Firestore, and
+mints a token with the Firebase Admin SDK. Rigel fetches and caches that token and attaches
+`X-Firebase-AppCheck` to every Firebase request it sends.
 
-**The endpoint's check is the entire security boundary.** An endpoint that mints a token for
-anyone who asks adds no protection. Do not accept the project id, the web API key or any other
-value that ships in the binary as the credential.
+**The endpoint's check is the entire security boundary.** It does not accept the project id, the
+web API key, or anything else that ships in the binary. Each installation gets a random credential
+that you hand it out of band; the endpoint stores only its SHA-256, and the client stores the
+credential in the OS keychain. An endpoint that mints a token for anyone adds no protection.
 
-#### 1. Point Rigel at the endpoint
+#### 1. Deploy the endpoint
+
+The function needs the **Blaze** plan, the Firestore database from setup step 3, and a web app id
+from Project settings → Your apps. From the repository root:
+
+```bash
+cd functions
+npm install
+cp .env.example .env
+# Set RIGEL_FIREBASE_APP_ID in .env, e.g. 1:1234567890:web:abcdef…
+```
+
+Create one credential per installation. The token goes to the client; only its hash goes into the
+secret:
+
+```bash
+TOKEN=$(openssl rand -hex 32)
+printf '%s' "$TOKEN" | sha256sum      # the 64 hex characters, not the token
+firebase functions:secrets:set RIGEL_ATTEST_CLIENTS
+# paste one line per installation:  desktop-1:<sha256>
+firebase deploy --only functions
+```
+
+The deploy runs the endpoint's tests first, then prints the function's URL. In the default region
+it is `https://us-central1-<project>.cloudfunctions.net/appCheck`; change the region in
+`functions/index.js` if you deploy it elsewhere. It answers:
+
+| Status | Meaning |
+|---|---|
+| `200` | `{"token": "…", "expires_at": <unix seconds>}` |
+| `401` | no credential, or one not in `RIGEL_ATTEST_CLIENTS` |
+| `429` | this installation or address spent its bucket; `Retry-After` says when |
+| `503` | `RIGEL_FIREBASE_APP_ID` or the client secret is missing or malformed |
+
+The credential is compared in constant time before Firestore is touched. An accepted request then
+spends two token buckets in one transaction: 12 requests/hour with a burst of 4 per installation,
+and 60/hour with a burst of 12 per source address. Both are generous for a client that fetches one
+token an hour; tune them in `functions/.env` (`RIGEL_ATTEST_CLIENT_PER_HOUR`,
+`RIGEL_ATTEST_CLIENT_BURST`, `RIGEL_ATTEST_IP_PER_HOUR`, `RIGEL_ATTEST_IP_BURST`). Bucket
+documents live in `rigelAppCheckLimits` and hold a hash of the label or address, never the
+credential or the raw address. `firestore.rules` denies clients access; the Admin SDK bypasses
+the rules. A TTL policy on `expires_at` clears stale buckets:
+
+```bash
+gcloud firestore fields ttls update expires_at \
+  --collection-group=rigelAppCheckLimits --enable-ttl --project <project>
+```
+
+The function's service account needs permission to mint App Check tokens. The Compute Engine
+default service account usually has broad Editor access; a locked-down project should grant
+`roles/firebaseappcheck.admin` explicitly. A `PERMISSION_DENIED` in the function log is that
+missing role, not a client problem.
+
+Rotation is one line: add `desktop-2:<hash>`, deploy the secret, switch that installation, then
+remove the old line. A token already minted stays valid until its hour is up.
+
+#### 2. Point the clients at it
 
 ```bash
 rigel cloud app-check --url https://REGION-PROJECT.cloudfunctions.net/appCheck
-rigel cloud app-check          # print the stored URL, or "app check  off"
-rigel cloud app-check --clear  # stop sending tokens
+printf '%s' "$TOKEN" | rigel cloud app-check --client-token
+rigel cloud app-check          # URL, and whether a client token is stored
+rigel cloud app-check --clear  # stop sending tokens; the client token stays
+rigel cloud app-check --clear-client-token
 ```
 
-Settings → Cloud → **App Check** has the same field and a **Clear** button, and shows whether a
-token is currently cached. The URL is saved in `cloud.json`; `RIGEL_FIREBASE_APP_CHECK_URL` is the
-headless alternative. The URL is not a secret. A token is a bearer credential, so it lives in
-memory only; `cloud status` reports `app_check` as `{"attest_url": …}` or `null`, never the token.
+Settings → Cloud → **App Check** has both fields and a **Forget token** button. The URL must be
+`https`; `http` is accepted only for a loopback test endpoint, because the client token is a
+bearer secret. The URL is saved in `cloud.json`; `RIGEL_FIREBASE_APP_CHECK_URL` is the headless
+alternative. The client token is a
+bearer secret and goes to the OS keychain under `rigel/firebase-app-check-client` — never
+`cloud.json`, never the status payload, never the renderer. `cloud status` reports `app_check` as
+`{"attest_url": …, "client_token_present": true|false}` and nothing more. The headless
+alternative is `RIGEL_FIREBASE_APP_CHECK_CLIENT`.
 
-On the iPhone, the Cloud screen's optional **App Check URL** field does the same. It is stored in
-the app's preferences — not the keychain, because it is not a secret — and its token stays in
-memory.
-
-#### 2. Write the endpoint
-
-Any HTTPS endpoint can serve it. This is a Firebase Cloud Function in the same project; it must
-answer `{"token": "…", "expires_at": <unix seconds>}`, where the token comes from
-`getAppCheck().createToken(APP_ID)` and `expires_at` matches its TTL (one hour by default, up to
-seven days).
-
-```js
-const { onRequest } = require("firebase-functions/v2/https");
-const { initializeApp } = require("firebase-admin/app");
-const { getAppCheck } = require("firebase-admin/app-check");
-
-initializeApp();
-
-// Project settings → Your apps → the web app id, e.g. 1:1234567890:web:abcdef…
-const APP_ID = process.env.FIREBASE_APP_ID;
-
-/// Replace this with your attestation. Return the client's identity when the request is one
-/// you approve, and null otherwise. Never trust a value that ships in the binary.
-async function attest(req) {
-  return null;
-}
-
-exports.appCheck = onRequest(async (req, res) => {
-  const client = await attest(req);
-  if (!client) {
-    res.status(403).send("not attested");
-    return;
-  }
-  const { token, ttlMillis } = await getAppCheck().createToken(APP_ID);
-  res.json({
-    token,
-    expires_at: Math.floor(Date.now() / 1000) + Math.floor(ttlMillis / 1000),
-  });
-});
-```
-
-Rate-limit the endpoint, keep tokens out of its logs, and remember that a token is good for the
-deployment's whole project — not for one account. App Check says "a Rigel client", never "this
-user"; `firestore.rules` and Firebase Authentication continue to do the per-user work.
+On the iPhone, the Cloud screen has the same optional URL and **App Check client token** fields.
+The URL is stored in the app's preferences; the token goes to the phone's keychain. Both clients
+must carry a credential before enforcement is turned on.
 
 #### 3. Enforce, Firestore first
 
@@ -213,10 +298,11 @@ resend-verification and sign-in still work from the desktop and the phone, and o
 **Authentication** (labelled preview). Authentication enforcement applies to every client in the
 project, so an old build or a script without a token stops signing in as soon as you press it.
 
-Order matters: configuring enforcement before the clients have the URL locks out Rigel's own
-writes. If that happens, turn enforcement off, fix the token flow, and try again. With App Check
-configured but unreachable, Rigel fails closed and names the endpoint in the error rather than
-sending an un-attested request that Firebase would reject anyway.
+Order matters: configuring enforcement before the clients have the URL and token locks out Rigel's
+own writes. If that happens, turn enforcement off, fix the token flow, and try again. With App
+Check configured but unreachable, Rigel fails closed and names the endpoint in the error rather
+than sending an un-attested request that Firebase would reject anyway. A `401` from the endpoint
+is reported as “refused this client”, and names the missing or rejected client token.
 
 ## The Firestore document shape
 
@@ -409,6 +495,9 @@ daily quota is usually enough for a personal shelf; watch the Firestore usage pa
 | `the Firebase web API key is not valid` | Copy the Web API key from Project settings again |
 | `App Check rejected this request` | The project enforces App Check and the token was missing or stale. Set the endpoint in Settings → Cloud → App Check or `rigel cloud app-check --url`, and check the endpoint answers with `token` and Unix-second `expires_at` |
 | `the attestation endpoint is not reachable` | Rigel fails closed instead of sending an un-attested request. Check the URL, the function's deployment and its authorisation; `rigel cloud app-check` prints the stored URL |
+| `the attestation endpoint refused this client (401)` | The installation's client token is missing or not in `RIGEL_ATTEST_CLIENTS`. Store the raw token with `rigel cloud app-check --client-token` (or Settings → Cloud → App Check), and confirm its SHA-256 is in the secret |
+| `the attestation endpoint answered 429` | The installation or address spent its token bucket. `Retry-After` is in the body; wait, or raise the limits in `functions/.env` and redeploy |
+| `the attestation endpoint answered 503` | The function has no `RIGEL_FIREBASE_APP_ID`, or `RIGEL_ATTEST_CLIENTS` is empty or malformed. Read the function logs; the value itself is never logged |
 | `expires_at is more than seven days away` | The endpoint returned milliseconds. It must be Unix **seconds**, matching the token's TTL |
 | Sign-in works, then every write is rejected after enforcing App Check | Authentication enforcement is separate from Firestore enforcement; make sure both clients are updated and configured, or temporarily turn Authentication enforcement off in App Check → APIs |
 | No reset email arrives | Check spam; the address's domain is not blocked; and the project has a sending domain under Authentication → Templates |
@@ -433,6 +522,10 @@ daily quota is usually enough for a personal shelf; watch the Firestore usage pa
 | `RIGEL_FIREBASE_PROJECT_ID` | Project id, when `cloud.json` is absent |
 | `RIGEL_FIREBASE_API_KEY` | Web API key, when `cloud.json` is absent |
 | `RIGEL_FIREBASE_APP_CHECK_URL` | Attestation endpoint, when `cloud.json` is absent or has no App Check URL |
+| `RIGEL_FIREBASE_APP_CHECK_CLIENT` | This installation's App Check client token, when the keychain has none (headless/CI) |
+| `RIGEL_CLOUD_EMAIL` | `scripts/cloud-verify.mjs`: the disposable test account |
+| `RIGEL_CLOUD_PASSWORD` | `scripts/cloud-verify.mjs`: that account's password, and the pre-reset one |
+| `RIGEL_CLOUD_NEW_PASSWORD` | `scripts/cloud-verify.mjs`: the password set through a reset link |
 | `RIGEL_FIREBASE_IDENTITY_BASE` | Override the Identity Toolkit host (tests/gateway) |
 | `RIGEL_FIREBASE_TOKEN_BASE` | Override the secure-token host (tests/gateway) |
 | `RIGEL_FIREBASE_FIRESTORE_BASE` | Override the Firestore host (tests/gateway) |

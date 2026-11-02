@@ -19,10 +19,14 @@ public struct FirebaseProject: Equatable, Sendable {
     public let tokenBase: URL
     public let firestoreBase: URL
 
+    /// `appCheckToken` is this installation's credential for the attestation endpoint. It is a
+    /// bearer secret, so it is kept in the keychain and only passed here; it is not a public
+    /// property and is never part of `==`.
     public init?(
         id: String,
         apiKey: String,
         appCheckURL: URL? = nil,
+        appCheckToken: String? = nil,
         identityBase: URL = URL(string: "https://identitytoolkit.googleapis.com")!,
         tokenBase: URL = URL(string: "https://securetoken.googleapis.com")!,
         firestoreBase: URL = URL(string: "https://firestore.googleapis.com")!
@@ -32,12 +36,19 @@ public struct FirebaseProject: Equatable, Sendable {
         guard !id.isEmpty, !apiKey.isEmpty, !id.contains("/") else { return nil }
         if let appCheckURL {
             let scheme = appCheckURL.scheme?.lowercased() ?? ""
-            guard scheme == "http" || scheme == "https" else { return nil }
+            // The client token is a bearer secret; a plaintext hop is allowed only to a local
+            // test endpoint, never to a remote host.
+            let loopback = ["localhost", "127.0.0.1", "::1", "[::1]"]
+                .contains(appCheckURL.host ?? "")
+            guard scheme == "https" || (scheme == "http" && loopback) else { return nil }
         }
         self.id = id
         self.apiKey = apiKey
         self.appCheckURL = appCheckURL
-        self.appCheck = appCheckURL.map { AppCheckTokens(url: $0) }
+        let token = appCheckToken?.trimmingCharacters(in: .whitespacesAndNewlines)
+        self.appCheck = appCheckURL.map {
+            AppCheckTokens(url: $0, clientToken: token?.isEmpty == false ? token : nil)
+        }
         self.identityBase = identityBase
         self.tokenBase = tokenBase
         self.firestoreBase = firestoreBase
@@ -208,14 +219,15 @@ public actor AppCheckTokens {
     }
 
     private let url: URL
-    private let fetch: @Sendable (URL) async throws -> (Data, HTTPURLResponse)
+    private let clientToken: String?
+    private let fetch: @Sendable (URLRequest) async throws -> (Data, HTTPURLResponse)
     private let now: @Sendable () -> Date
     private var cached: Cached?
     private var inFlight: Task<Cached, Error>?
 
-    public init(url: URL, session: URLSession = .shared) {
-        self.init(url: url, now: { Date() }) { url in
-            let (data, response) = try await session.data(from: url)
+    public init(url: URL, clientToken: String? = nil, session: URLSession = .shared) {
+        self.init(url: url, clientToken: clientToken, now: { Date() }) { request in
+            let (data, response) = try await session.data(for: request)
             guard let http = response as? HTTPURLResponse else {
                 throw CloudError.appCheck("the endpoint gave no HTTP response")
             }
@@ -226,10 +238,13 @@ public actor AppCheckTokens {
     /// For the tests: a clock and a fetch that do not touch the network.
     init(
         url: URL,
+        clientToken: String? = nil,
         now: @escaping @Sendable () -> Date,
-        fetch: @escaping @Sendable (URL) async throws -> (Data, HTTPURLResponse)
+        fetch: @escaping @Sendable (URLRequest) async throws -> (Data, HTTPURLResponse)
     ) {
         self.url = url
+        let trimmed = clientToken?.trimmingCharacters(in: .whitespacesAndNewlines)
+        self.clientToken = (trimmed?.isEmpty == false) ? trimmed : nil
         self.now = now
         self.fetch = fetch
     }
@@ -256,8 +271,20 @@ public actor AppCheckTokens {
     }
 
     private func fetchToken() async throws -> Cached {
-        let (data, response) = try await fetch(url)
+        var request = URLRequest(url: url)
+        request.httpMethod = "GET"
+        request.cachePolicy = .reloadIgnoringLocalCacheData
+        request.setValue("application/json", forHTTPHeaderField: "Accept")
+        if let clientToken {
+            request.setValue("Bearer \(clientToken)", forHTTPHeaderField: "Authorization")
+        }
+        let (data, response) = try await fetch(request)
         guard (200..<300).contains(response.statusCode) else {
+            if response.statusCode == 401 || response.statusCode == 403 {
+                throw CloudError.appCheck(
+                    "the attestation endpoint refused this phone; set the App Check client token"
+                )
+            }
             throw CloudError.appCheck("the attestation endpoint answered HTTP \(response.statusCode)")
         }
         guard let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],

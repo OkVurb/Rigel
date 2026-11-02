@@ -1,0 +1,37 @@
+rules_version = '2';
+
+// Rigel Cloud — Cloud Storage.
+//
+// Two zones, and the split matters:
+//
+//   public/**   brand assets anyone may read: the mark, screenshots, an asset manifest. Nothing
+//               personal is ever written here, so public read leaks nothing. Writes stay closed to
+//               clients: they go through the deploy, with the owner's own credentials.
+//
+//   users/**    one account's files, at the same shape the Firestore rules use, so the same
+//               session can reach both. A user reads and writes only their own subtree; an admin
+//               — a token carrying `admin: true` — may read any of it, and never write it.
+//
+// Size and type limits are part of the rule, not a convention: an unbounded upload is a bill, and
+// an HTML file served from the bucket is a phishing page.
+service firebase.storage {
+  match /b/{bucket}/o {
+    match /public/{allPaths=**} {
+      allow read: if true;
+      allow write: if false;
+    }
+
+    match /users/{uid}/{allPaths=**} {
+      allow read: if request.auth != null && request.auth.uid == uid;
+      allow write: if request.auth != null
+        && request.auth.uid == uid
+        && request.resource.size < 5 * 1024 * 1024
+        && (request.resource.contentType.matches('image/.*')
+            || request.resource.contentType == 'application/json'
+            || request.resource.contentType == 'text/markdown');
+
+      // Oversight, not impersonation: an admin token may look, never modify.
+      allow read: if request.auth != null && request.auth.token.admin == true;
+    }
+  }
+}

@@ -441,6 +441,7 @@ export default function SessionView({
   // inspectable.
   useEffect(() => {
     let alive = true;
+    let release: (() => void) | undefined;
     const tick = async () => {
       try {
         const open = await api.approvals.pending(project);
@@ -463,11 +464,22 @@ export default function SessionView({
     };
     void tick();
     const timer = window.setInterval(() => void tick(), 1500);
+    // D154: the app's watcher pushes a change as soon as the shared channel moves, so the card
+    // does not wait for the poll. The poll stays as the fallback for a missed event.
+    if (tauri) {
+      void (async () => {
+        const { listen } = await import("@tauri-apps/api/event");
+        const unlisten = await listen("rigel://approval", () => void tick());
+        if (alive) release = unlisten;
+        else unlisten();
+      })();
+    }
     return () => {
       alive = false;
       window.clearInterval(timer);
+      release?.();
     };
-  }, [project, session?.id]);
+  }, [project, session?.id, tauri]);
 
   // The window's watcher follows the project the session belongs to, so a write by another
   // agent becomes a conflict row while the turn is still running.

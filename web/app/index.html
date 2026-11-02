@@ -1,0 +1,153 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Rigel — published sessions</title>
+    <meta name="description" content="Read the Rigel sessions you published from the desktop app." />
+    <meta name="theme-color" content="#0b0c0e" />
+    <link rel="icon" type="image/svg+xml" href="/rigel.svg" />
+    <link rel="stylesheet" href="/app/app.css" />
+    <!-- Generated at deploy time by scripts/build-web.mjs; every value is public. -->
+    <script src="/app/config.js"></script>
+  </head>
+  <body>
+    <a class="skip" href="#reader">Skip to the reader</a>
+
+    <header class="topbar">
+      <a class="brand" href="/">
+        <img id="mark" src="/rigel.svg" width="24" height="24" alt="" />
+        <span>Rigel</span>
+      </a>
+
+      <div class="spacer"></div>
+
+      <label class="search" hidden id="search-wrap">
+        <span class="visually-hidden">Filter sessions</span>
+        <input id="search" type="search" placeholder="Filter sessions…" autocomplete="off" />
+        <kbd>/</kbd>
+      </label>
+
+      <button id="theme" class="icon" type="button" aria-label="Switch colour theme" title="Switch colour theme">
+        <span id="theme-icon" aria-hidden="true">◐</span>
+      </button>
+
+      <div class="account" id="account" hidden>
+        <span id="whoami" class="who"></span>
+        <span id="badge" class="badge" hidden>founder</span>
+        <button id="signout" class="link" type="button">Sign out</button>
+      </div>
+    </header>
+
+    <section id="setup" class="centered" hidden>
+      <div class="card">
+        <h1>Not configured</h1>
+        <p class="muted">
+          This build has no Firebase project. Run <code>node scripts/build-web.mjs</code> with
+          <code>RIGEL_FIREBASE_PROJECT_ID</code> and <code>RIGEL_FIREBASE_API_KEY</code> set, then
+          deploy again.
+        </p>
+      </div>
+    </section>
+
+    <section id="auth" class="centered" hidden>
+      <div class="card narrow">
+        <h1>Sign in</h1>
+        <p class="muted">
+          The same account the desktop app publishes with. The rules only ever let you read your own
+          documents.
+        </p>
+
+        <button id="google" class="google" type="button">
+          <svg viewBox="0 0 18 18" width="18" height="18" aria-hidden="true">
+            <path fill="#4285F4" d="M17.64 9.2c0-.64-.06-1.25-.16-1.84H9v3.48h4.84a4.14 4.14 0 0 1-1.8 2.72v2.26h2.92c1.7-1.57 2.68-3.88 2.68-6.62z" />
+            <path fill="#34A853" d="M9 18c2.43 0 4.47-.8 5.96-2.18l-2.92-2.26c-.8.54-1.84.86-3.04.86-2.34 0-4.32-1.58-5.03-3.7H.96v2.33A9 9 0 0 0 9 18z" />
+            <path fill="#FBBC05" d="M3.97 10.72a5.4 5.4 0 0 1 0-3.44V4.95H.96a9 9 0 0 0 0 8.1l3.01-2.33z" />
+            <path fill="#EA4335" d="M9 3.58c1.32 0 2.5.45 3.44 1.35l2.58-2.59C13.46.89 11.43 0 9 0A9 9 0 0 0 .96 4.95l3.01 2.33C4.68 5.16 6.66 3.58 9 3.58z" />
+          </svg>
+          <span id="google-label">Continue with Google</span>
+        </button>
+        <button id="google-redirect" class="link redirect" type="button">
+          Popup blocked? Continue in this tab instead
+        </button>
+
+        <p class="or"><span>or</span></p>
+
+        <form id="signin">
+          <label>
+            Email
+            <input id="email" type="email" autocomplete="username" required />
+          </label>
+          <label>
+            Password
+            <input id="password" type="password" autocomplete="current-password" required />
+          </label>
+          <button type="submit">Sign in</button>
+        </form>
+
+        <p id="auth-error" class="error" role="alert" hidden></p>
+      </div>
+    </section>
+
+    <div id="app" class="layout" hidden>
+      <aside class="list" aria-label="Sessions">
+        <div class="list-head">
+          <h2>Sessions</h2>
+          <div class="list-tools">
+            <span id="count" class="count"></span>
+            <button id="refresh" class="icon" type="button" aria-label="Reload sessions" title="Reload">⟳</button>
+          </div>
+        </div>
+        <p id="list-error" class="error" role="alert" hidden></p>
+        <ul id="sessions" class="rows"></ul>
+        <p id="list-empty" class="empty" hidden>
+          Nothing published yet. Publish a session from the desktop app with
+          <code>rigel cloud publish</code>, or the <strong>Publish to phone</strong> button.
+        </p>
+      </aside>
+
+      <main id="reader" class="reader" tabindex="-1">
+        <div id="placeholder" class="centered-inline">
+          <p class="muted">Choose a session to read.</p>
+        </div>
+
+        <article id="session" hidden>
+          <header class="session-head">
+            <button id="back" class="link back" type="button">← Sessions</button>
+            <h1 id="title"></h1>
+            <p id="meta" class="chips"></p>
+          </header>
+          <p id="turns-error" class="error" role="alert" hidden></p>
+          <ol id="turns" class="turns"></ol>
+        </article>
+      </main>
+    </div>
+
+    <footer class="foot">
+      <span>Read-only: the desktop app owns the shelf, the agents and the transcripts.</span>
+    </footer>
+
+    <template id="session-row">
+      <li>
+        <button class="row" type="button">
+          <span class="row-title"></span>
+          <span class="row-meta"></span>
+        </button>
+      </li>
+    </template>
+
+    <template id="turn-row">
+      <li class="turn">
+        <div class="turn-head">
+          <span class="seq"></span>
+          <span class="turn-meta"></span>
+          <button class="copy link" type="button">copy</button>
+        </div>
+        <p class="prompt"></p>
+        <p class="reply"></p>
+      </li>
+    </template>
+
+    <script type="module" src="/app/app.js"></script>
+  </body>
+</html>

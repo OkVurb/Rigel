@@ -31,10 +31,12 @@
 </p>
 
 <p align="center">
-  <img src="screenshots/rigel-demo.gif" width="800" alt="Screen recording of the Rigel window: the agent roster and a session turn waiting on approval, a typed prompt, the agents' chat room, the provider and harness settings, then the skill shelf" />
+  <img src="screenshots/rigel-tour-2026.gif" width="800" alt="Screen recording of the current Rigel build: the skill shelf, the command palette, a session transcript with a command waiting on approval, the chat room, the diff view, the terminal and the settings pages" />
 </p>
 
-<p align="center"><sub>Recorded from the running window: session · chat · settings · shelf</sub></p>
+<p align="center"><sub>Recorded from the current build: shelf · palette · session · chat · diff · terminal · settings</sub></p>
+
+<p align="center"><sub><a href="screenshots/rigel-ad-2026.mp4">36-second video ad (MP4, 1.5 MB)</a></sub></p>
 
 ## 💡 Why Rigel
 
@@ -74,25 +76,25 @@ Each row above is expanded, with its real state, in [What works](#-what-works) a
 
 | Search | Evidence table |
 |---|---|
-| <img src="screenshots/p2-shelf.png" width="440" alt="Shelf search" /> | <img src="screenshots/p2-evidence.png" width="440" alt="Evidence table" /> |
+| <img src="screenshots/2026-shelf.png" width="440" alt="Shelf search over six sample skills, each with a grade and duplicate markers" /> | <img src="screenshots/2026-shelf-detail.png" width="440" alt="The opened pdf row: grade, evidence table and static review" /> |
 
 **Session — the native agent, streaming**
 
-| Raw transcript | The pre-turn quote |
+| Transcript | The chat room |
 |---|---|
-| <img src="screenshots/p3-session-raw.png" width="440" alt="Raw transcript" /> | <img src="screenshots/p3-quote.png" width="440" alt="Pre-turn quote" /> |
+| <img src="screenshots/2026-session.png" width="440" alt="Session transcript with a command waiting on approval, and the budget in the inspector" /> | <img src="screenshots/2026-chat.png" width="440" alt="The chat room, with agent messages and who is in the room" /> |
 
-**Trust — what a skill would run**
+**Diff — conflicts, not locks, and the shell that ran it**
 
-| Safety review | MCP host |
+| The merged diff | The terminal |
 |---|---|
-| <img src="screenshots/safety-panel.png" width="440" alt="Safety review" /> | <img src="screenshots/runs-on-mcp.png" width="440" alt="MCP host" /> |
+| <img src="screenshots/2026-diff.png" width="440" alt="The merged diff: a conflict with three versions available, claims with a stale row, and subagent worktrees with their reviews" /> | <img src="screenshots/2026-terminal.png" width="440" alt="The terminal surface, echoed locally in the browser preview" /> |
 
 **Harnesses — one roster, one key each**
 
-| Targets (Claude) | Settings |
+| Harnesses | Agent settings |
 |---|---|
-| <img src="screenshots/targets-claude.png" width="440" alt="Targets" /> | <img src="screenshots/settings-key.png" width="440" alt="Settings and keys" /> |
+| <img src="screenshots/2026-settings-harnesses.png" width="440" alt="Harness settings: Codex, Claude Code, Cursor, Cline and Gemini CLI with what is detected and the key each receives" /> | <img src="screenshots/2026-settings-agent.png" width="440" alt="Agent settings: model, reasoning effort and the step budget" /> |
 
 ## 📌 Status
 
@@ -147,9 +149,10 @@ down rows another machine added, and **Publish to phone** sends one session's pr
 assistant's own words so the iPhone client can read them. A row removed locally becomes a
 tombstone on the next push, so a pull deletes it everywhere; Settings → Cloud shows the last sync
 (and `rigel cloud status` prints it). Bodies, tool calls, command output and project files never
-leave the machine. App Check is optional: point the app at an attestation endpoint you run
-(`rigel cloud app-check --url …`) and every Firebase request carries its short-lived token, so a
-public web API key is not enough to use your project. [docs/cloud.md](docs/cloud.md) has the
+leave the machine. App Check is optional: point the app at the attestation endpoint in
+[`functions/index.js`](functions/index.js), which checks a per-install credential and rate-limits
+token minting (`rigel cloud app-check --url …`). Every Firebase request then carries its
+short-lived token, so a public web API key is not enough to use your project. [docs/cloud.md](docs/cloud.md) has the
 five-minute setup, the App Check endpoint and the document shape;
 [`firestore.rules`](firestore.rules) is the access control.
 
@@ -432,6 +435,7 @@ A model turn needs a key; the deterministic scripted model drives the tests with
 - `bash scripts/p7-exit-test.sh` — doctor, licence files, installer config, updates and no network
 - `python scripts/sidecar/build-agentchat.py` — build the pinned Chat sidecar and its third-party notice for the installer (Windows x64)
 - `bash scripts/refresh-skills.sh` — re-index every repository in `scripts/skills-sources.txt`; `--dry-run`, `--limit` and `RIGEL_GITHUB_TOKEN` are supported
+- `node scripts/cloud-verify.mjs` — verify Rigel Cloud against a live Firebase project: account, mail, a push/pull round trip, a tombstone and the sync clocks, each as a pass/fail step; [docs/cloud.md](docs/cloud.md#verifying-a-live-project)
 - `scripts/fixtures/p4-subagents.json` — a scripted parent that delegates to two cheap readers; `rigel agent run --script` prints their bills
 
 ## 🤝 Contributing

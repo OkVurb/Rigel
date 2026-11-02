@@ -32,6 +32,10 @@ pub const FIREWORKS: &str = "fireworks";
 /// Not an inference provider: the API key for the AgentMail inbox the mail tools use. It lives
 /// beside the provider keys because that is where Rigel keeps every secret it holds.
 pub const AGENTMAIL: &str = "agentmail";
+/// Not an inference provider: the per-install credential Rigel presents to its App Check
+/// attestation endpoint. It is a bearer secret, so it lives in the keychain and is never
+/// written to `cloud.json`.
+pub const APP_CHECK: &str = "firebase-app-check-client";
 
 /// Every provider Rigel can resolve. One list so a new adapter cannot be added to the keychain
 /// without also appearing in `rigel keys status` and in the environment scrub for commands.
@@ -205,6 +209,7 @@ pub fn provider_environment_variable(provider: &str) -> Option<&'static str> {
         TOGETHER => Some("TOGETHER_API_KEY"),
         FIREWORKS => Some("FIREWORKS_API_KEY"),
         AGENTMAIL => Some("AGENTMAIL_API_KEY"),
+        APP_CHECK => Some("RIGEL_FIREBASE_APP_CHECK_CLIENT"),
         _ => None,
     }
 }
@@ -283,6 +288,14 @@ mod tests {
             );
         }
         assert!(provider_environment_variable("not-a-provider").is_none());
+    }
+
+    #[test]
+    fn the_app_check_client_token_has_a_headless_fallback() {
+        assert_eq!(
+            provider_environment_variable(APP_CHECK),
+            Some("RIGEL_FIREBASE_APP_CHECK_CLIENT")
+        );
     }
 
     #[test]

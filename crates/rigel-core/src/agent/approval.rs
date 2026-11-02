@@ -356,7 +356,10 @@ impl ApprovalBus {
         }
     }
 
-    fn pending_dir(&self) -> PathBuf {
+    /// The directory the channel writes open questions into, one JSON file per question. A
+    /// watcher can read the entries to tell every surface that the set moved, without knowing
+    /// which process published or answered.
+    pub fn pending_dir(&self) -> PathBuf {
         self.root.join("pending")
     }
 

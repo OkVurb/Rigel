@@ -1,0 +1,49 @@
+type User @table {
+  email: String!
+  displayName: String!
+  homeLocationLat: Float
+  homeLocationLong: Float
+}
+
+type CelestialBody @table {
+  commonName: String!
+  scientificName: String!
+  objectType: String!
+  magnitude: Float
+  distanceLightYears: Float
+}
+
+type Event @table {
+  eventName: String!
+  startTime: Timestamp!
+  endTime: Timestamp!
+  description: String
+  celestialBody: CelestialBody
+}
+
+type Session @table {
+  user: User!
+  sessionName: String!
+  startDate: Date
+  endDate: Date
+  locationName: String
+}
+
+type Observation @table {
+  user: User!
+  celestialBody: CelestialBody!
+  observationTimestamp: Timestamp!
+  notes: String
+  locationLat: Float
+  locationLong: Float
+  session: Session
+}
+
+type PhotoSetting @table {
+  observation: Observation!
+  cameraModel: String!
+  exposureSeconds: Float!
+  iso: Int!
+  lensFocalLength: Int
+  aperture: Float
+}

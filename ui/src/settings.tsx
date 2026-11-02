@@ -394,6 +394,7 @@ export default function SettingsView({ keys, project, session, source, onKeys, o
   // Whether this sitting has already sent a verification link, so the button can say "Resend".
   const [verificationSent, setVerificationSent] = useState(false);
   const [cloudAppCheckUrl, setCloudAppCheckUrl] = useState("");
+  const [cloudAppCheckToken, setCloudAppCheckToken] = useState("");
   // The Email page: one inbox, one key in the keychain, and the newest few messages. Bodies are
   // fetched one at a time by the agent's own tool, not mirrored into this window.
   const [mail, setMail] = useState<MailStatus | null>(null);
@@ -862,6 +863,44 @@ export default function SettingsView({ keys, project, session, source, onKeys, o
           ? "App Check is on; Firebase requests carry a token from that endpoint."
           : "App Check is off; Firebase requests carry no App Check token.",
       );
+    } catch (failure) {
+      setError(failure instanceof Error ? failure.message : String(failure));
+    } finally {
+      setCloudBusy(false);
+    }
+  };
+
+  /**
+   * The per-install credential the endpoint checks. It is a bearer secret, so the core writes it
+   * to the OS keychain and returns only whether one exists; this window never reads it back.
+   */
+  const saveCloudAppCheckToken = async () => {
+    const token = cloudAppCheckToken.trim();
+    if (!token) return;
+    setCloudBusy(true);
+    setError(null);
+    try {
+      const next = await api.cloudAppCheckClientToken(token);
+      setCloud(next);
+      setCloudAppCheckToken("");
+      onNotice(
+        next.app_check
+          ? "App Check client token stored in the OS keychain."
+          : "Client token stored; add the attestation URL to use it.",
+      );
+    } catch (failure) {
+      setError(failure instanceof Error ? failure.message : String(failure));
+    } finally {
+      setCloudBusy(false);
+    }
+  };
+
+  const clearCloudAppCheckToken = async () => {
+    setCloudBusy(true);
+    setError(null);
+    try {
+      setCloud(await api.cloudClearAppCheckClientToken());
+      onNotice("App Check client token removed from the OS keychain.");
     } catch (failure) {
       setError(failure instanceof Error ? failure.message : String(failure));
     } finally {
@@ -2292,6 +2331,25 @@ export default function SettingsView({ keys, project, session, source, onKeys, o
               />
             </div>
           </label>
+          <label className="settings-field">
+            <span>Client token</span>
+            <div className="settings-field-row">
+              <input
+                type="password"
+                value={cloudAppCheckToken}
+                aria-label="App Check client token"
+                placeholder={
+                  cloud?.app_check?.client_token_present
+                    ? "stored — paste a replacement"
+                    : "this installation's enrolment token"
+                }
+                spellCheck={false}
+                autoComplete="off"
+                disabled={cloudBusy || !cloud?.configured}
+                onChange={(event) => setCloudAppCheckToken(event.target.value)}
+              />
+            </div>
+          </label>
         </div>
         <div className="settings-actions">
           <button
@@ -2310,8 +2368,33 @@ export default function SettingsView({ keys, project, session, source, onKeys, o
               Turn off
             </button>
           ) : null}
+          <button
+            className="primary"
+            onClick={() => void saveCloudAppCheckToken()}
+            disabled={cloudBusy || !cloudAppCheckToken.trim() || !cloud?.app_check}
+          >
+            {cloud?.app_check?.client_token_present ? "Replace token" : "Save token"}
+          </button>
+          {cloud?.app_check?.client_token_present ? (
+            <button
+              className="chip danger"
+              onClick={() => void clearCloudAppCheckToken()}
+              disabled={cloudBusy}
+            >
+              Forget token
+            </button>
+          ) : null}
         </div>
-        <p className="fine mono">cloud.json · the endpoint, never a token</p>
+        <p className="fine mono">
+          cloud.json · the endpoint · rigel/firebase-app-check-client in the OS keychain
+        </p>
+        <p className="fine">
+          The token is a bearer secret: it is stored in the keychain, never in cloud.json, and
+          this window will not read it back. The endpoint keeps only its SHA-256, in the
+          <code> RIGEL_ATTEST_CLIENTS</code> secret, and rate-limits each installation. An
+          endpoint that accepts anyone is not attestation — set the token only for an endpoint
+          you trust.
+        </p>
       </section>
 
       <section className="settings-section">

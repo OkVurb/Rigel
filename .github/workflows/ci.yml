@@ -65,6 +65,22 @@ jobs:
         run: node scripts/handoff-status.mjs
         working-directory: .
 
+  functions:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: functions
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: functions/package-lock.json
+      - run: npm ci
+      - name: Endpoint tests
+        run: npm test
+
   docs:
     runs-on: ubuntu-latest
     steps:

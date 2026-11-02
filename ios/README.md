@@ -92,7 +92,9 @@ morning is still readable.
   there is nothing hidden to expand.
 
 The Firebase project id and web API key are stored in `UserDefaults` (neither is a secret); the
-account blob is a keychain item under `firebase-session`. Firebase's rules still decide access:
+account blob is a keychain item under `firebase-session`, and an App Check client token is a
+keychain item under `firebase-app-check-client` and is sent as a bearer credential only to the
+attestation endpoint. Firebase's rules still decide access:
 every read is a request with the signed-in user's ID token, and no other account can name this
 subtree.
 
@@ -135,7 +137,7 @@ target needs SwiftUI and `Security` — which do not exist on Linux — while xt
 *on* Linux. Without the variable the manifest is the ordinary xtool shape: one library product,
 the app. The tests decode captured payloads and cover address parsing, token handling, the socket's
 frames, the board, the rule book, decision cards, the line the phone sends and every error
-sentence; 72 tests, currently green — seven of them skip themselves unless they are pointed at a
+sentence; 83 tests, currently green — seven of them skip themselves unless they are pointed at a
 room, and three of those write to it.
 
 One test talks to a real server if you point it at one, which is how transport (headers, query
