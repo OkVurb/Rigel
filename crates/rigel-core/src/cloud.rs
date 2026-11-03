@@ -1520,6 +1520,49 @@ impl Cloud {
             .ok_or_else(|| CloudError::Malformed("run document is missing fields".into()))
     }
 
+    /// Cancel a run this account queued.
+    ///
+    /// Only a run nobody has started can be cancelled. A leased or running run belongs to the
+    /// runner, which is the only party that can stop it without leaving half a turn behind, so
+    /// the queue refuses instead of writing a state the runner would overwrite.
+    pub async fn cancel_run(&self, id: &str) -> Result<QueuedRun, CloudError> {
+        self.move_run(id, "cancelled").await
+    }
+
+    /// Put a failed or cancelled run back at the head of the queue, with its prompt intact.
+    pub async fn retry_run(&self, id: &str) -> Result<QueuedRun, CloudError> {
+        self.move_run(id, "queued").await
+    }
+
+    async fn move_run(&self, id: &str, to: &str) -> Result<QueuedRun, CloudError> {
+        let current = self.run(id).await?;
+        if !allows_move(&current.state, to) {
+            return Err(CloudError::Rejected {
+                status: 409,
+                message: format!(
+                    "run {} is {}, and a run in that state cannot become {to}",
+                    current.id, current.state
+                ),
+            });
+        }
+        let session = self.token().await?;
+        let write = json!({
+            "update": {
+                "name": run_document(&self.config.project_id, &session.uid, id),
+                "fields": {
+                    "state": { "stringValue": to },
+                    "updatedAtMs": { "integerValue": crate::migrate::now_ms().to_string() },
+                },
+            },
+            "updateMask": { "fieldPaths": ["state", "updatedAtMs"] },
+        });
+        self.commit(&session, vec![write]).await?;
+        Ok(QueuedRun {
+            state: to.to_string(),
+            ..current
+        })
+    }
+
     /* ------------------------------------ HTTP ------------------------------------ */
 
     /// The value of `X-Firebase-AppCheck`, or `None` when App Check is off.
@@ -1820,6 +1863,18 @@ fn session_title(session: &ProjectSession) -> String {
         .filter(|title| !title.trim().is_empty())
         .unwrap_or("Untitled session")
         .to_string()
+}
+
+/// Which state changes the desktop is allowed to make.
+///
+/// The desktop may take a run out of the queue, and may put a stopped one back. It may never
+/// claim to have started or finished a run: those transitions belong to a runner that holds
+/// the lease, and letting a client write them would let it bill for work nobody did.
+fn allows_move(from: &str, to: &str) -> bool {
+    matches!(
+        (from, to),
+        ("queued", "cancelled") | ("failed", "queued") | ("cancelled", "queued")
+    )
 }
 
 fn run_document(project_id: &str, uid: &str, run_id: &str) -> String {
@@ -2496,6 +2551,29 @@ mod tests {
             "Firebase needs a password of at least 6 characters"
         );
         assert_eq!(firebase_message("not json"), "not json");
+    }
+
+    #[test]
+    fn only_a_stopped_run_can_change_state_from_the_desktop() {
+        assert!(allows_move("queued", "cancelled"));
+        assert!(allows_move("failed", "queued"));
+        assert!(allows_move("cancelled", "queued"));
+        assert!(
+            !allows_move("running", "cancelled"),
+            "a runner owns a live run"
+        );
+        assert!(
+            !allows_move("leased", "queued"),
+            "a lease must not be stolen"
+        );
+        assert!(
+            !allows_move("queued", "done"),
+            "the desktop cannot claim work"
+        );
+        assert!(
+            !allows_move("done", "queued"),
+            "a finished run stays finished"
+        );
     }
 
     #[test]

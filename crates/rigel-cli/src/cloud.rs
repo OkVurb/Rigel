@@ -101,6 +101,22 @@ pub enum CloudCommand {
         json: bool,
     },
 
+    /// Cancel a run that nobody has started.
+    Cancel {
+        /// The id the queue printed.
+        id: String,
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Put a failed or cancelled run back in the queue.
+    Retry {
+        /// The id the queue printed.
+        id: String,
+        #[arg(long)]
+        json: bool,
+    },
+
     /// Point App Check at an attestation endpoint, or turn it off.
     ///
     /// The endpoint is a service you run; it answers with a token the Firebase Admin SDK minted
@@ -703,6 +719,42 @@ pub async fn run(dir: &Path, command: CloudCommand) -> ExitCode {
                         println!("ceiling    {} min", run.max_minutes);
                         println!("sponsor    {}", run.sponsor.as_deref().unwrap_or("none"));
                         println!("prompt     {}", one_line(&run.prompt));
+                    }
+                    ExitCode::SUCCESS
+                }
+                Err(error) => failure(error, as_json),
+            }
+        }
+
+        CloudCommand::Cancel { id, json: as_json } => {
+            let cloud = match Cloud::open(dir) {
+                Ok(cloud) => cloud,
+                Err(error) => return failure(error, as_json),
+            };
+            match cloud.cancel_run(&id).await {
+                Ok(run) => {
+                    if as_json {
+                        println!("{}", serde_json::to_string_pretty(&run).unwrap_or_default());
+                    } else {
+                        println!("cancelled  {} · {}", run.id, run.state);
+                    }
+                    ExitCode::SUCCESS
+                }
+                Err(error) => failure(error, as_json),
+            }
+        }
+
+        CloudCommand::Retry { id, json: as_json } => {
+            let cloud = match Cloud::open(dir) {
+                Ok(cloud) => cloud,
+                Err(error) => return failure(error, as_json),
+            };
+            match cloud.retry_run(&id).await {
+                Ok(run) => {
+                    if as_json {
+                        println!("{}", serde_json::to_string_pretty(&run).unwrap_or_default());
+                    } else {
+                        println!("requeued   {} · {}", run.id, run.state);
                     }
                     ExitCode::SUCCESS
                 }

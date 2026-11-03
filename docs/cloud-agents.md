@@ -4,6 +4,11 @@ read the same documents back through the same rules, so a run that exists and ca
 is a rules or path bug, not a display bug.
  Cloud agents, paid for by someone else
 
+
+rigel cloud cancel <id> takes an unstarted run out of the queue, and rigel cloud retry <id> puts a
+failed or cancelled one back with its prompt intact. Neither command can write leased, running,
+done or failed: a client that could claim those states could bill for work nobody did, so the
+transition table lives in one tested function and refuses anything a runner owns.
 The idea: a user without a provider key can send one turn to Rigel's runner, watch it stream back
 into the same window, and pay nothing — a sponsor covers the tokens. This is the Freebuff shape,
 applied to agent runs rather than chat.
