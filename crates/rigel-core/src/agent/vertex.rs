@@ -61,7 +61,12 @@ fn project_from_environment() -> Option<String> {
 /// is the same answer its config command prints, read directly rather than run so a missing or
 /// hanging CLI cannot delay a turn.
 fn project_from_gcloud_config() -> Option<String> {
-    let root = gcloud_config_dir()?;
+    project_from_cloud_cli(&gcloud_config_dir()?)
+}
+
+/// The same lookup against a directory given by the caller, so the plumbing can be tested
+/// without touching the machine-wide environment, which a test cannot change safely.
+fn project_from_cloud_cli(root: &std::path::Path) -> Option<String> {
     let active = std::fs::read_to_string(root.join("active_config"))
         .ok()
         .map(|name| name.trim().to_string())
@@ -133,7 +138,8 @@ pub fn base_url() -> Result<String, String> {
     }
     let project = project().ok_or_else(|| {
         "no Vertex project: set VERTEX_PROJECT (or GOOGLE_CLOUD_PROJECT) to the project the \
-         endpoint is billed to — `gcloud config get-value project` prints one"
+         endpoint is billed to, or run gcloud config set project <id> so Rigel reads the same \
+         project the Google Cloud CLI is already using"
             .to_string()
     })?;
     Ok(endpoint_for(&project, &location()))
@@ -312,6 +318,45 @@ mod tests {
             "only the core section names the billing project"
         );
         assert_eq!(parse_ini_project("[core]\nproject =\n"), None);
+    }
+
+    #[test]
+    fn the_cloud_cli_directory_is_read_the_way_gcloud_writes_it() {
+        let root = std::env::temp_dir().join(format!("rigel-gcloud-{}", std::process::id()));
+        let configurations = root.join("configurations");
+        std::fs::create_dir_all(&configurations).unwrap();
+        std::fs::write(
+            configurations.join("config_work"),
+            "[core]\naccount = ada@example.com\nproject = rigel-work\n",
+        )
+        .unwrap();
+        std::fs::write(root.join("active_config"), "work").unwrap();
+        assert_eq!(
+            project_from_cloud_cli(&root).as_deref(),
+            Some("rigel-work"),
+            "the active configuration names the project"
+        );
+
+        std::fs::write(root.join("active_config"), "gone\n").unwrap();
+        assert_eq!(
+            project_from_cloud_cli(&root),
+            None,
+            "a configuration that is not on disk is not guessed at"
+        );
+
+        std::fs::remove_file(root.join("active_config")).unwrap();
+        std::fs::write(
+            configurations.join("config_default"),
+            "[core]\nproject = rigel-default\n",
+        )
+        .unwrap();
+        assert_eq!(
+            project_from_cloud_cli(&root).as_deref(),
+            Some("rigel-default"),
+            "gcloud uses the default configuration when no active_config exists"
+        );
+
+        std::fs::remove_dir_all(&root).unwrap();
     }
 
     #[test]
