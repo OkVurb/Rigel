@@ -343,6 +343,15 @@ pub fn configured_model(spec: &ProviderSpec, saved: &str) -> String {
     if is_model(spec, saved) {
         return saved.trim().to_string();
     }
+    // Vertex needs the publisher prefix. A picker that hands over the AI Studio name
+    // ("gemini-3.5-flash") must not be answered with a *different* model: prefix it and send
+    // what was chosen, so a 404 names the model the user asked for rather than the default.
+    if matches!(spec.endpoint, Endpoint::Vertex) {
+        let bare = saved.trim();
+        if bare.to_ascii_lowercase().starts_with("gemini") {
+            return format!("google/{bare}");
+        }
+    }
     spec.default_model.unwrap_or_default().to_string()
 }
 
@@ -459,6 +468,25 @@ mod tests {
                 spec.id
             );
         }
+    }
+
+    #[test]
+    fn vertex_takes_the_models_its_picker_offers() {
+        let vertex = spec(credentials::VERTEX);
+        assert_eq!(
+            configured_model(vertex, "gemini-3.5-flash"),
+            "google/gemini-3.5-flash",
+            "an unprefixed Gemini id is the one the picker shows, and it must be sent, not replaced"
+        );
+        assert_eq!(
+            configured_model(vertex, "google/gemini-3.5-flash"),
+            "google/gemini-3.5-flash"
+        );
+        assert_eq!(
+            configured_model(vertex, ""),
+            "google/gemini-4-argon",
+            "with no choice at all, the provider default still applies"
+        );
     }
 
     #[test]

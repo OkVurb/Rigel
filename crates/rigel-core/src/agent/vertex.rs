@@ -19,6 +19,7 @@
 //! `gcloud auth print-access-token` when the Google Cloud CLI is installed; a turn that fails
 //! says which of the two to use.
 
+use std::path::PathBuf;
 use std::process::Stdio;
 use std::time::Duration;
 
@@ -39,6 +40,10 @@ const TOKEN_TIMEOUT: Duration = Duration::from_secs(20);
 /// The project the endpoint is billed to. The same three variables the Google tools read, with
 /// Rigel's own name first.
 pub fn project() -> Option<String> {
+    project_from_environment().or_else(project_from_gcloud_config)
+}
+
+fn project_from_environment() -> Option<String> {
     [
         "RIGEL_VERTEX_PROJECT",
         "VERTEX_PROJECT",
@@ -46,6 +51,70 @@ pub fn project() -> Option<String> {
     ]
     .iter()
     .find_map(|name| non_empty(name))
+}
+
+/// The project the Google Cloud CLI is already pointed at.
+///
+/// A desktop has no environment to put a project in, so requiring one of the variables above
+/// made Vertex unusable outside a shell: a token pasted into Settings still failed with "no
+/// Vertex project". gcloud records the signed-in project in its own configuration file, which
+/// is the same answer its config command prints, read directly rather than run so a missing or
+/// hanging CLI cannot delay a turn.
+fn project_from_gcloud_config() -> Option<String> {
+    let root = gcloud_config_dir()?;
+    let active = std::fs::read_to_string(root.join("active_config"))
+        .ok()
+        .map(|name| name.trim().to_string())
+        .filter(|name| !name.is_empty())
+        .unwrap_or_else(|| "default".to_string());
+    let config = root.join("configurations").join(format!("config_{active}"));
+    parse_ini_project(&std::fs::read_to_string(config).ok()?)
+}
+
+fn gcloud_config_dir() -> Option<PathBuf> {
+    if let Some(path) = std::env::var_os("CLOUDSDK_CONFIG") {
+        let path = PathBuf::from(path);
+        if path.is_dir() {
+            return Some(path);
+        }
+    }
+    #[cfg(windows)]
+    {
+        let appdata = std::env::var_os("APPDATA")?;
+        let path = PathBuf::from(appdata).join("gcloud");
+        return path.is_dir().then_some(path);
+    }
+    #[cfg(not(windows))]
+    {
+        let home = std::env::var_os("HOME")?;
+        let path = PathBuf::from(home).join(".config").join("gcloud");
+        path.is_dir().then_some(path)
+    }
+}
+
+/// The project key of the core section. gcloud writes these files as INI; anything else is
+/// ignored rather than guessed at.
+fn parse_ini_project(text: &str) -> Option<String> {
+    let mut section = String::new();
+    for line in text.lines() {
+        let line = line.trim();
+        if line.starts_with('[') && line.ends_with(']') {
+            section = line[1..line.len() - 1].to_string();
+            continue;
+        }
+        if section != "core" {
+            continue;
+        }
+        if let Some((key, value)) = line.split_once('=') {
+            if key.trim() == "project" {
+                let value = value.trim();
+                if !value.is_empty() {
+                    return Some(value.to_string());
+                }
+            }
+        }
+    }
+    None
 }
 
 /// `global`, or `us-central1` and friends.
@@ -231,6 +300,18 @@ mod tests {
         head.lines()
             .find_map(|line| line.strip_prefix("content-length:"))
             .and_then(|value| value.trim().parse().ok())
+    }
+
+    #[test]
+    fn the_project_can_come_from_the_cloud_cli_configuration() {
+        let config = "[core]\naccount = ada@example.com\nproject = rigel-prod\n\n[api_endpoint_overrides/aiplatform]\n";
+        assert_eq!(parse_ini_project(config).as_deref(), Some("rigel-prod"));
+        assert_eq!(
+            parse_ini_project("[compute]\nproject = elsewhere\n"),
+            None,
+            "only the core section names the billing project"
+        );
+        assert_eq!(parse_ini_project("[core]\nproject =\n"), None);
     }
 
     #[test]
