@@ -12,7 +12,8 @@ run. A box that cannot be ticked is a blocker, not a note.
 - [ ] `docs/roadmap-0.2.md` records every deferred `0.2` item.
 - [ ] `README.md`, `docs/PLATFORMS.md`, `docs/what-works.md`, `CHANGELOG.md`, `SECURITY.md`, and
       this file are current.
-- [ ] Version is `0.1.7` in `Cargo.toml`, `crates/rigel-app/tauri.conf.json`, and `ui/package.json`.
+- [x] Version is `0.1.7` in `Cargo.toml`, `crates/rigel-app/tauri.conf.json`, `ui/package.json` and
+      `web/index.html`.
 
 ### Code gate
 
@@ -53,15 +54,18 @@ vulnerability on Windows. `npm --prefix ui audit --omit=dev` reports 0 vulnerabi
 
 ### Publish gate
 
-- [ ] `node scripts/release.mjs 0.1.7` creates the version commit and tag.
-- [ ] Tag and branch push.
-- [ ] Release workflow passes its CI gate and publishes `latest.json`, MSI, NSIS, and `sbom.cdx.json`.
-- [ ] Release notes use the curated `docs/release-notes/0.1.7.md`.
-- [ ] Published assets are downloaded and their hashes match the receipt.
-- [ ] The published MSI installs on this machine.
-- [ ] The 0.1.6 update path is checked against the published `latest.json`.
-- [ ] The app reports `0.1.7` after installation.
-- [ ] Post-release receipt is posted with any manual gaps.
+- [x] `node scripts/release.mjs 0.1.7` creates the version commit and tag.
+- [x] Tag and branch push — `v0.1.7` on `54f64f6`, the commit whose CI is green.
+- [x] Release workflow passes its CI gate and publishes `latest.json`, MSI, NSIS, and `sbom.cdx.json`.
+- [x] Release notes use the curated `docs/release-notes/0.1.7.md`.
+- [x] Published assets are downloaded and their hashes match the receipt — both artifacts match
+      `latest.json`.
+- [ ] The published MSI installs on this machine — **not executed**: the elevation prompt was
+      cancelled and the machine still reports 0.1.6.
+- [ ] The 0.1.6 update path is checked against the published `latest.json` — blocked by the install
+      check above; the manifest itself verifies.
+- [ ] The app reports `0.1.7` after installation — blocked by the same install check.
+- [x] Post-release receipt is posted — `docs/release-receipts/0.1.7.md`, with the gaps above.
 
 ### Rollback
 
