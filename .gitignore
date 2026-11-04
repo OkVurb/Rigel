@@ -7,6 +7,7 @@ dist/
 dist-ssr/
 *.tsbuildinfo
 target/
+sbom.cdx.json
 
 # Playwright: the browser's traces and reports are local artifacts
 ui/test-results/

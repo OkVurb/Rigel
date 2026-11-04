@@ -126,7 +126,7 @@ fn gcloud_config_dir() -> Option<PathBuf> {
     {
         let appdata = std::env::var_os("APPDATA")?;
         let path = PathBuf::from(appdata).join("gcloud");
-        return path.is_dir().then_some(path);
+        path.is_dir().then_some(path)
     }
     #[cfg(not(windows))]
     {
@@ -149,12 +149,12 @@ fn parse_ini_project(text: &str) -> Option<String> {
         if section != "core" {
             continue;
         }
-        if let Some((key, value)) = line.split_once('=') {
-            if key.trim() == "project" {
-                let value = value.trim();
-                if !value.is_empty() {
-                    return Some(value.to_string());
-                }
+        if let Some((key, value)) = line.split_once('=')
+            && key.trim() == "project"
+        {
+            let value = value.trim();
+            if !value.is_empty() {
+                return Some(value.to_string());
             }
         }
     }
@@ -401,12 +401,8 @@ mod tests {
     #[test]
     fn a_saved_project_sits_between_the_environment_and_the_cloud_cli() {
         assert_eq!(
-            resolve_project(
-                Some("env".into()),
-                Some("saved".into()),
-                Some("cli".into())
-            )
-            .as_deref(),
+            resolve_project(Some("env".into()), Some("saved".into()), Some("cli".into()))
+                .as_deref(),
             Some("env"),
             "an explicit variable still wins, so one shell can point one turn elsewhere"
         );

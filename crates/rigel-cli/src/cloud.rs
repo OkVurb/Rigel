@@ -487,10 +487,8 @@ pub async fn run(dir: &Path, command: CloudCommand) -> ExitCode {
                     return user_error(&error.to_string(), as_json);
                 }
             }
-            if clear_client_token {
-                if let Err(error) = credentials::delete(credentials::APP_CHECK) {
-                    return user_error(&error.to_string(), as_json);
-                }
+            if clear_client_token && let Err(error) = credentials::delete(credentials::APP_CHECK) {
+                return user_error(&error.to_string(), as_json);
             }
             let changed = clear || url.is_some();
             if clear {
@@ -501,10 +499,8 @@ pub async fn run(dir: &Path, command: CloudCommand) -> ExitCode {
                     attest_url: url.trim().to_string(),
                 });
             }
-            if changed {
-                if let Err(error) = CloudConfig::save(dir, &config) {
-                    return failure(error, as_json);
-                }
+            if changed && let Err(error) = CloudConfig::save(dir, &config) {
+                return failure(error, as_json);
             }
             match Cloud::status_at(dir) {
                 Ok(status) => {

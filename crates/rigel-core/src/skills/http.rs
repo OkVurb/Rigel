@@ -158,16 +158,15 @@ impl Http {
 
             if let Some(row) = &cached {
                 let fresh = !force && self.ttl_ms > 0 && row.checked_at + self.ttl_ms > now_ms();
-                if fresh {
-                    if let Some(sha) = &row.sha256 {
-                        if let Some(text) = self.blobs.get_text(sha)? {
-                            return Ok(Fetched {
-                                text,
-                                status: row.status.unwrap_or(200) as u16,
-                                from_cache: true,
-                            });
-                        }
-                    }
+                if fresh
+                    && let Some(sha) = &row.sha256
+                    && let Some(text) = self.blobs.get_text(sha)?
+                {
+                    return Ok(Fetched {
+                        text,
+                        status: row.status.unwrap_or(200) as u16,
+                        from_cache: true,
+                    });
                 }
             }
 
@@ -192,17 +191,16 @@ impl Http {
             let status = response.status();
 
             if status == reqwest::StatusCode::NOT_MODIFIED {
-                if let Some(row) = &cached {
-                    if let Some(sha) = &row.sha256 {
-                        if let Some(text) = self.blobs.get_text(sha)? {
-                            self.touch(url).await?;
-                            return Ok(Fetched {
-                                text,
-                                status: 304,
-                                from_cache: true,
-                            });
-                        }
-                    }
+                if let Some(row) = &cached
+                    && let Some(sha) = &row.sha256
+                    && let Some(text) = self.blobs.get_text(sha)?
+                {
+                    self.touch(url).await?;
+                    return Ok(Fetched {
+                        text,
+                        status: 304,
+                        from_cache: true,
+                    });
                 }
 
                 if conditional {

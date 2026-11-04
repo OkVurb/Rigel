@@ -287,10 +287,10 @@ impl SnapshotService {
                 continue;
             }
             let path = entry.path().join(MANIFEST);
-            if let Ok(text) = fs::read_to_string(&path) {
-                if let Ok(manifest) = serde_json::from_str::<Manifest>(&text) {
-                    manifests.push(manifest);
-                }
+            if let Ok(text) = fs::read_to_string(&path)
+                && let Ok(manifest) = serde_json::from_str::<Manifest>(&text)
+            {
+                manifests.push(manifest);
             }
         }
         manifests.sort_by_key(|manifest| std::cmp::Reverse(manifest.created_at));
@@ -446,10 +446,10 @@ impl GitRepo {
                 continue;
             }
             let full = root.join(path);
-            if let Ok(metadata) = fs::metadata(&full) {
-                if metadata.is_file() {
-                    files.push((path.replace('\\', "/"), metadata.len()));
-                }
+            if let Ok(metadata) = fs::metadata(&full)
+                && metadata.is_file()
+            {
+                files.push((path.replace('\\', "/"), metadata.len()));
             }
         }
         Ok(files)
@@ -471,10 +471,10 @@ impl GitRepo {
                 continue;
             }
             let full = root.join(path);
-            if let Ok(metadata) = fs::metadata(&full) {
-                if metadata.is_file() {
-                    files.push((path.replace('\\', "/"), metadata.len()));
-                }
+            if let Ok(metadata) = fs::metadata(&full)
+                && metadata.is_file()
+            {
+                files.push((path.replace('\\', "/"), metadata.len()));
             }
         }
         Ok(files)

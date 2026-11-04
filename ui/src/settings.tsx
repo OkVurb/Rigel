@@ -113,10 +113,10 @@ const HARNESS_LABELS: Record<HarnessInfo["harness"], string> = {
 };
 
 const PAGES = [
-  { id: "agent", label: "Agent", blurb: "Model, reasoning effort and the step budget" },
+  { id: "agent", label: "Agent", blurb: "Model, reasoning effort, the step budget and the composer" },
   { id: "providers", label: "Providers", blurb: "Chat adapters, their keys and the local router" },
   { id: "harnesses", label: "Harnesses", blurb: "External CLIs, what is installed, what they receive" },
-  { id: "safety", label: "Safety", blurb: "Writable agents and the daily cap — per project" },
+  { id: "safety", label: "Safety", blurb: "Writable agents, the project daily cap and the new-session cap" },
   { id: "spending", label: "Spending", blurb: "Recorded turns, grouped by day and session" },
   { id: "terminal", label: "Terminal", blurb: "Font, scrollback and the shell a tab opens" },
   { id: "appearance", label: "Appearance", blurb: "Dark or light, with the same amber accent" },
@@ -136,10 +136,10 @@ export type SettingsPage = PageId;
 
 /** Extra words the search should understand, beyond a page's label and blurb. */
 const SETTINGS_KEYWORDS: Record<PageId, string> = {
-  agent: "model provider effort reasoning steps budget chat picker",
+  agent: "model provider effort reasoning steps budget chat picker composer auto refine",
   providers: "api key vertex google cloud omniroute openrouter anthropic openai gemini keys",
   harnesses: "claude codex cursor cline gemini cli installed path",
-  safety: "writable agents daily cap budget permissions unattended",
+  safety: "writable agents daily cap budget permissions",
   spending: "cost usage tokens spend money",
   terminal: "font size scrollback shell powershell bash",
   appearance: "theme dark light scale density compact display",
@@ -1316,6 +1316,30 @@ export default function SettingsView({
           pointed at an expensive model from here.
         </p>
       </section>
+
+      <section className="settings-section">
+        <h3>Composer</h3>
+        <label className="toggle">
+          <input
+            type="checkbox"
+            checked={settings?.auto_refine ?? false}
+            disabled={!settings}
+            onChange={(event) =>
+              void patch(
+                { auto_refine: event.target.checked },
+                event.target.checked
+                  ? "Drafts are refined and sent without the review card."
+                  : "Send opens the review card again.",
+              )
+            }
+          />
+          refine each draft before sending
+        </label>
+        <p className="fine">
+          The composer&apos;s own switch writes this same setting. Refinement uses the cheap model;
+          a refiner failure still sends the draft you typed.
+        </p>
+      </section>
     </>
   );
 
@@ -1555,7 +1579,8 @@ export default function SettingsView({
   );
 
   const safetyPage = (
-    <section className="settings-section">
+    <>
+      <section className="settings-section">
       <div className="settings-head">
         <h3>Concurrency and the daily cap</h3>
         <span className={`pill ${safety ? "completed" : "cancelled"}`}>
@@ -1609,7 +1634,37 @@ export default function SettingsView({
       ) : (
         <p className="fine">Open a project to see its safety settings.</p>
       )}
-    </section>
+      </section>
+
+      <section className="settings-section">
+        <h3>New session default</h3>
+        <p className="fine">
+          The cap every new session starts with. This is a machine preference; the project daily
+          cap above is a separate, project-wide stop.
+        </p>
+        <div className="settings-field-grid">
+          <Field
+            label="Default cap"
+            value={(settings?.default_budget_cents ?? 500) / 100}
+            min={0}
+            max={1000}
+            integer={false}
+            unit="USD"
+            disabled={!settings}
+            hint="Dollars per session. Zero starts new sessions without a cap."
+            onSave={(next) =>
+              void patch(
+                { default_budget_cents: Math.round(Number(next) * 100) },
+                `New sessions start with a $${Number(next).toFixed(2)} cap.`,
+              )
+            }
+          />
+        </div>
+        <p className="fine">
+          A running session keeps the cap it was created with; change it from the session itself.
+        </p>
+      </section>
+    </>
   );
 
   const spendingPage = (
@@ -2840,11 +2895,6 @@ export default function SettingsView({
           page: "safety",
         },
         {
-          label: "Unattended turns",
-          value: settings.unattended_default ? "allowed" : "refused",
-          page: "safety",
-        },
-        {
           label: "Chat-only picker",
           value: settings.chat_models_only ? "on" : "off",
           page: "agent",
@@ -2852,7 +2902,7 @@ export default function SettingsView({
         {
           label: "Refine before send",
           value: settings.auto_refine ? "on" : "off",
-          page: "advanced",
+          page: "agent",
         },
         {
           label: "Publish sessions",
@@ -2901,51 +2951,6 @@ export default function SettingsView({
 
   const advancedPage = (
     <>
-      <section className="settings-section">
-        <h3>Composer and sessions</h3>
-        <p className="fine">
-          These two switches also live where they are used — the composer and the Cloud page. This
-          page is the consolidated view, and it saves through the same settings.toml.
-        </p>
-        <label className="toggle">
-          <input
-            type="checkbox"
-            checked={settings?.auto_refine ?? false}
-            disabled={!settings}
-            onChange={(event) =>
-              void patch(
-                { auto_refine: event.target.checked },
-                event.target.checked
-                  ? "Drafts are refined and sent without the review card."
-                  : "Send opens the review card again.",
-              )
-            }
-          />
-          refine each draft before sending
-        </label>
-        <label className="toggle">
-          <input
-            type="checkbox"
-            checked={settings?.cloud_sync_sessions ?? false}
-            disabled={!settings || !cloud?.signed_in}
-            onChange={(event) =>
-              void patch(
-                { cloud_sync_sessions: event.target.checked },
-                event.target.checked
-                  ? "Each finished turn publishes its session."
-                  : "Automatic session publishing is off.",
-              )
-            }
-          />
-          publish each session after its turn finishes
-        </label>
-        <p className="fine">
-          {cloud?.signed_in
-            ? "Publishing writes prompts and assistant replies only. Tool calls, command output, file changes and project paths stay local."
-            : "Sign in under Cloud to enable automatic publishing; Publish to phone still works per session."}
-        </p>
-      </section>
-
       <section className="settings-section">
         <h3>Every preference</h3>
         <p className="fine">

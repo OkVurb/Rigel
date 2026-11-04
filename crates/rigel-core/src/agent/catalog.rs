@@ -265,13 +265,12 @@ async fn read_roster(
 /// declaration alone cannot tell it from `openai/gpt-5-image` (`text+image+file->text+image`, a
 /// chat model that can also draw). The id can: `lyria` is a family, `image` is not.
 fn is_chat_like(id: &str, row: &serde_json::Value) -> bool {
-    if let Some(outputs) = output_modalities(row) {
-        if outputs
+    if let Some(outputs) = output_modalities(row)
+        && outputs
             .iter()
             .all(|modality| !CHAT_OUTPUTS.contains(&modality.as_str()))
-        {
-            return false;
-        }
+    {
+        return false;
     }
     !NOT_CHAT
         .iter()
@@ -302,16 +301,15 @@ fn output_modalities(row: &serde_json::Value) -> Option<Vec<String>> {
         .and_then(|value| value.get("modality"))
         .and_then(serde_json::Value::as_str)
         .or_else(|| row.get("modality").and_then(serde_json::Value::as_str));
-    if named.is_empty() {
-        if let Some(single) = single {
-            if let Some((_, output)) = single.split_once("->") {
-                named = output
-                    .split('+')
-                    .map(str::trim)
-                    .map(str::to_string)
-                    .collect();
-            }
-        }
+    if named.is_empty()
+        && let Some(single) = single
+        && let Some((_, output)) = single.split_once("->")
+    {
+        named = output
+            .split('+')
+            .map(str::trim)
+            .map(str::to_string)
+            .collect();
     }
     named.retain(|modality| !modality.trim().is_empty());
     (!named.is_empty()).then_some(named)

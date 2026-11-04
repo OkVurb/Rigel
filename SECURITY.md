@@ -4,17 +4,21 @@ Rigel runs coding agents against a real working tree, holds provider keys, and i
 dependencies. This document is the threat model it is built against, the boundaries it enforces,
 and the ones it deliberately does not.
 
+The data-flow companion is [docs/privacy.md](docs/privacy.md).
+
 ## Reporting
 
-Email security@rigel.invalid with a description, the version (`rigel --version`) and, if you have
-one, a proof of concept. Please do not open a public issue first. We aim to acknowledge within
-three working days and to ship a fix or a written mitigation within thirty.
+Use GitHub's private vulnerability reporting (Security → Report a vulnerability) with a description,
+the version (`rigel --version`) and, if you have one, a proof of concept. Do not open a public issue
+or include keys, tokens or private source in the report. If private reporting is unavailable, open a
+minimal public issue asking for a private channel without disclosing the details. We aim to
+acknowledge within three working days and to ship a fix or a written mitigation within thirty.
 
 There is no bug bounty. There is no telemetry, so we cannot see an incident unless you tell us.
 
 ## Supported versions
 
-The latest minor release. `main` is development; a bug that only exists there is still worth
+The latest published release. `main` is development; a bug that only exists there is still worth
 reporting.
 
 ## Boundaries

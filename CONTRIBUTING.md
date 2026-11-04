@@ -6,7 +6,7 @@ schemas and the reason for each decision live in [docs/handoff.md](docs/handoff.
 
 ## Set up
 
-- Rust **1.85 or newer** (`rust-toolchain` is not pinned; the workspace's `rust-version` is).
+- Rust **1.88 or newer** (`rust-toolchain` is not pinned; the workspace's `rust-version` is).
 - Node **20 or newer** for `ui/` and the prototype.
 - Windows: WebView2 runtime (installed by default on Windows 11 and by the installer on 10).
 - `git` on `PATH`, and `ripgrep` if you want the exit scripts to exercise a present tool.

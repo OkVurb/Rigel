@@ -308,9 +308,18 @@ impl SkillIndex {
                 name: field("n").as_str().unwrap_or_default().to_string(),
                 description: field("d").as_str().unwrap_or_default().to_string(),
                 source: field("s").as_str().unwrap_or("catalog").to_string(),
-                repo: field("r").as_str().filter(|v| !v.is_empty()).map(ToOwned::to_owned),
-                path: field("p").as_str().filter(|v| !v.is_empty()).map(ToOwned::to_owned),
-                url: field("u").as_str().filter(|v| !v.is_empty()).map(ToOwned::to_owned),
+                repo: field("r")
+                    .as_str()
+                    .filter(|v| !v.is_empty())
+                    .map(ToOwned::to_owned),
+                path: field("p")
+                    .as_str()
+                    .filter(|v| !v.is_empty())
+                    .map(ToOwned::to_owned),
+                url: field("u")
+                    .as_str()
+                    .filter(|v| !v.is_empty())
+                    .map(ToOwned::to_owned),
                 body_sha: None,
                 grade: None,
                 grade_scope: None,
@@ -325,7 +334,11 @@ impl SkillIndex {
             written += 1;
         }
 
-        Ok(SeedReport { rows: nodes.len(), written, skipped })
+        Ok(SeedReport {
+            rows: nodes.len(),
+            written,
+            skipped,
+        })
     }
 
     /// Write one skill. Used for both scanned bodies and bare marketplace rows.

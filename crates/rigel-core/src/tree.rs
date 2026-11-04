@@ -127,10 +127,10 @@ fn walk(root: &Path, dir: &Path, out: &mut Vec<String>, depth: usize) -> Result<
         })?;
         if file_type.is_dir() {
             walk(root, &path, out, depth + 1)?;
-        } else if file_type.is_file() {
-            if let Ok(relative) = path.strip_prefix(root) {
-                out.push(relative.to_string_lossy().into_owned());
-            }
+        } else if file_type.is_file()
+            && let Ok(relative) = path.strip_prefix(root)
+        {
+            out.push(relative.to_string_lossy().into_owned());
         }
     }
     Ok(())

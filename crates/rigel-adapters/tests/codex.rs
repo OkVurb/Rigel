@@ -120,10 +120,10 @@ async fn injected_environment_reaches_the_child_without_exposing_the_value() {
 
     adapter
         .run_turn("say pong", |event| {
-            if let CodexEvent::Item(item) = event {
-                if let Some(message) = item.body["message"].as_str() {
-                    reported.push(message.to_string());
-                }
+            if let CodexEvent::Item(item) = event
+                && let Some(message) = item.body["message"].as_str()
+            {
+                reported.push(message.to_string());
             }
         })
         .await

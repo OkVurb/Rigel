@@ -287,6 +287,12 @@ Two things the merge exposed that are worth keeping in mind:
 
 ### 2.10 Where the work stands, and what is open (22 Oct 2026)
 
+**4 Nov 2026 — 0.1.7 is a small release.** Round 9 (Q216–Q335) is answered in
+[grilling-round-9.md](grilling-round-9.md). Q330 keeps this cut to the settings repair, release
+hardening and low-risk cleanup; the substantial accepted work is in
+[roadmap-0.2.md](roadmap-0.2.md). The hard gate is
+[release-checklist.md](release-checklist.md).
+
 Verified working in the app: open a project → Chat → **Start the chat server** → **Start agents**
 → three agents (Claude, Codex, Phi4) online with no window on screen; mention one and it replies;
 press **Swarm** on the Session tab and every online agent gets the task. Session has a live model

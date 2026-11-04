@@ -112,8 +112,9 @@ fn default_max_steps() -> u16 {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Settings {
     pub theme: String,
+    /// The cap a new session starts with, in cents. Zero means no cap; a running session keeps
+    /// the cap it was created with.
     pub default_budget_cents: i64,
-    pub unattended_default: bool,
     /// `omniroute` (local router), `openrouter`, or `gemini`. Old settings files gain the
     /// default.
     #[serde(default = "default_provider")]
@@ -176,7 +177,6 @@ impl Default for Settings {
         Self {
             theme: "dark".to_string(),
             default_budget_cents: 500,
-            unattended_default: false,
             provider: default_provider(),
             model: default_model(),
             vertex_project: String::new(),
@@ -620,6 +620,12 @@ fn session_start(
     budget_cents: Option<i64>,
 ) -> Result<Session, String> {
     tauri::async_runtime::block_on(async move {
+        // An explicit cap still wins; otherwise the saved default is the one place that choice
+        // lives, and zero means no cap.
+        let budget_cents = budget_cents.or_else(|| {
+            let saved = load_settings().default_budget_cents;
+            (saved > 0).then_some(saved)
+        });
         SessionService::open(Path::new(&project))
             .await
             .map_err(message)?
@@ -984,21 +990,20 @@ fn search_all(
 ) -> Result<PaletteResults, String> {
     tauri::async_runtime::block_on(async move {
         let mut skills = Vec::new();
-        if !query.trim().is_empty() {
-            if let Ok(index) = SkillIndex::open(&index_dir()).await {
-                if let Ok(hits) = index.search(&query, 6).await {
-                    skills = hits
-                        .into_iter()
-                        .map(|hit| PaletteSkill {
-                            id: hit.id,
-                            name: hit.name,
-                            description: hit.description,
-                            grade: hit.grade,
-                            source: hit.source,
-                        })
-                        .collect();
-                }
-            }
+        if !query.trim().is_empty()
+            && let Ok(index) = SkillIndex::open(&index_dir()).await
+            && let Ok(hits) = index.search(&query, 6).await
+        {
+            skills = hits
+                .into_iter()
+                .map(|hit| PaletteSkill {
+                    id: hit.id,
+                    name: hit.name,
+                    description: hit.description,
+                    grade: hit.grade,
+                    source: hit.source,
+                })
+                .collect();
         }
 
         let workspace = match project.as_deref().filter(|root| !root.is_empty()) {
@@ -2447,15 +2452,14 @@ fn omniroute_start() -> Result<rigel_core::ServerStatus, String> {
 
 /// The picker's last answer, held for five minutes. The read is network-bound and the two pickers
 /// (Session and Settings) would otherwise each pay for it on mount.
-static MODEL_CACHE: std::sync::OnceLock<
-    std::sync::Mutex<Option<(std::time::Instant, String, Vec<ModelOption>)>>,
-> = std::sync::OnceLock::new();
+type ModelCache = std::sync::Mutex<Option<(std::time::Instant, String, Vec<ModelOption>)>>;
+static MODEL_CACHE: std::sync::OnceLock<ModelCache> = std::sync::OnceLock::new();
 
 fn clear_model_cache() {
-    if let Some(cache) = MODEL_CACHE.get() {
-        if let Ok(mut guard) = cache.lock() {
-            *guard = None;
-        }
+    if let Some(cache) = MODEL_CACHE.get()
+        && let Ok(mut guard) = cache.lock()
+    {
+        *guard = None;
     }
 }
 
@@ -2465,12 +2469,12 @@ fn clear_model_cache() {
 fn models_list() -> Result<Vec<ModelOption>, String> {
     let provider = load_settings().provider.trim().to_lowercase();
     let cache = MODEL_CACHE.get_or_init(|| std::sync::Mutex::new(None));
-    if let Ok(guard) = cache.lock() {
-        if let Some((read_at, cached_for, rows)) = guard.as_ref() {
-            if cached_for == &provider && read_at.elapsed() < std::time::Duration::from_secs(300) {
-                return Ok(rows.clone());
-            }
-        }
+    if let Ok(guard) = cache.lock()
+        && let Some((read_at, cached_for, rows)) = guard.as_ref()
+        && cached_for == &provider
+        && read_at.elapsed() < std::time::Duration::from_secs(300)
+    {
+        return Ok(rows.clone());
     }
     let rows = tauri::async_runtime::block_on(catalog::roster(
         &provider,
@@ -2712,10 +2716,11 @@ fn update_set(
     auto_install: bool,
     manifest_url: Option<String>,
 ) -> Result<UpdateStatus, String> {
-    if let Some(url) = manifest_url.as_deref() {
-        if !url.trim().is_empty() && !url.starts_with("https://") {
-            return Err("the update manifest must be an https URL".to_string());
-        }
+    if let Some(url) = manifest_url.as_deref()
+        && !url.trim().is_empty()
+        && !url.starts_with("https://")
+    {
+        return Err("the update manifest must be an https URL".to_string());
     }
     // The window has no URL field, so `null` means "keep whatever the CLI configured". An
     // explicit empty string clears it and returns to the GitHub default.
@@ -3007,7 +3012,9 @@ fn cloud_publish_all(project: String) -> Result<rigel_core::cloud::PublishAllRep
     let dir = index_dir();
     tauri::async_runtime::block_on(async move {
         let cloud = rigel_core::cloud::Cloud::open(&dir).map_err(message)?;
-        let service = SessionService::open(Path::new(&project)).await.map_err(message)?;
+        let service = SessionService::open(Path::new(&project))
+            .await
+            .map_err(message)?;
         cloud.publish_all(&service).await.map_err(message)
     })
 }
@@ -3220,8 +3227,14 @@ fn show_tray_panel(app: &tauri::AppHandle, x: f64, y: f64) {
         let _ = window.hide();
         return;
     }
-    let width = window.outer_size().map(|size| size.width as i32).unwrap_or(380);
-    let height = window.outer_size().map(|size| size.height as i32).unwrap_or(560);
+    let width = window
+        .outer_size()
+        .map(|size| size.width as i32)
+        .unwrap_or(380);
+    let height = window
+        .outer_size()
+        .map(|size| size.height as i32)
+        .unwrap_or(560);
     let x = (x.round() as i32 - width + 12).max(8);
     let y = (y.round() as i32 - height - 12).max(8);
     let _ = window.set_position(tauri::PhysicalPosition::new(x, y));
@@ -3261,21 +3274,19 @@ fn quit(app: &tauri::AppHandle) {
 fn install_tray(app: &tauri::AppHandle) -> tauri::Result<()> {
     let mut builder = TrayIconBuilder::with_id("rigel")
         .tooltip("Rigel — agents and spend live here while the window is closed")
-        .on_tray_icon_event(|tray, event| {
-            match event {
-                TrayIconEvent::Click {
-                    button: MouseButton::Left,
-                    button_state: MouseButtonState::Up,
-                    ..
-                } => show_main_window(tray.app_handle()),
-                TrayIconEvent::Click {
-                    button: MouseButton::Right,
-                    button_state: MouseButtonState::Up,
-                    position,
-                    ..
-                } => show_tray_panel(tray.app_handle(), position.x as f64, position.y as f64),
-                _ => {}
-            }
+        .on_tray_icon_event(|tray, event| match event {
+            TrayIconEvent::Click {
+                button: MouseButton::Left,
+                button_state: MouseButtonState::Up,
+                ..
+            } => show_main_window(tray.app_handle()),
+            TrayIconEvent::Click {
+                button: MouseButton::Right,
+                button_state: MouseButtonState::Up,
+                position,
+                ..
+            } => show_tray_panel(tray.app_handle(), position.x, position.y),
+            _ => {}
         });
     if let Some(icon) = app.default_window_icon() {
         builder = builder.icon(icon.clone());
@@ -3326,11 +3337,12 @@ pub fn run() {
                 }
                 return;
             }
-            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
-                if TRAY_READY.load(Ordering::SeqCst) && !SHUTTING_DOWN.load(Ordering::SeqCst) {
-                    api.prevent_close();
-                    let _ = window.hide();
-                }
+            if let tauri::WindowEvent::CloseRequested { api, .. } = event
+                && TRAY_READY.load(Ordering::SeqCst)
+                && !SHUTTING_DOWN.load(Ordering::SeqCst)
+            {
+                api.prevent_close();
+                let _ = window.hide();
             }
         })
         .invoke_handler(tauri::generate_handler![

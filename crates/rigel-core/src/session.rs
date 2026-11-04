@@ -877,13 +877,13 @@ impl SessionService {
         .bind(turn_id)
         .fetch_optional(&self.pool)
         .await?;
-        if let Some((session_id, errors)) = row {
-            if errors == 0 {
-                sqlx::query("UPDATE sessions SET tasks_done = tasks_done + 1 WHERE id = ?")
-                    .bind(session_id)
-                    .execute(&self.pool)
-                    .await?;
-            }
+        if let Some((session_id, errors)) = row
+            && errors == 0
+        {
+            sqlx::query("UPDATE sessions SET tasks_done = tasks_done + 1 WHERE id = ?")
+                .bind(session_id)
+                .execute(&self.pool)
+                .await?;
         }
         Ok(())
     }

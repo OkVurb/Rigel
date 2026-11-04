@@ -1125,13 +1125,17 @@ export default function SessionView({
       setStarting(true);
       setTemplateOpen(false);
       try {
-        const created = await api.startSession(project, template?.name ?? "Session", 500);
+        const created = await api.startSession(project, template?.name ?? "Session");
         const listed = await api.listSessions(project);
         setList(listed);
         onSessions(listed);
         await selectSession(created);
         if (!template) {
-          onNotice(`Session started with a $5.00 cap.`);
+          onNotice(
+            created.budget_cents === null
+              ? "Session started without a cap."
+              : `Session started with a ${cents(created.budget_cents)} cap.`,
+          );
           return;
         }
         // The template's model and effort are applied through the same path the picker uses,

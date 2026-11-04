@@ -314,14 +314,14 @@ async fn handle(mut socket: TcpStream, state: Arc<FakeFirebase>) -> std::io::Res
             .await
         }
         path if path.ends_with("/documents:commit") => {
-            if let Ok(payload) = serde_json::from_str::<Value>(&body) {
-                if let Some(writes) = payload.get("writes").and_then(Value::as_array) {
-                    state
-                        .writes
-                        .lock()
-                        .expect("writes")
-                        .extend(writes.iter().cloned());
-                }
+            if let Ok(payload) = serde_json::from_str::<Value>(&body)
+                && let Some(writes) = payload.get("writes").and_then(Value::as_array)
+            {
+                state
+                    .writes
+                    .lock()
+                    .expect("writes")
+                    .extend(writes.iter().cloned());
             }
             state.commits.lock().expect("commits").push(authorization);
             respond(&mut socket, 200, "{}").await

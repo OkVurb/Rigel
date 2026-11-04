@@ -114,12 +114,11 @@ fn now_ms() -> i64 {
 /// Opening a project runs its migrations and WAL check. The tray polls, so keep the pool for the
 /// current root instead of doing that every two seconds while a session may be writing.
 async fn project_pool(root: &Path) -> Result<SqlitePool, String> {
-    if let Ok(guard) = PROJECT_POOL.lock() {
-        if let Some((cached_root, pool)) = guard.as_ref() {
-            if cached_root == root {
-                return Ok(pool.clone());
-            }
-        }
+    if let Ok(guard) = PROJECT_POOL.lock()
+        && let Some((cached_root, pool)) = guard.as_ref()
+        && cached_root == root
+    {
+        return Ok(pool.clone());
     }
 
     let service = SessionService::open(root)

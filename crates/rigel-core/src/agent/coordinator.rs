@@ -177,10 +177,10 @@ impl Cancels {
     }
 
     pub fn cancel_turn(&self, turn_id: &str) {
-        if let Ok(inner) = self.inner.lock() {
-            if let Some((_, token)) = inner.get(turn_id) {
-                token.cancel();
-            }
+        if let Ok(inner) = self.inner.lock()
+            && let Some((_, token)) = inner.get(turn_id)
+        {
+            token.cancel();
         }
     }
 
@@ -681,18 +681,18 @@ impl Coordinator {
         // D80/D114: a writable child works in a worktree and its output is a candidate, not
         // a change. The approved plan is restated here so the child cannot drift from what
         // the user actually consented to.
-        if let Ok(Some(plan)) = self.session.plan_of(agent_id).await {
-            if !plan.is_empty() {
-                system.push_str(&format!(
-                    "\n\nYou are a writable child (D80). You work in an isolated worktree at {}. \
+        if let Ok(Some(plan)) = self.session.plan_of(agent_id).await
+            && !plan.is_empty()
+        {
+            system.push_str(&format!(
+                "\n\nYou are a writable child (D80). You work in an isolated worktree at {}. \
                      You may edit and write only the files in your assignment, and run commands \
                      there. Nothing you change reaches the project until the coordinator merges \
                      it after a clean-context review, so commit nothing. Stay inside the \
                      approved plan below; if it is wrong, stop and say so instead of widening \
                      it.\nApproved plan:\n{plan}",
-                    self.project_root.display()
-                ));
-            }
+                self.project_root.display()
+            ));
         }
         // D91: the project's own rule files join the preamble, labelled as imported data.
         let rules = crate::rules::load(&self.project_root);
@@ -816,41 +816,41 @@ Plan mode is on (D98): inspect the project and propose a plan. You cannot edit o
 
                 match self.budget.account(agent_id, &turn.id, &step.usage).await {
                     Ok(BudgetOutcome::Exceeded) => {
-                        if let Ok(snapshot) = self.budget.snapshot(agent_id).await {
-                            if let Some(cap) = snapshot.cap_micros {
-                                self.sink.emit(AgentEvent::BudgetExceeded {
-                                    session_id: session_id.to_string(),
-                                    spend_micros: snapshot.session_micros,
-                                    cap_micros: cap,
-                                });
-                            }
+                        if let Ok(snapshot) = self.budget.snapshot(agent_id).await
+                            && let Some(cap) = snapshot.cap_micros
+                        {
+                            self.sink.emit(AgentEvent::BudgetExceeded {
+                                session_id: session_id.to_string(),
+                                spend_micros: snapshot.session_micros,
+                                cap_micros: cap,
+                            });
                         }
                         last_stop = StopReason::BudgetExceeded;
                         break;
                     }
                     Ok(BudgetOutcome::DailyExceeded) => {
-                        if let Ok(daily) = self.budget.daily_status().await {
-                            if let Some(cap) = daily.cap_micros {
-                                self.sink.emit(AgentEvent::DailyBudgetExceeded {
-                                    day: daily.day,
-                                    spend_micros: daily.spend_micros,
-                                    cap_micros: cap,
-                                });
-                            }
+                        if let Ok(daily) = self.budget.daily_status().await
+                            && let Some(cap) = daily.cap_micros
+                        {
+                            self.sink.emit(AgentEvent::DailyBudgetExceeded {
+                                day: daily.day,
+                                spend_micros: daily.spend_micros,
+                                cap_micros: cap,
+                            });
                         }
                         last_stop = StopReason::BudgetExceeded;
                         break;
                     }
                     Ok(BudgetOutcome::Warning) => {
-                        if let Ok(snapshot) = self.budget.snapshot(agent_id).await {
-                            if let Some(cap) = snapshot.cap_micros {
-                                self.sink.emit(AgentEvent::BudgetWarning {
-                                    session_id: session_id.to_string(),
-                                    spend_micros: snapshot.session_micros,
-                                    cap_micros: cap,
-                                    remaining_micros: snapshot.remaining_micros.unwrap_or(0),
-                                });
-                            }
+                        if let Ok(snapshot) = self.budget.snapshot(agent_id).await
+                            && let Some(cap) = snapshot.cap_micros
+                        {
+                            self.sink.emit(AgentEvent::BudgetWarning {
+                                session_id: session_id.to_string(),
+                                spend_micros: snapshot.session_micros,
+                                cap_micros: cap,
+                                remaining_micros: snapshot.remaining_micros.unwrap_or(0),
+                            });
                         }
                     }
                     Ok(BudgetOutcome::Ok) => {}
@@ -858,31 +858,30 @@ Plan mode is on (D98): inspect the project and propose a plan. You cannot edit o
                 }
 
                 // D116: the day's 80% is announced once, whichever agent crossed it.
-                if let Ok(Some(daily)) = self.budget.daily_warning_due().await {
-                    if let Some(cap) = daily.cap_micros {
-                        self.sink.emit(AgentEvent::DailyBudgetWarning {
-                            day: daily.day,
-                            spend_micros: daily.spend_micros,
-                            cap_micros: cap,
-                        });
-                    }
+                if let Ok(Some(daily)) = self.budget.daily_warning_due().await
+                    && let Some(cap) = daily.cap_micros
+                {
+                    self.sink.emit(AgentEvent::DailyBudgetWarning {
+                        day: daily.day,
+                        spend_micros: daily.spend_micros,
+                        cap_micros: cap,
+                    });
                 }
 
                 // D92: a task cap stops this one agent. The session cap above is the only
                 // one allowed to interrupt every agent; a task is a narrower promise.
-                if let Ok(snapshot) = self.budget.snapshot(agent_id).await {
-                    if let Some(cap) = snapshot.task_cap_micros {
-                        if snapshot.agent_micros > cap {
-                            self.sink.emit(AgentEvent::TaskBudgetExceeded {
-                                session_id: session_id.to_string(),
-                                agent_id: agent_id.to_string(),
-                                spend_micros: snapshot.agent_micros,
-                                cap_micros: cap,
-                            });
-                            last_stop = StopReason::BudgetExceeded;
-                            break;
-                        }
-                    }
+                if let Ok(snapshot) = self.budget.snapshot(agent_id).await
+                    && let Some(cap) = snapshot.task_cap_micros
+                    && snapshot.agent_micros > cap
+                {
+                    self.sink.emit(AgentEvent::TaskBudgetExceeded {
+                        session_id: session_id.to_string(),
+                        agent_id: agent_id.to_string(),
+                        spend_micros: snapshot.agent_micros,
+                        cap_micros: cap,
+                    });
+                    last_stop = StopReason::BudgetExceeded;
+                    break;
                 }
             }
 
@@ -996,12 +995,13 @@ chat_send/chat_wait.",
 
                 // After a split, restate the whole board as a system message: the next step
                 // must see the assignments it just made, including any that failed to deliver.
-                if outcome.ok && matches!(call.name.as_str(), "spawn_agents" | "assign_agents") {
-                    if let Ok(rows) = self.session.team(session_id).await {
-                        let board = team::board(&rows, None);
-                        if !board.is_empty() {
-                            messages.push(ChatMessage::system(board));
-                        }
+                if outcome.ok
+                    && matches!(call.name.as_str(), "spawn_agents" | "assign_agents")
+                    && let Ok(rows) = self.session.team(session_id).await
+                {
+                    let board = team::board(&rows, None);
+                    if !board.is_empty() {
+                        messages.push(ChatMessage::system(board));
                     }
                 }
 

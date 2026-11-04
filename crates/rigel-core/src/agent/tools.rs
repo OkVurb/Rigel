@@ -1785,10 +1785,10 @@ fn skills_error(error: SkillsError) -> ToolOutcome {
 /// The bare address in a sender line: `Name <a@b>` becomes `a@b`, and `a@b` stays `a@b`.
 /// A reply is addressed from this, so it can never be redirected to a new recipient.
 fn address_of(from: &str) -> String {
-    if let Some(start) = from.find('<') {
-        if let Some(end) = from[start..].find('>') {
-            return from[start + 1..start + end].trim().to_string();
-        }
+    if let Some(start) = from.find('<')
+        && let Some(end) = from[start..].find('>')
+    {
+        return from[start + 1..start + end].trim().to_string();
     }
     from.trim().to_string()
 }
@@ -1817,44 +1817,40 @@ fn truncate_body(mut outcome: ToolOutcome) -> ToolOutcome {
         .body
         .get_mut("diff")
         .and_then(|value| value.as_str())
+        && text.chars().count() > MAX_RESULT_CHARS
     {
-        if text.chars().count() > MAX_RESULT_CHARS {
-            let cut: String = text.chars().take(MAX_RESULT_CHARS).collect();
-            outcome.body["diff"] = json!(format!("{cut}\n… diff truncated"));
-        }
+        let cut: String = text.chars().take(MAX_RESULT_CHARS).collect();
+        outcome.body["diff"] = json!(format!("{cut}\n… diff truncated"));
     }
     if let Some(text) = outcome
         .body
         .get_mut("content")
         .and_then(|value| value.as_str())
+        && text.chars().count() > MAX_RESULT_CHARS
     {
-        if text.chars().count() > MAX_RESULT_CHARS {
-            let cut: String = text.chars().take(MAX_RESULT_CHARS).collect();
-            outcome.body["content"] = json!(format!("{cut}\n… read truncated"));
-            outcome.body["truncated"] = json!(true);
-        }
+        let cut: String = text.chars().take(MAX_RESULT_CHARS).collect();
+        outcome.body["content"] = json!(format!("{cut}\n… read truncated"));
+        outcome.body["truncated"] = json!(true);
     }
     if let Some(text) = outcome
         .body
         .get_mut("body")
         .and_then(|value| value.as_str())
+        && text.chars().count() > MAX_RESULT_CHARS
     {
-        if text.chars().count() > MAX_RESULT_CHARS {
-            let cut: String = text.chars().take(MAX_RESULT_CHARS).collect();
-            outcome.body["body"] = json!(format!("{cut}\n… body truncated"));
-            outcome.body["truncated"] = json!(true);
-        }
+        let cut: String = text.chars().take(MAX_RESULT_CHARS).collect();
+        outcome.body["body"] = json!(format!("{cut}\n… body truncated"));
+        outcome.body["truncated"] = json!(true);
     }
     if let Some(text) = outcome
         .body
         .get_mut("text")
         .and_then(|value| value.as_str())
+        && text.chars().count() > MAX_RESULT_CHARS
     {
-        if text.chars().count() > MAX_RESULT_CHARS {
-            let cut: String = text.chars().take(MAX_RESULT_CHARS).collect();
-            outcome.body["text"] = json!(format!("{cut}\n… fetched text truncated"));
-            outcome.body["truncated"] = json!(true);
-        }
+        let cut: String = text.chars().take(MAX_RESULT_CHARS).collect();
+        outcome.body["text"] = json!(format!("{cut}\n… fetched text truncated"));
+        outcome.body["truncated"] = json!(true);
     }
     outcome
 }

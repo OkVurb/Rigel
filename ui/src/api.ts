@@ -91,7 +91,6 @@ export interface PaletteResults {
 export interface Settings {
   theme: string;
   default_budget_cents: number;
-  unattended_default: boolean;
   /** One row of the Rust-side adapter table: `omniroute`, `openrouter`, `gemini`, `vertex`, … */
   provider: string;
   model: string;
@@ -138,7 +137,6 @@ export function defaultSettings(): Settings {
   return {
     theme: "dark",
     default_budget_cents: 500,
-    unattended_default: false,
     provider: "omniroute",
     model: "gpt-5.6-sol-medium",
     vertex_project: "",

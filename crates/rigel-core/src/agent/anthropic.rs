@@ -228,22 +228,20 @@ impl AnthropicModel {
                                 if let Some(text) = delta
                                     .and_then(|delta| delta.get("text"))
                                     .and_then(Value::as_str)
+                                    && !text.is_empty()
                                 {
-                                    if !text.is_empty() {
-                                        emitted = true;
-                                        on_delta(Delta::Text(text.to_string()));
-                                    }
+                                    emitted = true;
+                                    on_delta(Delta::Text(text.to_string()));
                                 }
                             }
                             Some("thinking_delta") => {
                                 if let Some(text) = delta
                                     .and_then(|delta| delta.get("thinking"))
                                     .and_then(Value::as_str)
+                                    && !text.is_empty()
                                 {
-                                    if !text.is_empty() {
-                                        emitted = true;
-                                        on_delta(Delta::Reasoning(text.to_string()));
-                                    }
+                                    emitted = true;
+                                    on_delta(Delta::Reasoning(text.to_string()));
                                 }
                             }
                             Some("input_json_delta") => {

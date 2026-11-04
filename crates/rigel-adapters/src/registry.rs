@@ -548,15 +548,14 @@ pub async fn probe_cached(
     store: &dyn CredentialStore,
     force: bool,
 ) -> std::io::Result<AdapterCache> {
-    if !force {
-        if let Some(mut cache) = AdapterCache::load(path) {
-            if cache.is_fresh() {
-                if cache.refresh_auth(store) {
-                    cache.save(path)?;
-                }
-                return Ok(cache);
-            }
+    if !force
+        && let Some(mut cache) = AdapterCache::load(path)
+        && cache.is_fresh()
+    {
+        if cache.refresh_auth(store) {
+            cache.save(path)?;
         }
+        return Ok(cache);
     }
     let cache = AdapterCache::probe(store).await;
     cache.save(path)?;

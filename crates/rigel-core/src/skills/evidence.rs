@@ -157,13 +157,13 @@ pub fn advertised_claims(description: &str) -> Vec<Claim> {
         "percent-claim"
     };
 
-    if let Some(captures) = RANGE.captures(description) {
-        if let Ok(high) = captures[2].parse::<f64>() {
-            return vec![Claim {
-                metric,
-                value: high,
-            }];
-        }
+    if let Some(captures) = RANGE.captures(description)
+        && let Ok(high) = captures[2].parse::<f64>()
+    {
+        return vec![Claim {
+            metric,
+            value: high,
+        }];
     }
 
     match SINGLE.captures(description) {

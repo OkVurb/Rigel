@@ -152,21 +152,21 @@ impl OpenRouterModel {
                     continue;
                 };
 
-                if let Some(text) = delta.get("content").and_then(Value::as_str) {
-                    if !text.is_empty() {
-                        emitted = true;
-                        on_delta(Delta::Text(text.to_string()));
-                    }
+                if let Some(text) = delta.get("content").and_then(Value::as_str)
+                    && !text.is_empty()
+                {
+                    emitted = true;
+                    on_delta(Delta::Text(text.to_string()));
                 }
                 let reasoning = delta
                     .get("reasoning")
                     .or_else(|| delta.get("reasoning_content"))
                     .and_then(Value::as_str);
-                if let Some(text) = reasoning {
-                    if !text.is_empty() {
-                        emitted = true;
-                        on_delta(Delta::Reasoning(text.to_string()));
-                    }
+                if let Some(text) = reasoning
+                    && !text.is_empty()
+                {
+                    emitted = true;
+                    on_delta(Delta::Reasoning(text.to_string()));
                 }
 
                 if let Some(calls) = delta.get("tool_calls").and_then(Value::as_array) {

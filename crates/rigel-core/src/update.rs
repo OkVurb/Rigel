@@ -284,10 +284,8 @@ pub async fn check_latest(data_dir: &Path, current: &str) -> Result<UpdateCheck,
 /// The two URLs an update can use. A per-machine install (MSI under Program Files) gets the MSI;
 /// everything else, including a per-user NSIS install, gets the setup executable.
 pub fn artifact_for(check: &UpdateCheck, prefer_msi: bool) -> (&str, &str) {
-    if prefer_msi {
-        if let (Some(url), Some(sha256)) = (&check.msi_url, &check.msi_sha256) {
-            return (url, sha256);
-        }
+    if prefer_msi && let (Some(url), Some(sha256)) = (&check.msi_url, &check.msi_sha256) {
+        return (url, sha256);
     }
     (&check.url, &check.sha256)
 }
@@ -498,7 +496,7 @@ pub fn is_newer(offered: &str, current: &str) -> bool {
 
 fn decode_hex(text: &str) -> Option<Vec<u8>> {
     let text = text.trim();
-    if text.len() % 2 != 0 {
+    if !text.len().is_multiple_of(2) {
         return None;
     }
     let mut out = Vec::with_capacity(text.len() / 2);

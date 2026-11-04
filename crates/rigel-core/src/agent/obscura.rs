@@ -30,11 +30,18 @@ pub fn locate() -> Option<PathBuf> {
             return Some(found);
         }
     }
-    sidecar().or_else(dev_build).or_else(|| search_path(COMMAND)).or_else(legacy_install)
+    sidecar()
+        .or_else(dev_build)
+        .or_else(|| search_path(COMMAND))
+        .or_else(legacy_install)
 }
 
 fn binary_name() -> &'static str {
-    if cfg!(windows) { "rigel-b.exe" } else { "rigel-b" }
+    if cfg!(windows) {
+        "rigel-b.exe"
+    } else {
+        "rigel-b"
+    }
 }
 
 fn sidecar() -> Option<PathBuf> {
@@ -167,7 +174,11 @@ fn safe_segment(value: &str) -> String {
             }
         })
         .collect();
-    if safe.is_empty() { "session".to_string() } else { safe }
+    if safe.is_empty() {
+        "session".to_string()
+    } else {
+        safe
+    }
 }
 
 /// ACP's `session/new` uses a named stdio server with an `env` array.

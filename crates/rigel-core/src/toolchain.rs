@@ -722,13 +722,11 @@ impl ToolService {
         let cached = self.cached(host).await?;
         let mut out = Vec::with_capacity(TOOLS.len());
         for spec in TOOLS {
-            if !refresh {
-                if let Some(row) = cached.iter().find(|row| row.id == spec.id) {
-                    let fresh = now_ms() - row.checked_at < CACHE_TTL_MS;
-                    if fresh && row.present {
-                        out.push(row.clone());
-                        continue;
-                    }
+            if !refresh && let Some(row) = cached.iter().find(|row| row.id == spec.id) {
+                let fresh = now_ms() - row.checked_at < CACHE_TTL_MS;
+                if fresh && row.present {
+                    out.push(row.clone());
+                    continue;
                 }
             }
             let status = self.probe(spec, host).await;

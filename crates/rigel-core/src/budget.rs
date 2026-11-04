@@ -588,21 +588,21 @@ impl BudgetService {
 
         // The daily cap is checked before the session one: it is the wider promise, and the
         // transcript should say which wall was hit.
-        if let Some(cap) = self.safety_settings().await?.daily_cap_micros {
-            if usage.cost_micros > 0 {
-                let spent = self.daily_spent(&day).await?;
-                if spent > cap {
-                    let running: Vec<(String,)> = sqlx::query_as(
-                        "SELECT id FROM agents WHERE session_id = ? AND status = 'running'",
-                    )
-                    .bind(&session_id)
-                    .fetch_all(&self.pool)
-                    .await?;
-                    for (id,) in running {
-                        self.interrupt.interrupt(&id, "daily_budget_exceeded");
-                    }
-                    return Ok(BudgetOutcome::DailyExceeded);
+        if let Some(cap) = self.safety_settings().await?.daily_cap_micros
+            && usage.cost_micros > 0
+        {
+            let spent = self.daily_spent(&day).await?;
+            if spent > cap {
+                let running: Vec<(String,)> = sqlx::query_as(
+                    "SELECT id FROM agents WHERE session_id = ? AND status = 'running'",
+                )
+                .bind(&session_id)
+                .fetch_all(&self.pool)
+                .await?;
+                for (id,) in running {
+                    self.interrupt.interrupt(&id, "daily_budget_exceeded");
                 }
+                return Ok(BudgetOutcome::DailyExceeded);
             }
         }
 

@@ -279,12 +279,11 @@ fn parse_reply(text: &str) -> (Reply, Option<String>) {
         trimmed
     };
 
-    if let (Some(start), Some(end)) = (body.find('{'), body.rfind('}')) {
-        if end > start {
-            if let Ok(reply) = serde_json::from_str::<Reply>(&body[start..=end]) {
-                return (capped(reply), None);
-            }
-        }
+    if let (Some(start), Some(end)) = (body.find('{'), body.rfind('}'))
+        && end > start
+        && let Ok(reply) = serde_json::from_str::<Reply>(&body[start..=end])
+    {
+        return (capped(reply), None);
     }
 
     (

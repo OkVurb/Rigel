@@ -151,6 +151,15 @@ shows its own progress window. The installer is unsigned until the Authenticode 
 exists; the manifest signature and SHA-256 still catch a changed artifact, but SmartScreen may
 warn about the unsigned installer.
 
+### Rolling back a release
+
+Keep the previous version's MSI and NSIS setup, and their SHA-256 hashes, before installing a new
+release. There is no automatic rollback in 0.1.7 (Q228): a build that fails to start is a release
+blocker, not a trigger for a silent downgrade. To go back by hand, uninstall the new build and run
+the retained installer. The per-machine MSI keeps `%APPDATA%\Rigel`, so sessions, provider keys and
+the shelf survive; the bundle refuses a downgrade, which is why the uninstall comes first. Rolling
+back changes neither the update manifest nor the signing keys.
+
 ### The Store MSIX route (a side quest)
 
 An MSIX submitted to the Microsoft Store is re-signed by Microsoft: no certificate purchase and no

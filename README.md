@@ -7,7 +7,7 @@
 **One offline catalogue for agent skills — with an honest measured-vs-advertised column.**
 
 [![CI](https://github.com/OkVurb/Rigel/actions/workflows/ci.yml/badge.svg?branch=main&style=flat-square)](https://github.com/OkVurb/Rigel/actions/workflows/ci.yml)
-[![Rust](https://img.shields.io/badge/Rust-1.85%20%C2%B7%202024-orange?style=flat-square&logo=rust&logoColor=white)](Cargo.toml)
+[![Rust](https://img.shields.io/badge/Rust-1.88%20%C2%B7%202024-orange?style=flat-square&logo=rust&logoColor=white)](Cargo.toml)
 [![Tauri](https://img.shields.io/badge/Tauri-2-24C8DB?style=flat-square&logo=tauri&logoColor=white)](crates/rigel-app)
 [![React](https://img.shields.io/badge/React-19-61DAFB?style=flat-square&logo=react&logoColor=black)](ui)
 [![SQLite](https://img.shields.io/badge/SQLite-FTS5-003B57?style=flat-square&logo=sqlite&logoColor=white)](crates/rigel-core)
@@ -378,7 +378,7 @@ each surface and the evidence for it.
 | **Tools** | Twelve probed tools, requirements traced to the line that said so, the trust arithmetic, gated installs |
 | **Doctor** | One row per check and an exit code: `0` clear, `1` warnings, `2` failures |
 | **MCP** | A stdio host scoped to one session and one agent, sharing the same tools |
-| **Settings** | Thirteen pages — Agent, Providers, Harnesses, Safety, Spending, Terminal, Appearance, Skill shelf, Cloud, Project rules, Notifications, Updates, Diagnostics — each one writing something the core reads |
+| **Settings** | Fifteen pages — Agent, Providers, Harnesses, Safety, Spending, Terminal, Appearance, Skill shelf, Cloud, Email, Project rules, Notifications, Updates, Advanced, Diagnostics — with every control writing something the core reads |
 | **Updates** | One signed check of the latest GitHub release, an artifact SHA-256 and Ed25519 check, and auto-install — both switches in Settings → Updates |
 | **Window** | Closing hides to the tray while agents and terminals keep running; the tray menu reopens or quits |
 
@@ -443,6 +443,12 @@ A model turn needs a key; the deterministic scripted model drives the tests with
 - [ARCHITECTURE.md](ARCHITECTURE.md) — the pieces, the two databases, the write path and a turn
 - [docs/what-works.md](docs/what-works.md) — every surface, its state and the evidence for it
 - [docs/PLATFORMS.md](docs/PLATFORMS.md) — Windows support, signing, and what macOS/Linux mean here
+- [docs/grilling-round-9.md](docs/grilling-round-9.md) — the 120 decisions behind 0.1.7, with what shipped and what waits
+- [docs/roadmap-0.2.md](docs/roadmap-0.2.md) — the substantial round-9 work deferred from 0.1.7
+- [docs/release-checklist.md](docs/release-checklist.md) — the hard gate every release must clear
+- [SECURITY.md](SECURITY.md) — the threat model and the private reporting route
+- [docs/privacy.md](docs/privacy.md) — what stays local, what leaves, and why
+- [docs/terms.md](docs/terms.md) — the plain-language beta terms
 - [docs/cloud.md](docs/cloud.md) — your own Firebase project: setup, the account, and the shelf's document shape
 - [qa/p2.md](docs/qa/p2.md) — the Phase 2 exit test, with recorded results
 - [qa/p3.md](docs/qa/p3.md) — the Phase 3 exit test: killed turn, resume, idempotent patch, the cap
@@ -463,6 +469,7 @@ A model turn needs a key; the deterministic scripted model drives the tests with
 - `node scripts/fix-cursor-hooks.mjs` — repair Cursor's project-relative hook paths
 - `node scripts/handoff-status.mjs` — checklist progress per phase; fails if the §11 summary table is stale
 - `node scripts/check-docs.mjs` — fails on a link or anchor in `README.md` or `docs/` that resolves nowhere, or an issue form GitHub would reject
+- `node scripts/make-sbom.mjs sbom.cdx.json` — generate the CycloneDX SBOM from Cargo and npm lockfiles
 - `bash scripts/check-hygiene.sh` — fails if `ACTIVE-WORK.md` or a path under `tmp/` is committed; the pre-commit hook runs it too
 - `bash scripts/dev.sh` — local dev: the desktop shell under `infisical run --env=dev`, with the setup steps in [INFISICAL.md](INFISICAL.md)
 - `bash scripts/p3-exit-test.sh` — the Phase 3 exit test; needs a built `rigel` and `python`

@@ -929,13 +929,13 @@ impl ClaimService {
 
         // The merge the human read was built from the captured sides. If the file has moved on
         // since then, writing would overwrite a version nobody saw: refuse instead.
-        if let Some(theirs) = &sides.theirs {
-            if current_hash != theirs.hash {
-                return Err(ClaimError::Patch(PatchError::StaleBase {
-                    expected: theirs.hash.clone(),
-                    current: current_hash,
-                }));
-            }
+        if let Some(theirs) = &sides.theirs
+            && current_hash != theirs.hash
+        {
+            return Err(ClaimError::Patch(PatchError::StaleBase {
+                expected: theirs.hash.clone(),
+                current: current_hash,
+            }));
         }
 
         if merged == current_text {
@@ -1043,12 +1043,11 @@ impl ClaimService {
         // A path that resolves outside the root through a symlink is not project-relative.
         let full = self.root.join(&joined);
         if let (Ok(canonical_root), Ok(canonical)) = (self.root.canonicalize(), full.canonicalize())
+            && !canonical.starts_with(&canonical_root)
         {
-            if !canonical.starts_with(&canonical_root) {
-                return Err(ClaimError::InvalidPath {
-                    path: raw.to_string(),
-                });
-            }
+            return Err(ClaimError::InvalidPath {
+                path: raw.to_string(),
+            });
         }
         Ok(joined)
     }

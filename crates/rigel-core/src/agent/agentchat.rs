@@ -197,10 +197,10 @@ async fn api_call(
     let mut request = http_client()
         .request(method, &url)
         .header("x-session-token", token);
-    if let Some(value) = body {
-        if value != Value::Null {
-            request = request.json(&value);
-        }
+    if let Some(value) = body
+        && value != Value::Null
+    {
+        request = request.json(&value);
     }
     request
         .send()
@@ -544,10 +544,10 @@ fn point_agents_at(dir: &Path, project_root: Option<&str>) {
     {
         return;
     }
-    if rewrite_agent_cwd(&dir.join("config.toml"), Path::new(root)).is_ok() {
-        if let Ok(mut guard) = SIDECAR_CWD.lock() {
-            *guard = Some(root.to_string());
-        }
+    if rewrite_agent_cwd(&dir.join("config.toml"), Path::new(root)).is_ok()
+        && let Ok(mut guard) = SIDECAR_CWD.lock()
+    {
+        *guard = Some(root.to_string());
     }
 }
 
@@ -791,10 +791,10 @@ fn bundled_python_windowless(source: &Path) -> Option<PathBuf> {
 /// The interpreter for the server itself. A bundled sidecar has `pythonw.exe`; a developer
 /// checkout falls back to the ordinary interpreter.
 fn server_python(dir: &Path) -> Option<PathBuf> {
-    if let Some(sidecar) = sidecar().filter(|sidecar| sidecar.dir == dir) {
-        if let Some(python) = bundled_python_windowless(&sidecar.source) {
-            return Some(python);
-        }
+    if let Some(sidecar) = sidecar().filter(|sidecar| sidecar.dir == dir)
+        && let Some(python) = bundled_python_windowless(&sidecar.source)
+    {
+        return Some(python);
     }
     chat_python(dir)
 }
@@ -810,10 +810,10 @@ fn chat_python(dir: &Path) -> Option<PathBuf> {
     if venv_python.exists() {
         return Some(venv_python);
     }
-    if let Some(sidecar) = sidecar().filter(|sidecar| sidecar.dir == dir) {
-        if let Some(python) = bundled_python(&sidecar.source) {
-            return Some(python);
-        }
+    if let Some(sidecar) = sidecar().filter(|sidecar| sidecar.dir == dir)
+        && let Some(python) = bundled_python(&sidecar.source)
+    {
+        return Some(python);
     }
     which("python").or_else(|| which("python3"))
 }
@@ -918,10 +918,10 @@ pub async fn messages(
     } else {
         format!("/api/messages?limit={limit}")
     };
-    if let Some(name) = channel {
-        if !name.is_empty() {
-            path.push_str(&format!("&channel={}", urlencoded(name)?));
-        }
+    if let Some(name) = channel
+        && !name.is_empty()
+    {
+        path.push_str(&format!("&channel={}", urlencoded(name)?));
     }
     Ok(parse_messages(
         api_call(reqwest::Method::GET, &path, None).await?,

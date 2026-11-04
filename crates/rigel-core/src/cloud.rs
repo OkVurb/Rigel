@@ -710,10 +710,10 @@ impl AppCheck {
     /// one attestation, not one per request.
     async fn token(&self) -> Result<String, CloudError> {
         let mut cached = self.cached.lock().await;
-        if let Some(current) = cached.as_ref() {
-            if current.expires_at - now_ms() > APP_CHECK_MARGIN_MS {
-                return Ok(current.token.clone());
-            }
+        if let Some(current) = cached.as_ref()
+            && current.expires_at - now_ms() > APP_CHECK_MARGIN_MS
+        {
+            return Ok(current.token.clone());
         }
 
         let answer = self.fetch().await?;
