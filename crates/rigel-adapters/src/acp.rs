@@ -10,7 +10,7 @@
 //!
 //! ```text
 //! → initialize {protocolVersion: 1, clientCapabilities: {}, clientInfo: {...}}
-//! → session/new {cwd: "<absolute>", mcpServers: []}             → {sessionId}
+//! → session/new {cwd: "<absolute>", mcpServers: [obscura]}     → {sessionId}
 //! → session/prompt {sessionId, prompt: [{type: "text", text}]}  → {stopReason}
 //! ← session/update {sessionId, update: {sessionUpdate: "..."}}
 //! ← session/request_permission {sessionId, toolCall, options}   → {outcome}
@@ -325,6 +325,15 @@ impl fmt::Debug for AcpClient {
     }
 }
 
+/// ACP starts every session with Obscura's stdio MCP server, so Cursor, Cline and Gemini all
+/// browse through the same engine instead of whatever browser their own config names.
+fn session_new_params(cwd: &str) -> Value {
+    json!({
+        "cwd": cwd,
+        "mcpServers": [rigel_core::agent::obscura::acp_server()],
+    })
+}
+
 impl AcpClient {
     /// Spawn the agent and complete `initialize`. Nothing is sent before the handshake succeeds.
     pub async fn spawn(
@@ -448,7 +457,7 @@ impl AcpClient {
     pub async fn new_session(&mut self) -> Result<String, AdapterError> {
         let cwd = self.cwd.display().to_string();
         let result = self
-            .request("session/new", json!({ "cwd": cwd, "mcpServers": [] }))
+            .request("session/new", session_new_params(&cwd))
             .await?;
         let session_id = result
             .get("sessionId")
@@ -1152,6 +1161,22 @@ mod tests {
         assert_eq!(approval_from(&params, &secrets).title, "key <redacted>");
     }
 
+    #[test]
+    fn a_new_session_offers_the_obscura_browser() {
+        let params = session_new_params("C:/work/project");
+        assert_eq!(params["cwd"], "C:/work/project");
+        let server = &params["mcpServers"][0];
+        assert_eq!(server["name"], "obscura");
+        assert_eq!(server["args"], json!(["mcp"]));
+        assert_eq!(server["env"], json!([]));
+        let command = server["command"].as_str().unwrap().to_ascii_lowercase();
+        // The browser ships as `rigel-b`; a machine with the old standalone Obscura install still
+        // resolves that path. Both are the same engine, so both satisfy the row.
+        assert!(
+            command.contains("rigel-b") || command.contains("obscura"),
+            "the browser command is rigel-b (or legacy obscura): {command}"
+        );
+    }
     #[test]
     fn cline_uses_the_cline_key_and_the_acp_flag() {
         let mut config = AcpConfig::cline(".");

@@ -386,6 +386,17 @@ What is still open, in the order it should be taken:
    SmartScreen still need an image, and `ok trusted` still needs a certificate — both certificate
    stores were checked and are empty.
 
+**3 Nov 2026:** the Chat surface is a messaging view now — a bots list with presence and a
+per-agent start, one thread per bot or the whole room, `@name` from the composer, and the review
+card before any send — and a message's room uploads draw in its bubble: the core fetches an image
+and hands the renderer a `data:` URL (8 MB cap, `/uploads/` names only), so the token and the
+origin stay in Rust; anything that is not an image stays a named chip. The room also registers
+obscura, Concord and AgentCAD in the project's `.mcp.json` on first start, and the bundled sidecar
+means a fresh install no longer needs `vendor/agentchattr`. Still open, unchanged in kind:
+P7.5/P7.9 (a trusted certificate, a 1809 image, SmartScreen, a person for the look of the window),
+the keyboard-only walk on a real build, per-agent claim counts in the roster, and the Phase 0
+Discover/Targets/Dependencies surfaces.
+
 **Review note (22 Oct 2026, third session):** the window can send a Claude turn (see item 1 above),
 so the roster's `observed only` label now follows sendability rather than "not native". P7.5 moved
 from "config only" to real artifacts: `cargo tauri build` produces the MSI (8.0 MiB) and the NSIS

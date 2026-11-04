@@ -17,6 +17,7 @@ export type PaletteAction =
   | "chat"
   | "diff"
   | "terminal"
+  | "account"
   | "settings";
 
 interface Action {
@@ -32,6 +33,7 @@ const ACTIONS: Action[] = [
   { id: "chat", label: "Chat", detail: "The agent room" },
   { id: "diff", label: "Diff", detail: "Claims, patches and merges" },
   { id: "terminal", label: "Terminal", detail: "A shell in the project" },
+  { id: "account", label: "Account", detail: "Identity, verification and session sync" },
   { id: "settings", label: "Settings", detail: "Providers, safety, appearance" },
 ];
 

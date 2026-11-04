@@ -95,6 +95,8 @@ export interface Settings {
   /** One row of the Rust-side adapter table: `omniroute`, `openrouter`, `gemini`, `vertex`, … */
   provider: string;
   model: string;
+  /** The GCP project Vertex is billed to, saved by the Providers page. */
+  vertex_project: string;
   /** Separate reasoning effort: low, medium or high. */
   effort: string;
   /** D90: per-event desktop notifications; no sound, and a watched turn stays silent. */
@@ -119,6 +121,10 @@ export interface Settings {
    * Saved, so the choice survives a restart; defaults to on.
    */
   chat_models_only: boolean;
+  /** Refine each draft with the cheap model and send it without the review card. */
+  auto_refine: boolean;
+  /** Publish every session after its turns finish; off means the button is the only way. */
+  cloud_sync_sessions: boolean;
 }
 
 /** The browser preview's stand-in for `settings.toml`; `null` until the first save. */
@@ -135,6 +141,7 @@ export function defaultSettings(): Settings {
     unattended_default: false,
     provider: "omniroute",
     model: "gpt-5.6-sol-medium",
+    vertex_project: "",
     effort: "medium",
     notify_approval: true,
     notify_turn_done: true,
@@ -145,6 +152,8 @@ export function defaultSettings(): Settings {
     skills_auto_update: true,
     max_steps: 10,
     chat_models_only: true,
+    auto_refine: false,
+    cloud_sync_sessions: false,
     ui_scale: 100,
     compact_density: false,
   };
@@ -256,6 +265,15 @@ export interface CloudPublishReport {
   title: string;
   turns: number;
   batches: number;
+}
+
+/** What publishing every session in a project sent, and what it could not. */
+export interface CloudPublishAllReport {
+  project_id: string;
+  uid: string;
+  sessions: number;
+  turns: number;
+  failed: string[];
 }
 
 /** What a pull found. A pulled row never carries a body. */
@@ -460,6 +478,22 @@ export interface Item {
 export interface TurnTranscript {
   turn: Turn;
   items: Item[];
+}
+
+/** A fresh Rigel b render of a URL an external harness visited. */
+export interface BrowserCapture {
+  image: string;
+  url: string;
+  bytes: number;
+}
+
+/** The exact frame a harness's Rigel b MCP server wrote after its last page action. */
+export interface BrowserHarnessCapture {
+  image: string;
+  url: string | null;
+  tool: string | null;
+  captured_at: number;
+  bytes: number;
 }
 
 /**
@@ -818,6 +852,12 @@ export interface AgentChatStatus {
   setup: string | null;
 }
 
+/** One file a room message carries. `url` is a room-relative `/uploads/…` path. */
+export interface AgentChatAttachment {
+  name: string;
+  url: string;
+}
+
 /** The vendor store's message shape, narrowed to what the stream renders. */
 export interface AgentChatMessage {
   id: number;
@@ -826,6 +866,7 @@ export interface AgentChatMessage {
   time: string;
   kind: string;
   channel: string;
+  attachments?: AgentChatAttachment[];
 }
 
 /** One roster pill: agentchattr presence plus its own label/colour/role fields. */
@@ -862,7 +903,15 @@ export interface AgentChatHarness {
 /** Browser preview only: the shape of a live room, from this project's recorded run. */
 const PREVIEW_CHAT_MESSAGES: AgentChatMessage[] = [
   { id: 1, sender: "user", text: "@claude @codex Review crates/rigel-cli/src/phase3.rs — one improvement each, then debate.", time: "21:18:02", kind: "chat", channel: "general" },
-  { id: 2, sender: "claude", text: "PatchCommand variants carry no help text while AgentCommand's do — add doc comments.", time: "21:18:41", kind: "chat", channel: "general" },
+  {
+    id: 2,
+    sender: "claude",
+    text: "PatchCommand variants carry no help text while AgentCommand's do — add doc comments.",
+    time: "21:18:41",
+    kind: "chat",
+    channel: "general",
+    attachments: [{ name: "phase3-diff.png", url: "/uploads/phase3-diff.png" }],
+  },
   { id: 3, sender: "codex", text: "--max-steps 0 is accepted, then the coordinator fails on the step bound at once — validate in Clap.", time: "21:19:03", kind: "chat", channel: "general" },
   { id: 4, sender: "claude", text: "@codex Agreed — your fix lands first; mine is docs-only follow-up. This enum has acp, not register.", time: "21:19:30", kind: "chat", channel: "general" },
 ];
@@ -1077,6 +1126,64 @@ export interface SkillDetail {
   first_seen_at: number | null;
 }
 
+export interface SkillInstallReport {
+  name: string;
+  directory: string;
+  paths: string[];
+  replaced: boolean;
+}
+
+/** One row from the embedded MCP registry catalogue. */
+export interface McpServer {
+  id: string;
+  name: string;
+  qualified: string;
+  description: string;
+  repo: string;
+  homepage: string;
+  source: string;
+  sources: string[];
+  transport: string;
+  install: string;
+  version: string;
+  /** False when the catalogue has no launch command the app can write without guessing. */
+  installable: boolean;
+}
+
+export interface McpInstallReport {
+  id: string;
+  name: string;
+  entry: string;
+  path: string;
+  created: boolean;
+}
+
+export interface TrayAgent {
+  id: string;
+  name: string;
+  harness: string;
+  model: string | null;
+  session: string;
+  status: string;
+  spend_micros: number;
+  source: "session" | "chat" | string;
+}
+
+export interface TraySnapshot {
+  project: string | null;
+  project_name: string | null;
+  sessions: number;
+  agents_running: number;
+  agents_hidden: number;
+  spend_micros: number;
+  cpu_percent: number;
+  memory_bytes: number;
+  power: string;
+  power_note: string;
+  agents: TrayAgent[];
+  updated_at: number;
+}
+
 export interface SourceStatus {
   id: string;
   base_url: string | null;
@@ -1111,6 +1218,10 @@ export interface SkillSource {
   indexRepo?(repo: string): Promise<IngestReport>;
   /** Re-sync every source that is not fresh; what the auto-update switch runs. */
   refresh?(): Promise<RefreshReport>;
+  /** Copy this row's indexed body into the user-level harness stores. */
+  install?(id: string): Promise<SkillInstallReport>;
+  /** Whether any harness store already contains this row. */
+  installed?(id: string): Promise<boolean>;
 }
 
 /** One source after an auto-update pass. */
@@ -1463,6 +1574,24 @@ export const api = {
 
   async transcript(project: string, id: string): Promise<TurnTranscript[]> {
     return call<TurnTranscript[]>("session_transcript", { project, id });
+  },
+
+  /** Render the URL a harness browser call visited when no exact capture exists. */
+  async browserCapture(url: string): Promise<BrowserCapture> {
+    if (!isTauri()) throw new Error("Browser captures are available in the desktop app.");
+    return call<BrowserCapture>("browser_capture", { url });
+  },
+
+  /** Read the exact post-action frame written by the harness's Rigel b server. */
+  async browserHarnessCapture(session: string, agent: string): Promise<BrowserHarnessCapture> {
+    if (!isTauri()) throw new Error("Browser captures are available in the desktop app.");
+    return call<BrowserHarnessCapture>("browser_harness_capture", { session, agent });
+  },
+
+  /** Read a screenshot `browser_open` saved, as a data URL the CSP already permits. */
+  async browserImage(path: string): Promise<string> {
+    if (!isTauri()) throw new Error("Browser captures are available in the desktop app.");
+    return call<string>("browser_image", { path });
   },
 
   async resumeSession(project: string, id: string, force: boolean): Promise<ResumeOutcome> {
@@ -1975,6 +2104,12 @@ export const api = {
     return call<CloudPublishReport>("cloud_publish_session", { project, session });
   },
 
+  /** Publish every session in the project; one failure is reported, not fatal. */
+  async cloudPublishAll(project: string): Promise<CloudPublishAllReport> {
+    if (!isTauri()) throw new Error("Sessions publish from the desktop app.");
+    return call<CloudPublishAllReport>("cloud_publish_all", { project });
+  },
+
   /** Compose the PR title/body locally, for a review before creating it. */
   async pullRequestPlan(project: string, session: string): Promise<PullRequestPlan> {
     return call<PullRequestPlan>("pull_request_plan", { project, session });
@@ -2075,6 +2210,12 @@ export const api = {
       return call<AgentChatMessage[]>("chat_messages", { channel, since_id: sinceId, limit: 100 });
     },
 
+    /** One room upload as a data URL. Images only; the window never learns the origin. */
+    async attachment(url: string): Promise<string> {
+      if (!isTauri()) return "";
+      return call<string>("chat_attachment", { url });
+    },
+
     async send(channel: string, text: string): Promise<void> {
       if (!isTauri()) {
         PREVIEW_CHAT_MESSAGES.push({
@@ -2168,6 +2309,67 @@ export const api = {
       return call<PromptRefinement>("prompt_refine", { project, request });
     },
   },
+
+  /** The themed tray panel: live agents, spend and Rigel's process-tree load. */
+  tray: {
+    async snapshot(): Promise<TraySnapshot> {
+      if (!isTauri()) {
+        return {
+          project: null,
+          project_name: null,
+          sessions: 0,
+          agents_running: 0,
+          agents_hidden: 0,
+          spend_micros: 0,
+          cpu_percent: 0,
+          memory_bytes: 0,
+          power: "idle",
+          power_note: "The tray runs in the desktop app.",
+          agents: [],
+          updated_at: Date.now(),
+        };
+      }
+      return call<TraySnapshot>("tray_snapshot");
+    },
+
+    async open(): Promise<void> {
+      if (!isTauri()) return;
+      return call<void>("tray_open");
+    },
+
+    async hide(): Promise<void> {
+      if (!isTauri()) return;
+      return call<void>("tray_hide");
+    },
+
+    async quit(): Promise<void> {
+      if (!isTauri()) return;
+      return call<void>("tray_quit");
+    },
+  },
+
+  /** The embedded MCP catalogue and its project-local installer. */
+  mcpCatalog: {
+    async search(query: string, limit = 250, offset = 0): Promise<McpServer[]> {
+      if (!isTauri()) throw new Error("The MCP catalogue runs in the desktop app.");
+      return call<McpServer[]>("mcp_catalog_search", { query, limit, offset });
+    },
+
+    async count(query: string): Promise<number> {
+      if (!isTauri()) throw new Error("The MCP catalogue runs in the desktop app.");
+      return call<number>("mcp_catalog_count", { query });
+    },
+
+    async install(project: string, id: string): Promise<McpInstallReport> {
+      if (!isTauri()) throw new Error("Install MCP servers in the desktop app.");
+      return call<McpInstallReport>("mcp_install", { project, id });
+    },
+
+    async installed(project: string, id: string): Promise<boolean> {
+      if (!isTauri()) return false;
+      return call<boolean>("mcp_installed", { project, id });
+    },
+  },
 };
 
 /** The real shelf: SQLite FTS5 and the blob store, through the Rust core. */
@@ -2196,6 +2398,14 @@ export class TauriSkillSource implements SkillSource {
 
   async refresh(): Promise<RefreshReport> {
     return call<RefreshReport>("skills_refresh");
+  }
+
+  async install(id: string): Promise<SkillInstallReport> {
+    return call<SkillInstallReport>("skills_install", { id });
+  }
+
+  async installed(id: string): Promise<boolean> {
+    return call<boolean>("skills_installed", { id });
   }
 }
 

@@ -17,15 +17,18 @@
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::process::Stdio;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Duration;
 
+use base64::Engine;
 use rigel_core::agent::approval::{
     ApprovalBus, MailApprover, MailDecision, MailRequest, PendingApproval,
 };
 pub use rigel_core::agent::catalog::ModelOption;
 use rigel_core::agent::{Cancels, Coordinator, DEFAULT_MAX_STEPS, fixed_context_chars};
-use rigel_core::agent::{catalog, providers};
+use rigel_core::agent::{catalog, providers, vertex};
 use rigel_core::{
     Agent, AgentEvent, AppliedReview, ApprovalScope, Attention, AttributedHunk, Bookmark,
     BudgetService, ClaimConflict, ClaimService, CommandApprover, CommandDecision, CommandRequest,
@@ -38,12 +41,13 @@ use rigel_core::{
     diagnostics, skills::search::SearchHit,
 };
 use serde::{Deserialize, Serialize};
-use tauri::menu::{Menu, MenuItem};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
 use tauri::{Emitter, Manager, State};
 
 mod claude;
+mod mcp_catalog;
 mod terminal;
+mod tray_status;
 pub use claude::mcp_mode;
 
 #[derive(Debug, Clone, Serialize)]
@@ -116,6 +120,10 @@ pub struct Settings {
     pub provider: String,
     #[serde(default = "default_model")]
     pub model: String,
+    /// The Google Cloud project Vertex is billed to, saved by the Providers page. Empty means
+    /// "ask the environment, then the Cloud CLI"; a saved value sits between the two.
+    #[serde(default)]
+    pub vertex_project: String,
     /// Sent as `reasoning_effort` on every native turn; never folded into the model id.
     #[serde(default = "default_effort")]
     pub effort: String,
@@ -146,6 +154,14 @@ pub struct Settings {
     /// launch.
     #[serde(default = "default_true")]
     pub chat_models_only: bool,
+    /// Refine each composer draft with the cheap model and send the result without the review
+    /// card. Off means Send opens the card and nothing is sent until the user confirms it.
+    #[serde(default)]
+    pub auto_refine: bool,
+    /// Publish a session after each of its turns finishes, so the phone and the web can read it
+    /// without a button. Off by default: publishing a transcript is opt-in.
+    #[serde(default)]
+    pub cloud_sync_sessions: bool,
     /// D159: the window's scale, one of 90/100/110/125. Applied to the shell, not the terminal's
     /// own font, so the PTY keeps its measured cell size.
     #[serde(default = "default_ui_scale")]
@@ -163,6 +179,7 @@ impl Default for Settings {
             unattended_default: false,
             provider: default_provider(),
             model: default_model(),
+            vertex_project: String::new(),
             effort: default_effort(),
             notify_approval: true,
             notify_turn_done: true,
@@ -173,6 +190,8 @@ impl Default for Settings {
             skills_auto_update: true,
             max_steps: default_max_steps(),
             chat_models_only: true,
+            auto_refine: false,
+            cloud_sync_sessions: false,
             ui_scale: default_ui_scale(),
             compact_density: false,
         }
@@ -273,6 +292,22 @@ fn index_dir() -> PathBuf {
     std::env::var_os("RIGEL_INDEX_DIR")
         .map(PathBuf::from)
         .unwrap_or_else(rigel_core::default_index_dir)
+}
+
+fn home_dir() -> Option<PathBuf> {
+    std::env::var_os("USERPROFILE")
+        .or_else(|| std::env::var_os("HOME"))
+        .map(PathBuf::from)
+}
+
+/// The two stores that cover every harness Rigel currently launches: the shared `.agents`
+/// directory for Codex/Cursor/Cline and Claude's own directory for Claude Code.
+fn skill_roots() -> Result<Vec<PathBuf>, String> {
+    let home = home_dir().ok_or("no USERPROFILE/HOME to install a skill into")?;
+    Ok(vec![
+        home.join(".agents").join("skills"),
+        home.join(".claude").join("skills"),
+    ])
 }
 
 fn load_settings() -> Settings {
@@ -385,6 +420,60 @@ fn skills_refresh() -> Result<rigel_core::skills::RefreshReport, String> {
     })
 }
 
+/// Copy the exact indexed body into the harness stores. Nothing is fetched here.
+#[tauri::command]
+fn skills_install(id: String) -> Result<rigel_core::skills::InstallReport, String> {
+    let roots = skill_roots()?;
+    tauri::async_runtime::block_on(async move {
+        SkillIndex::open(&index_dir())
+            .await
+            .map_err(message)?
+            .install(&id, &roots)
+            .await
+            .map_err(message)
+    })
+}
+
+/// Whether the selected row is already in either harness store.
+#[tauri::command]
+fn skills_installed(id: String) -> Result<bool, String> {
+    let roots = skill_roots()?;
+    tauri::async_runtime::block_on(async move {
+        SkillIndex::open(&index_dir())
+            .await
+            .map_err(message)?
+            .installed(&id, &roots)
+            .await
+            .map_err(message)
+    })
+}
+
+/* ---------------------------------- MCPs ---------------------------------- */
+
+#[tauri::command]
+fn mcp_catalog_search(
+    query: String,
+    limit: usize,
+    offset: Option<usize>,
+) -> Result<Vec<mcp_catalog::McpServer>, String> {
+    mcp_catalog::search(&query, limit, offset.unwrap_or(0))
+}
+
+#[tauri::command]
+fn mcp_catalog_count(query: String) -> Result<i64, String> {
+    mcp_catalog::count(&query)
+}
+
+#[tauri::command]
+fn mcp_install(project: String, id: String) -> Result<mcp_catalog::InstallReport, String> {
+    mcp_catalog::install(&project, &id)
+}
+
+#[tauri::command]
+fn mcp_installed(project: String, id: String) -> Result<bool, String> {
+    mcp_catalog::installed(&project, &id)
+}
+
 /* -------------------------------- project -------------------------------- */
 
 /// Open (creating if needed) a project and report where its session database lives.
@@ -400,6 +489,7 @@ fn project_open(path: String) -> Result<ProjectInfo, String> {
             .filter(|name| !name.is_empty())
             .unwrap_or_else(|| root.to_string_lossy().into_owned());
 
+        remember_project(&root);
         Ok(ProjectInfo {
             root: root.to_string_lossy().into_owned(),
             name,
@@ -696,6 +786,173 @@ fn session_transcript(project: String, id: String) -> Result<Vec<TurnTranscript>
             .await
             .map_err(message)
     })
+}
+
+fn image_data_url(bytes: &[u8]) -> String {
+    format!(
+        "data:image/png;base64,{}",
+        base64::engine::general_purpose::STANDARD.encode(bytes)
+    )
+}
+
+/// One rendered page for the session inspector. This is a fresh Rigel b render of the URL an
+/// external harness visited; the fork normally writes the exact frame itself, and this remains
+/// the fallback for a harness configured without `--capture`.
+#[derive(Debug, Clone, Serialize)]
+pub struct BrowserCapture {
+    pub image: String,
+    pub url: String,
+    pub bytes: usize,
+}
+
+#[tauri::command]
+async fn browser_capture(url: String) -> Result<BrowserCapture, String> {
+    let parsed = reqwest::Url::parse(&url)
+        .map_err(|_| "Browser captures need an absolute http or https URL.".to_string())?;
+    if !matches!(parsed.scheme(), "http" | "https") {
+        return Err("Browser captures need an absolute http or https URL.".to_string());
+    }
+    let exe = rigel_core::agent::obscura::locate().ok_or_else(|| {
+        format!(
+            "Rigel b is not available. {}",
+            rigel_core::agent::obscura::INSTALL_HINT
+        )
+    })?;
+    let path = rigel_core::agent::obscura::capture_path(&index_dir(), "snapshots");
+    if let Some(parent) = path.parent() {
+        tokio::fs::create_dir_all(parent).await.map_err(message)?;
+    }
+
+    let mut command = tokio::process::Command::new(exe);
+    command
+        .arg("fetch")
+        .arg(parsed.as_str())
+        .arg("--screenshot")
+        .arg(&path)
+        .args(["--wait-until", "networkidle0", "--timeout", "30", "--quiet"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true);
+    #[cfg(windows)]
+    {
+        command.creation_flags(0x0800_0000);
+    }
+
+    let output = match tokio::time::timeout(Duration::from_secs(60), command.output()).await {
+        Ok(Ok(output)) => output,
+        Ok(Err(error)) => {
+            let _ = tokio::fs::remove_file(&path).await;
+            return Err(format!("could not start Rigel b: {error}"));
+        }
+        Err(_) => {
+            let _ = tokio::fs::remove_file(&path).await;
+            return Err("Rigel b did not finish within 60 seconds".to_string());
+        }
+    };
+    if !output.status.success() {
+        let _ = tokio::fs::remove_file(&path).await;
+        let stderr = String::from_utf8_lossy(&output.stderr)
+            .trim()
+            .chars()
+            .take(2_000)
+            .collect::<String>();
+        return Err(if stderr.is_empty() {
+            format!("Rigel b exited with {}", output.status)
+        } else {
+            stderr
+        });
+    }
+
+    let bytes = match tokio::fs::read(&path).await {
+        Ok(bytes) => bytes,
+        Err(error) => {
+            let _ = tokio::fs::remove_file(&path).await;
+            return Err(format!("Rigel b returned no screenshot: {error}"));
+        }
+    };
+    let _ = tokio::fs::remove_file(&path).await;
+    if bytes.is_empty() {
+        return Err("Rigel b returned an empty screenshot.".to_string());
+    }
+    Ok(BrowserCapture {
+        image: image_data_url(&bytes),
+        url: parsed.to_string(),
+        bytes: bytes.len(),
+    })
+}
+
+/// The exact frame the forked MCP server wrote after an external harness action.
+#[derive(Debug, Clone, Serialize)]
+pub struct BrowserHarnessCapture {
+    pub image: String,
+    pub url: Option<String>,
+    pub tool: Option<String>,
+    pub captured_at: u64,
+    pub bytes: usize,
+}
+
+#[tauri::command]
+async fn browser_harness_capture(
+    session: String,
+    agent: String,
+) -> Result<BrowserHarnessCapture, String> {
+    let path = rigel_core::agent::obscura::harness_capture_path(&index_dir(), &session, &agent);
+    let base = fs::canonicalize(index_dir().join("browser").join("external"))
+        .map_err(|_| "Rigel b has not captured a harness page yet.".to_string())?;
+    let file = fs::canonicalize(&path)
+        .map_err(|_| "Rigel b has not captured this page yet.".to_string())?;
+    if !file.starts_with(&base) {
+        return Err("That path is not a Rigel b harness capture.".to_string());
+    }
+    let metadata = fs::metadata(&file).map_err(message)?;
+    if !metadata.is_file() || metadata.len() > 16 * 1024 * 1024 {
+        return Err("That Rigel b harness capture is not displayable.".to_string());
+    }
+    let bytes = tokio::fs::read(&file).await.map_err(message)?;
+    let meta: serde_json::Value = fs::read_to_string(file.with_extension("json"))
+        .ok()
+        .and_then(|text| serde_json::from_str(&text).ok())
+        .unwrap_or(serde_json::Value::Null);
+    let captured_at = meta["at"]
+        .as_u64()
+        .or_else(|| {
+            metadata
+                .modified()
+                .ok()
+                .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+                .map(|elapsed| elapsed.as_millis() as u64)
+        })
+        .unwrap_or_default();
+    Ok(BrowserHarnessCapture {
+        image: image_data_url(&bytes),
+        url: meta["url"].as_str().map(str::to_string),
+        tool: meta["tool"].as_str().map(str::to_string),
+        captured_at,
+        bytes: bytes.len(),
+    })
+}
+
+/// Read a screenshot `browser_open` saved. Only paths below this machine's Rigel browser
+/// directory are readable, so a transcript cannot turn the image reader into a file oracle.
+#[tauri::command]
+async fn browser_image(path: String) -> Result<String, String> {
+    let base = fs::canonicalize(index_dir().join("browser"))
+        .map_err(|_| "No browser capture has been saved yet.".to_string())?;
+    let file = fs::canonicalize(PathBuf::from(&path))
+        .map_err(|_| "That browser capture is no longer available.".to_string())?;
+    if !file.starts_with(&base) {
+        return Err("That path is not a Rigel browser capture.".to_string());
+    }
+    let metadata = fs::metadata(&file).map_err(message)?;
+    if !metadata.is_file() {
+        return Err("That browser capture is not a file.".to_string());
+    }
+    if metadata.len() > 16 * 1024 * 1024 {
+        return Err("That browser capture is too large to display.".to_string());
+    }
+    let bytes = tokio::fs::read(&file).await.map_err(message)?;
+    Ok(image_data_url(&bytes))
 }
 
 /// D147: the palette's one read. Skills come from the local index; sessions, turns and patches
@@ -1149,6 +1406,7 @@ fn turn_send(
                 turn: turn.clone(),
                 prompt,
                 model: model_name,
+                publish_after_turn: settings.cloud_sync_sessions,
             },
         )?;
         return Ok(TurnReply {
@@ -1237,6 +1495,9 @@ fn turn_send(
     let session_id = session;
     let agent_id = agent;
     let prompt = prompt.clone();
+    let publish_after_turn = settings.cloud_sync_sessions;
+    let publish_service = service.clone();
+    let publish_session_id = session_id.clone();
     let cap = tauri::async_runtime::block_on(service.get(&session_id))
         .ok()
         .and_then(|stored| stored.budget_cents);
@@ -1274,6 +1535,22 @@ fn turn_send(
                         message: error.to_string(),
                     },
                 );
+            }
+            // The switch is captured when the turn starts. A failure is logged, not shown on the
+            // card: the turn itself succeeded, and the next publish can catch up.
+            if publish_after_turn {
+                let publish = async {
+                    let cloud = rigel_core::cloud::Cloud::open(&index_dir())
+                        .map_err(|error| error.to_string())?;
+                    cloud
+                        .publish_session(&publish_service, &publish_session_id)
+                        .await
+                        .map(|_| ())
+                        .map_err(|error| error.to_string())
+                };
+                if let Err(error) = runtime.block_on(publish) {
+                    eprintln!("rigel: session not published: {error}");
+                }
             }
         })
         .map_err(|error| format!("could not start the turn thread: {error}"))?;
@@ -1490,12 +1767,20 @@ pub struct CoordinationView {
     pub conflicts: Vec<ClaimConflict>,
 }
 
+fn remember_project(root: &Path) {
+    if let Ok(mut watched) = WATCHED_ROOT.lock() {
+        *watched = Some(root.to_path_buf());
+    }
+}
+
+pub(crate) fn current_project_root() -> Option<PathBuf> {
+    WATCHED_ROOT.lock().ok().and_then(|root| root.clone())
+}
+
 /// Tell the watcher which project to follow. Called when a session is opened.
 #[tauri::command]
 fn watch_project(project: String) {
-    if let Ok(mut watched) = WATCHED_ROOT.lock() {
-        *watched = Some(PathBuf::from(project));
-    }
+    remember_project(Path::new(&project));
 }
 
 #[tauri::command]
@@ -2115,12 +2400,14 @@ fn key_set(provider: String, value: String) -> Result<KeyStatus, String> {
         return Err("paste a key first".to_string());
     }
     credentials::set(&provider, value).map_err(message)?;
+    clear_model_cache();
     Ok(current_key_status())
 }
 
 #[tauri::command]
 fn key_delete(provider: String) -> Result<KeyStatus, String> {
     credentials::delete(&provider).map_err(message)?;
+    clear_model_cache();
     Ok(current_key_status())
 }
 
@@ -2158,15 +2445,41 @@ fn omniroute_start() -> Result<rigel_core::ServerStatus, String> {
     tauri::async_runtime::block_on(rigel_core::agent::omniroute::ensure_server())
 }
 
+/// The picker's last answer, held for five minutes. The read is network-bound and the two pickers
+/// (Session and Settings) would otherwise each pay for it on mount.
+static MODEL_CACHE: std::sync::OnceLock<
+    std::sync::Mutex<Option<(std::time::Instant, String, Vec<ModelOption>)>>,
+> = std::sync::OnceLock::new();
+
+fn clear_model_cache() {
+    if let Some(cache) = MODEL_CACHE.get() {
+        if let Ok(mut guard) = cache.lock() {
+            *guard = None;
+        }
+    }
+}
+
 /// The model picker's rows. The catalogue itself lives in the core (`agent::catalog`) so the
 /// window and `rigel models` cannot disagree about what a provider offers.
 #[tauri::command]
 fn models_list() -> Result<Vec<ModelOption>, String> {
     let provider = load_settings().provider.trim().to_lowercase();
-    tauri::async_runtime::block_on(catalog::roster(
+    let cache = MODEL_CACHE.get_or_init(|| std::sync::Mutex::new(None));
+    if let Ok(guard) = cache.lock() {
+        if let Some((read_at, cached_for, rows)) = guard.as_ref() {
+            if cached_for == &provider && read_at.elapsed() < std::time::Duration::from_secs(300) {
+                return Ok(rows.clone());
+            }
+        }
+    }
+    let rows = tauri::async_runtime::block_on(catalog::roster(
         &provider,
         &credentials::KeychainCredentialStore,
-    ))
+    ))?;
+    if let Ok(mut guard) = cache.lock() {
+        *guard = Some((std::time::Instant::now(), provider, rows.clone()));
+    }
+    Ok(rows)
 }
 
 /// Effort is its own setting (D28). OmniRoute happens to encode the same value in the model
@@ -2228,6 +2541,13 @@ fn chat_messages(
         since_id.unwrap_or(0),
         limit.unwrap_or(100),
     ))
+}
+
+/// One room upload as a `data:` URL. The window draws the bytes it is handed and never learns
+/// the chat server's origin or token; only images under `/uploads/` are served.
+#[tauri::command]
+fn chat_attachment(url: String) -> Result<String, String> {
+    tauri::async_runtime::block_on(rigel_core::agent::agentchat::attachment(&url))
 }
 
 /// A user message over the vendor websocket, exactly like the browser does it.
@@ -2345,6 +2665,7 @@ fn settings_set(mut settings: Settings) -> Result<Settings, String> {
     if !matches!(settings.ui_scale, 90 | 100 | 110 | 125) {
         settings.ui_scale = default_ui_scale();
     }
+    settings.vertex_project = settings.vertex_project.trim().to_string();
 
     let path = settings_path();
     if let Some(parent) = path.parent() {
@@ -2352,6 +2673,8 @@ fn settings_set(mut settings: Settings) -> Result<Settings, String> {
     }
     let text = toml::to_string_pretty(&settings).map_err(message)?;
     fs::write(&path, text).map_err(message)?;
+    // The next turn reads this from the core, not from the file, so a save takes effect at once.
+    vertex::set_project_override(Some(&settings.vertex_project));
     Ok(settings)
 }
 
@@ -2677,6 +3000,18 @@ fn cloud_publish_session(
     })
 }
 
+/// Publish every session in the open project in one action, for a phone that should see the
+/// whole history rather than only the session that happened to be open.
+#[tauri::command]
+fn cloud_publish_all(project: String) -> Result<rigel_core::cloud::PublishAllReport, String> {
+    let dir = index_dir();
+    tauri::async_runtime::block_on(async move {
+        let cloud = rigel_core::cloud::Cloud::open(&dir).map_err(message)?;
+        let service = SessionService::open(Path::new(&project)).await.map_err(message)?;
+        cloud.publish_all(&service).await.map_err(message)
+    })
+}
+
 /// Bring down rows this machine does not have. A local body is never replaced.
 #[tauri::command]
 fn cloud_pull() -> Result<rigel_core::cloud::PullReport, String> {
@@ -2830,6 +3165,18 @@ fn warm_skills() {
         .ok();
 }
 
+/// Warm the picker's roster off the interaction path. The read is three vendor calls over the
+/// network; doing it at launch means the first open is served from the cache instead of
+/// waiting on them. A failure is dropped: the picker retries when it opens.
+fn warm_models() {
+    std::thread::Builder::new()
+        .name("rigel-models".to_string())
+        .spawn(|| {
+            let _ = models_list();
+        })
+        .ok();
+}
+
 /// Every local service a session can need, started as the window opens and again once the
 /// remembered project is restored (the chat checkout sits beside it). The window calls this
 /// once; none of the starts blocks the launch, and a service that cannot start is a status the
@@ -2839,6 +3186,7 @@ fn servers_start(project: Option<String>) {
     warm_router();
     warm_chat(project);
     warm_skills();
+    warm_models();
 }
 
 /// A close request hides the window rather than quitting while the tray exists. The flag flips
@@ -2849,12 +3197,56 @@ static TRAY_READY: AtomicBool = AtomicBool::new(false);
 /// request is allowed through once this is true, so shutdown is never trapped by the hide.
 static SHUTTING_DOWN: AtomicBool = AtomicBool::new(false);
 
+fn hide_tray_panel(app: &tauri::AppHandle) {
+    if let Some(window) = app.get_webview_window("tray") {
+        let _ = window.hide();
+    }
+}
+
 fn show_main_window(app: &tauri::AppHandle) {
+    hide_tray_panel(app);
     if let Some(window) = app.get_webview_window("main") {
         let _ = window.show();
         let _ = window.unminimize();
         let _ = window.set_focus();
     }
+}
+
+fn show_tray_panel(app: &tauri::AppHandle, x: f64, y: f64) {
+    let Some(window) = app.get_webview_window("tray") else {
+        return;
+    };
+    if window.is_visible().unwrap_or(false) {
+        let _ = window.hide();
+        return;
+    }
+    let width = window.outer_size().map(|size| size.width as i32).unwrap_or(380);
+    let height = window.outer_size().map(|size| size.height as i32).unwrap_or(560);
+    let x = (x.round() as i32 - width + 12).max(8);
+    let y = (y.round() as i32 - height - 12).max(8);
+    let _ = window.set_position(tauri::PhysicalPosition::new(x, y));
+    let _ = window.show();
+    let _ = window.set_focus();
+}
+
+#[tauri::command]
+fn tray_snapshot() -> Result<tray_status::TraySnapshot, String> {
+    tauri::async_runtime::block_on(tray_status::snapshot())
+}
+
+#[tauri::command]
+fn tray_open(app: tauri::AppHandle) {
+    show_main_window(&app);
+}
+
+#[tauri::command]
+fn tray_hide(app: tauri::AppHandle) {
+    hide_tray_panel(&app);
+}
+
+#[tauri::command]
+fn tray_quit(app: tauri::AppHandle) {
+    quit(&app);
 }
 
 /// Quit through the same path the tray uses, so an updater-triggered exit is not swallowed by
@@ -2865,29 +3257,24 @@ fn quit(app: &tauri::AppHandle) {
 }
 
 /// The tray is the way back to a hidden window and the only way to stop the agents while the
-/// window is closed. Its menu is deliberately two items: reopen, or really quit.
+/// window is closed. It opens a themed panel instead of an OS-owned menu.
 fn install_tray(app: &tauri::AppHandle) -> tauri::Result<()> {
-    let open = MenuItem::with_id(app, "open", "Open Rigel", true, None::<&str>)?;
-    let quit_item = MenuItem::with_id(app, "quit", "Quit Rigel", true, None::<&str>)?;
-    let menu = Menu::with_items(app, &[&open, &quit_item])?;
-
     let mut builder = TrayIconBuilder::with_id("rigel")
-        .tooltip("Rigel — closing the window keeps agents running")
-        .menu(&menu)
-        .show_menu_on_left_click(false)
-        .on_menu_event(|app, event| match event.id.as_ref() {
-            "open" => show_main_window(app),
-            "quit" => quit(app),
-            _ => {}
-        })
+        .tooltip("Rigel — agents and spend live here while the window is closed")
         .on_tray_icon_event(|tray, event| {
-            if let TrayIconEvent::Click {
-                button: MouseButton::Left,
-                button_state: MouseButtonState::Up,
-                ..
-            } = event
-            {
-                show_main_window(tray.app_handle());
+            match event {
+                TrayIconEvent::Click {
+                    button: MouseButton::Left,
+                    button_state: MouseButtonState::Up,
+                    ..
+                } => show_main_window(tray.app_handle()),
+                TrayIconEvent::Click {
+                    button: MouseButton::Right,
+                    button_state: MouseButtonState::Up,
+                    position,
+                    ..
+                } => show_tray_panel(tray.app_handle(), position.x as f64, position.y as f64),
+                _ => {}
             }
         });
     if let Some(icon) = app.default_window_icon() {
@@ -2905,6 +3292,9 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
+            // The project the window saved is read after the environment and before the Cloud
+            // CLI; load it before the window can start a turn so it survives every launch.
+            vertex::set_project_override(Some(&load_settings().vertex_project));
             // The sidecar must be in place before `servers_start` looks for one. The project is
             // not known until the window restores it; `servers_start` runs again from there, and
             // the copied config is pointed at whichever project is open. The router needs none.
@@ -2917,6 +3307,7 @@ pub fn run() {
             if let Err(problem) = install_tray(app.handle()) {
                 eprintln!("rigel: tray icon not installed: {problem}");
             }
+            std::thread::spawn(tray_status::warm);
             warm_router();
             spawn_approval_watcher(app.handle().clone());
             spawn_conflict_watcher(app.handle().clone());
@@ -2926,6 +3317,15 @@ pub fn run() {
             cancels: Arc::new(Cancels::new()),
         })
         .on_window_event(|window, event| {
+            if window.label() == "tray" {
+                if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                    api.prevent_close();
+                    let _ = window.hide();
+                } else if let tauri::WindowEvent::Focused(false) = event {
+                    let _ = window.hide();
+                }
+                return;
+            }
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {
                 if TRAY_READY.load(Ordering::SeqCst) && !SHUTTING_DOWN.load(Ordering::SeqCst) {
                     api.prevent_close();
@@ -2952,6 +3352,9 @@ pub fn run() {
             attention_list,
             session_get,
             session_transcript,
+            browser_capture,
+            browser_harness_capture,
+            browser_image,
             search_all,
             session_resume,
             diagnostics_export,
@@ -3013,6 +3416,7 @@ pub fn run() {
             chat_channels,
             chat_agents,
             chat_messages,
+            chat_attachment,
             chat_send,
             chat_start_agents,
             chat_launched,
@@ -3050,13 +3454,24 @@ pub fn run() {
             cloud_push,
             cloud_pull,
             cloud_publish_session,
+            cloud_publish_all,
             usage_summary,
+            tray_snapshot,
+            tray_open,
+            tray_hide,
+            tray_quit,
             skills_search,
             skills_count,
             skills_load,
             skills_status,
             skills_index,
-            skills_refresh
+            skills_refresh,
+            skills_install,
+            skills_installed,
+            mcp_catalog_search,
+            mcp_catalog_count,
+            mcp_install,
+            mcp_installed
         ])
         .build(tauri::generate_context!())
         .expect("rigel: failed to build the window")

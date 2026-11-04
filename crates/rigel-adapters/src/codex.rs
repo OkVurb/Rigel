@@ -347,6 +347,9 @@ impl CodexAdapter {
                 self.config.skills_budget
             ));
         }
+        // The same browser every other Rigel agent gets. Codex reads MCP servers from TOML;
+        // these pairs are its per-turn override, so an ambient config cannot rename the engine.
+        overrides.extend(rigel_core::agent::obscura::codex_overrides());
         overrides
     }
 
@@ -1413,6 +1416,23 @@ mod tests {
     }
 
     #[test]
+    fn every_codex_turn_gets_the_obscura_browser() {
+        let overrides = CodexAdapter::new(CodexConfig::router(".")).overrides();
+        assert!(
+            overrides
+                .iter()
+                .any(|pair| pair.starts_with("mcp_servers.obscura.command=")),
+            "{overrides:?}"
+        );
+        assert!(
+            overrides
+                .iter()
+                .any(|pair| pair == "mcp_servers.obscura.args=[\"mcp\"]"),
+            "{overrides:?}"
+        );
+    }
+
+    #[test]
     fn router_overrides_match_the_probe_recipe() {
         let adapter = CodexAdapter::new(CodexConfig::router("."));
         let overrides = adapter.overrides();
@@ -1449,7 +1469,10 @@ mod tests {
                 .all(|pair| !pair.starts_with("model_provider")),
             "a direct connection invents no provider: {direct_overrides:?}"
         );
-        assert_eq!(direct_overrides.len(), 1);
+        assert!(
+            direct_overrides.len() > 1,
+            "a direct connection still gets the browser and the skills ceiling: {direct_overrides:?}"
+        );
     }
 
     #[test]

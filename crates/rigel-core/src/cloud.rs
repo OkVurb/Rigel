@@ -647,6 +647,17 @@ pub struct PublishReport {
 }
 
 #[derive(Debug, Clone, Serialize)]
+pub struct PublishAllReport {
+    pub project_id: String,
+    pub uid: String,
+    pub sessions: usize,
+    pub turns: usize,
+    /// `session title: why` for each session that could not be published. One refusal does not
+    /// stop the rest: a hundred sessions should not fail because one of them is malformed.
+    pub failed: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
 pub struct PullReport {
     pub project_id: String,
     pub uid: String,
@@ -1359,6 +1370,38 @@ impl Cloud {
             title,
             turns: published,
             batches,
+        })
+    }
+
+    /// Publish every session in the open project, so the phone and the web see the whole history
+    /// rather than only the session that happened to be on screen.
+    ///
+    /// The reduced shape is unchanged: prompts and the assistant's own text, never tool calls,
+    /// command output, file changes or the project path. Failures are collected, not fatal.
+    pub async fn publish_all(
+        &self,
+        service: &SessionService,
+    ) -> Result<PublishAllReport, CloudError> {
+        let token = self.token().await?;
+        let sessions = service.list().await?;
+        let mut published = 0;
+        let mut turns = 0;
+        let mut failed = Vec::new();
+        for session in &sessions {
+            match self.publish_session(service, &session.id).await {
+                Ok(report) => {
+                    published += 1;
+                    turns += report.turns;
+                }
+                Err(error) => failed.push(format!("{}: {error}", session_title(session))),
+            }
+        }
+        Ok(PublishAllReport {
+            project_id: self.config.project_id.clone(),
+            uid: token.uid,
+            sessions: published,
+            turns,
+            failed,
         })
     }
 
@@ -2599,6 +2642,22 @@ mod tests {
             None,
             "a document with no fields is not an empty run"
         );
+    }
+
+    #[test]
+    fn a_sponsored_run_reads_the_sponsor_name() {
+        let document = json!({
+            "name": "projects/p/databases/(default)/documents/users/u/runs/r-2",
+            "fields": {
+                "prompt": { "stringValue": "fix the build" },
+                "state": { "stringValue": "queued" },
+                "maxMinutes": { "integerValue": "15" },
+                "createdAtMs": { "integerValue": "1700000000000" },
+                "sponsor": { "stringValue": "acme" },
+            }
+        });
+        let run = QueuedRun::from_document(&document).expect("a sponsored run must parse");
+        assert_eq!(run.sponsor.as_deref(), Some("acme"));
     }
 
     #[test]

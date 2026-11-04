@@ -33,6 +33,7 @@ pub mod egress;
 pub mod gemini;
 pub mod model;
 pub mod omniroute;
+pub mod obscura;
 pub mod openrouter;
 pub mod pricing;
 pub mod providers;

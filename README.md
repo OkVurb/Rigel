@@ -137,6 +137,38 @@ to `$RESOURCE/sidecar`; first launch copies the writable source to `%APPDATA%\Ri
 points its agents at the open project. The script refuses to run off Windows x64. Without the
 sidecar the app still starts, and the Chat tab explains what is missing.
 
+The Chat tab is a messaging view over that room: a bots list with presence, role and a per-agent
+start; one thread per bot (its own messages plus the ones addressed to it) or the whole room; and
+`@name` routing from the composer. A message's uploads draw in its bubble — the core fetches an
+image and hands the renderer a `data:` URL (8 MB cap, `/uploads/` names only), so the session token
+and the server origin never reach the window; anything that is not an image stays a named chip.
+
+When a room starts, Rigel also adds the project-scoped [Concord](https://github.com/Get-Concord-AI/concord-mcp)
+MCP server to the project's `.mcp.json`, so Chat harnesses can share work-state, claims, messages and
+handoffs. Each launched harness gets a unique `CONCORD_AGENT_ID`; the server is resolved through
+`npx`, which requires Node 22.12 or newer. Concord is optional: its tools are unavailable when Node
+is absent, and `concord setup` is still the way to enable its global live-delivery adapters.
+
+[AgentCAD](https://github.com/jdilla1277/agentcad) is also registered at Chat start. Its OpenCascade
+binding supports only Python 3.10–3.12, so Rigel first looks for an interpreter that already imports
+`agentcad.mcp` (the Windows `py -3.12` launcher, then `python3.12`, `python3`, `python`) and otherwise
+falls back to `uv run --with "agentcad[mcp]"`, which keeps the dependency in uv's own cache rather
+than in a system Python. Install it yourself if you prefer the first path:
+
+```powershell
+py -3.12 -m pip install "agentcad[mcp]"
+```
+
+With neither a compatible Python nor `uv` on PATH the `agentcad` server is skipped, so the rest of
+the Chat room still works. The `uv` fallback needs the network on its first launch (a ~200 MB
+download); later launches reuse the cache.
+
+[Muse Code](https://dev.meta.ai/products/muse-code) is Meta's terminal agent. When `muse` is on
+PATH, the first room start adds an `[agents.muse]` table to `config.local.toml` (the open project as
+its cwd); a table you wrote yourself is left alone. Rigel starts it with `--disable-approval`
+because a hidden console cannot answer its prompts, and Muse keeps its OS sandbox on. Install it
+with `irm https://dev.meta.ai/install.ps1 | iex` on Windows, then sign in or set `META_API_KEY`.
+
 ### Rigel Cloud (optional)
 
 The app is offline unless you point it at a Firebase project you own. Settings → Cloud takes the
@@ -261,6 +293,9 @@ cargo run -q -p rigel-cli -- agent run --provider vertex --prompt "say pong"
 # same `rigel/anthropic` entry the Claude Code harness reads; default model `claude-opus-5-5`
 printf '%s' "$ANTHROPIC_API_KEY" | cargo run -q -p rigel-cli -- keys set anthropic
 cargo run -q -p rigel-cli -- agent run --provider anthropic --prompt "say pong"
+# Meta Model API: Muse Spark and Muse Wonder on Meta's own endpoint (OpenAI-compatible)
+printf '%s' "$META_API_KEY" | cargo run -q -p rigel-cli -- keys set meta
+cargo run -q -p rigel-cli -- agent run --provider meta --model muse-spark-1.3 --prompt "say pong"
 # the other adapters are one key and one base URL each — `rigel keys status` lists them with their
 # variables. A vendor with no assumed default takes its model from its own live list
 printf '%s' "$GROQ_API_KEY" | cargo run -q -p rigel-cli -- keys set groq
@@ -387,8 +422,9 @@ and `migrate` writes a `.gitignore` for it, so a session log can never be commit
 The native agent, against any row of its provider table: OmniRoute by default (the local router),
 or OpenRouter, Gemini (AI Studio or Vertex), Claude (Anthropic's own Messages API), OpenAI, xAI,
 Groq, DeepSeek, Mistral, Together and Fireworks with a key of your own. Plus one turn through Codex (`codex app-server`, with
-`codex exec --json` as the fallback), one through the Claude CLI, and one ACP turn through Gemini
-CLI, Cursor or Cline. Every harness is probed as its own row and keeps its own key in the keychain.
+`codex exec --json` as the fallback), one through the Claude CLI, one headless turn through Meta's
+Muse Code (`muse exec --json`, with no `Usage` row because its journal carries no token counts),
+and one ACP turn through Gemini CLI, Cursor or Cline. Every harness is probed as its own row and keeps its own key in the keychain.
 
 </details>
 

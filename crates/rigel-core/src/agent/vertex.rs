@@ -21,6 +21,7 @@
 
 use std::path::PathBuf;
 use std::process::Stdio;
+use std::sync::{OnceLock, RwLock};
 use std::time::Duration;
 
 use crate::credentials::{self, CredentialStore};
@@ -37,10 +38,48 @@ pub const DEFAULT_MODEL: &str = "google/gemini-4-argon";
 const TOKEN_COMMAND: [&str; 2] = ["auth", "print-access-token"];
 const TOKEN_TIMEOUT: Duration = Duration::from_secs(20);
 
-/// The project the endpoint is billed to. The same three variables the Google tools read, with
-/// Rigel's own name first.
+/// The project the endpoint is billed to: an explicit variable first, then the value saved in
+/// Settings, then the project the Google Cloud CLI is already pointed at.
 pub fn project() -> Option<String> {
-    project_from_environment().or_else(project_from_gcloud_config)
+    resolve_project(
+        project_from_environment(),
+        project_from_settings(),
+        project_from_gcloud_config(),
+    )
+}
+
+/// The project saved in Settings: the window sets this at launch and again on every save, so a
+/// change reaches the next turn without a restart. The CLI never sets it.
+static STORED_PROJECT: OnceLock<RwLock<Option<String>>> = OnceLock::new();
+
+/// Save, or with `None` clear, the project the window holds. Blank is the same as clear.
+pub fn set_project_override(project: Option<&str>) {
+    let saved = project
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string);
+    let slot = STORED_PROJECT.get_or_init(|| RwLock::new(None));
+    *slot.write().expect("vertex project lock") = saved;
+}
+
+fn project_from_settings() -> Option<String> {
+    STORED_PROJECT
+        .get()
+        .and_then(|slot| slot.read().expect("vertex project lock").clone())
+}
+
+/// The order a project is taken from: an explicit variable wins, so a shell can point one turn
+/// elsewhere; then the value saved in Settings; then what the Cloud CLI is already using.
+fn resolve_project(
+    environment: Option<String>,
+    saved: Option<String>,
+    cloud_cli: Option<String>,
+) -> Option<String> {
+    [environment, saved, cloud_cli]
+        .into_iter()
+        .flatten()
+        .map(|value| value.trim().to_string())
+        .find(|value| !value.is_empty())
 }
 
 fn project_from_environment() -> Option<String> {
@@ -137,8 +176,8 @@ pub fn base_url() -> Result<String, String> {
         return Ok(override_url);
     }
     let project = project().ok_or_else(|| {
-        "no Vertex project: set VERTEX_PROJECT (or GOOGLE_CLOUD_PROJECT) to the project the \
-         endpoint is billed to, or run gcloud config set project <id> so Rigel reads the same \
+        "no Vertex project: save one under Settings → Providers, or set VERTEX_PROJECT to \
+         the project the endpoint is billed to, or run gcloud config set project <id> so Rigel reads the same \
          project the Google Cloud CLI is already using"
             .to_string()
     })?;
@@ -357,6 +396,35 @@ mod tests {
         );
 
         std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn a_saved_project_sits_between_the_environment_and_the_cloud_cli() {
+        assert_eq!(
+            resolve_project(
+                Some("env".into()),
+                Some("saved".into()),
+                Some("cli".into())
+            )
+            .as_deref(),
+            Some("env"),
+            "an explicit variable still wins, so one shell can point one turn elsewhere"
+        );
+        assert_eq!(
+            resolve_project(None, Some("saved".into()), Some("cli".into())).as_deref(),
+            Some("saved"),
+            "Settings beats the CLI's configuration"
+        );
+        assert_eq!(
+            resolve_project(None, None, Some("cli".into())).as_deref(),
+            Some("cli")
+        );
+        assert_eq!(
+            resolve_project(Some("  ".into()), Some(" saved ".into()), None).as_deref(),
+            Some("saved"),
+            "blank is not a project, and the saved id is trimmed"
+        );
+        assert_eq!(resolve_project(None, None, None), None);
     }
 
     #[test]

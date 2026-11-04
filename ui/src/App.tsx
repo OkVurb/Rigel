@@ -1,5 +1,9 @@
 import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
-import type { CSSProperties, PointerEvent as ReactPointerEvent } from "react";
+import type {
+  CSSProperties,
+  MouseEvent as ReactMouseEvent,
+  PointerEvent as ReactPointerEvent,
+} from "react";
 
 import {
   api,
@@ -23,11 +27,14 @@ import {
 import AttentionView, { type AttentionJump } from "./attention";
 import ChatView from "./agentchat";
 import { RigelMark } from "./mark";
+import { useMenu } from "./menu";
 import { PreviewSkillSource } from "./mock";
 import DiffView from "./diff";
+import AccountView from "./account";
+import McpShelf, { ShelfTabs, type ShelfKind } from "./mcps";
 import Palette, { type PaletteAction } from "./palette";
 import SessionView from "./session";
-import SettingsView from "./settings";
+import SettingsView, { type SettingsPage } from "./settings";
 import { applyDisplay } from "./display";
 import { applyTheme } from "./theme";
 import Titlebar from "./titlebar";
@@ -51,11 +58,20 @@ const ICONS = {
   chat: "M6 3.5h8a2.5 2.5 0 0 1 2.5 2.5v5a2.5 2.5 0 0 1-2.5 2.5H9.5L6 16.5v-3H6a2.5 2.5 0 0 1-2.5-2.5V6A2.5 2.5 0 0 1 6 3.5ZM6.5 8.5h.01M10 8.5h.01M13.5 8.5h.01",
   diff: "M6 3v14M14 3v14M3 7h6M11 13h6",
   terminal: "M3 4.5h14v11H3ZM5.5 8l2.5 2-2.5 2M10.5 12.5h4",
+  account: "M10 10.5a3 3 0 1 0 0-6 3 3 0 0 0 0 6ZM4.5 17c.6-2.5 2.8-4 5.5-4s4.9 1.5 5.5 4",
   settings:
     "M10 12.5a2.5 2.5 0 1 0 0-5 2.5 2.5 0 0 0 0 5ZM10 2.5v2M10 15.5v2M2.5 10h2M15.5 10h2",
 } as const;
 
-type View = "shelf" | "attention" | "session" | "chat" | "diff" | "terminal" | "settings";
+type View =
+  | "shelf"
+  | "attention"
+  | "session"
+  | "chat"
+  | "diff"
+  | "terminal"
+  | "account"
+  | "settings";
 
 /** A palette jump: which session to open, and the row to land on once it is there. */
 type Focus = { sessionId: string; turnId?: string; patchId?: string; hunkId?: string } | null;
@@ -67,6 +83,7 @@ const VIEWS: { id: View; label: string; d: string; phase: string }[] = [
   { id: "chat", label: "Chat", d: ICONS.chat, phase: "P6" },
   { id: "diff", label: "Diff", d: ICONS.diff, phase: "P5" },
   { id: "terminal", label: "Terminal", d: ICONS.terminal, phase: "P7" },
+  { id: "account", label: "Account", d: ICONS.account, phase: "P8" },
   { id: "settings", label: "Settings", d: ICONS.settings, phase: "P3" },
 ];
 
@@ -93,6 +110,7 @@ export default function App() {
     () => (isTauri() ? new TauriSkillSource() : new PreviewSkillSource()),
     [],
   );
+  const contextMenu = useMenu();
 
   const [query, setQuery] = useState("");
   const [rows, setRows] = useState<SkillRow[]>([]);
@@ -100,6 +118,9 @@ export default function App() {
   const [detail, setDetail] = useState<SkillDetail | null>(null);
   const [statuses, setStatuses] = useState<SourceStatus[]>([]);
   const [reload, setReload] = useState(0);
+  const [shelfKind, setShelfKind] = useState<ShelfKind>("skills");
+  const [skillInstalled, setSkillInstalled] = useState(false);
+  const [installingSkill, setInstallingSkill] = useState(false);
 
   const [loading, setLoading] = useState(true);
   const [slow, setSlow] = useState(false);
@@ -109,6 +130,8 @@ export default function App() {
   );
 
   const [view, setView] = useState<View>("shelf");
+  // Account can deep-link into Settings; the target is set before the view switches.
+  const [settingsPage, setSettingsPage] = useState<SettingsPage>("agent");
   // D159: widths are per project, because a project's folder names and paths decide how much
   // room the list deserves. The handles are the only way to change them; there is no setting.
   const [panes, setPanes] = useState(PANE_DEFAULTS);
@@ -147,14 +170,39 @@ export default function App() {
   const setActive = useCallback((next: Session | null) => setActiveSession(next), []);
   const noticeFromSession = useCallback((next: string) => setNotice(next), []);
 
+  /** One navigation path for the rail, palette and context menu. */
+  const go = useCallback((next: View) => {
+    if (next !== "chat") setSwarmNotice(null);
+    if (next === "terminal") setTerminalMounted(true);
+    if (next === "settings") setSettingsPage("agent");
+    setView(next);
+  }, []);
+
+  const copyText = useCallback(async (text: string, label: string) => {
+    if (!text) {
+      setNotice(`${label} is empty.`);
+      return;
+    }
+    try {
+      await navigator.clipboard.writeText(text);
+      setNotice(`${label} copied.`);
+    } catch {
+      setNotice(`Could not copy ${label.toLowerCase()} from this window.`);
+    }
+  }, []);
+
   /* --------------------------- palette jumps --------------------------- */
 
   const clearFocus = useCallback(() => setFocus(null), []);
 
-  const runPaletteAction = useCallback((action: PaletteAction) => {
-    if (action === "terminal") setTerminalMounted(true);
-    setView(action);
-  }, []);
+  const runPaletteAction = useCallback(
+    (action: PaletteAction) => {
+      if (action === "terminal") setTerminalMounted(true);
+      if (action === "settings") setSettingsPage("agent");
+      setView(action);
+    },
+    [],
+  );
 
   // D154: the badge is the view's own count, polled so a question raised in the background is
   // visible without opening the tab. A read failure shows no badge rather than a stale one.
@@ -211,6 +259,7 @@ export default function App() {
 
   const openSkillFromPalette = useCallback((id: string) => {
     setSelectedId(id);
+    setShelfKind("skills");
     setView("shelf");
   }, []);
 
@@ -492,6 +541,23 @@ export default function App() {
   }, [source, selectedId, reload]);
 
   useEffect(() => {
+    let live = true;
+    setSkillInstalled(false);
+    const check = source.installed;
+    if (!selectedId || !check) {
+      return () => {
+        live = false;
+      };
+    }
+    check(selectedId)
+      .then((next) => live && setSkillInstalled(next))
+      .catch(() => live && setSkillInstalled(false));
+    return () => {
+      live = false;
+    };
+  }, [source, selectedId, reload]);
+
+  useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
       const target = event.target as HTMLElement | null;
       // D147: Ctrl+K is the palette everywhere except a terminal, where the shell owns the key.
@@ -520,6 +586,29 @@ export default function App() {
     rows.find((row) => row.id === selectedId) ??
     (detail && detail.skill.id === selectedId ? detail.skill : null);
   const shown = detail?.skill.id === selected?.id ? detail : null;
+
+  const installSkill = useCallback(async () => {
+    if (!selected) return;
+    const install = source.install;
+    if (!install) {
+      setNotice("Skill installs run in the desktop app.");
+      return;
+    }
+    setInstallingSkill(true);
+    try {
+      const report = await install(selected.id);
+      setSkillInstalled(true);
+      setNotice(
+        `${report.name} installed in ${report.paths.length} skill store${
+          report.paths.length === 1 ? "" : "s"
+        }.${report.replaced ? " The previous copy was replaced." : ""}`,
+      );
+    } catch (problem) {
+      setNotice(problem instanceof Error ? problem.message : String(problem));
+    } finally {
+      setInstallingSkill(false);
+    }
+  }, [selected, source]);
 
   /* ---------------------------- actions --------------------------- */
 
@@ -786,15 +875,137 @@ ${task}`,
     </div>
   );
 
+  /** The menu for the shell itself: empty canvas, title bar, status bar. Row menus stop the event. */
+  const openGlobalMenu = (event: ReactMouseEvent<HTMLDivElement>) => {
+    const target = event.target as HTMLElement;
+    if (
+      target.closest(
+        "input, textarea, select, [contenteditable='true'], .terminal-host, .ctx-menu",
+      )
+    ) {
+      return;
+    }
+    contextMenu.open(event, {
+      eyebrow: "Rigel workspace",
+      title: project?.name ?? "No project open",
+      subtitle: project?.root ?? (native ? "Choose a folder to begin" : "Browser preview"),
+      sections: [
+        {
+          label: "This window",
+          items: [
+            {
+              label: "Command palette",
+              detail: "Skills, sessions, turns and patches",
+              icon: "command",
+              hint: "Ctrl K",
+              onSelect: () => setPaletteOpen(true),
+            },
+            {
+              label: "Go to",
+              detail: "Switch surfaces without losing the terminal",
+              icon: "chevron",
+              submenu: [
+                {
+                  label: "Surfaces",
+                  items: VIEWS.map((entry) => ({
+                    label: entry.label,
+                    detail: entry.phase,
+                    checked: view === entry.id,
+                    onSelect: () => go(entry.id),
+                  })),
+                },
+              ],
+            },
+            {
+              label: "Settings",
+              detail: "Agent, providers, display and safety",
+              icon: "settings",
+              onSelect: () => go("settings"),
+            },
+            {
+              label: "Account",
+              detail: "Identity, cloud sync and published sessions",
+              icon: "user",
+              onSelect: () => go("account"),
+            },
+          ],
+        },
+        {
+          label: "Project",
+          items: [
+            {
+              label: project ? "Switch folder…" : "Open folder…",
+              detail: native ? "System folder picker" : "Available in the desktop app",
+              icon: "folder",
+              disabled: !native,
+              onSelect: () => void chooseFolder(),
+            },
+            {
+              label: "New workspace…",
+              detail: "Create a folder under your home directory",
+              icon: "plus",
+              disabled: !native,
+              onSelect: () => void beginWorkspace(),
+            },
+            {
+              label: "Copy project path",
+              detail: project?.root ?? "No project open",
+              icon: "copy",
+              disabled: !project,
+              onSelect: () => void copyText(project?.root ?? "", "Project path"),
+            },
+          ],
+        },
+        {
+          label: "Appearance",
+          items: [
+            {
+              label:
+                document.documentElement.dataset.theme === "light"
+                  ? "Switch to dark theme"
+                  : "Switch to light theme",
+              detail: "Same amber accent, measured for this palette",
+              icon: "spark",
+              onSelect: async () => {
+                const next =
+                  document.documentElement.dataset.theme === "light" ? "dark" : "light";
+                applyTheme(next);
+                try {
+                  const current = await api.getSettings();
+                  await api.saveSettings({ ...current, theme: next });
+                  setNotice(`${next === "light" ? "Light" : "Dark"} theme saved.`);
+                } catch {
+                  setNotice(
+                    `${next === "light" ? "Light" : "Dark"} theme changed for this window; the preference was not saved.`,
+                  );
+                }
+              },
+            },
+            {
+              label: "Display settings",
+              detail: "Theme, scale and row density",
+              icon: "settings",
+              onSelect: () => {
+                setSettingsPage("appearance");
+                go("settings");
+              },
+            },
+          ],
+        },
+      ],
+      footer: "Right-click a row for actions on it",
+    });
+  };
+
   // The inspector only exists on these surfaces; the diff is one page, and the shelf and the
   // terminal own their layout.
-  const hasInspector = view === "session" || view === "settings";
+  const hasInspector = view === "session" || view === "settings" || view === "account";
   const handleTop = native ? 36 : 0;
 
   return (
     <div
       className={`shell${native ? " chrome" : ""}${view === "session" ? " session" : ""}${
-        view === "settings" ? " settings" : ""
+        view === "settings" || view === "account" ? " settings" : ""
       }${view === "diff" ? " diff" : ""}`}
       style={
         {
@@ -802,6 +1013,7 @@ ${task}`,
           "--insp-w": `${panes.inspector}px`,
         } as CSSProperties
       }
+      onContextMenu={openGlobalMenu}
     >
       {native ? <Titlebar project={project?.name ?? null} /> : null}
 
@@ -826,11 +1038,52 @@ ${task}`,
                 : item.label
             }
             aria-pressed={view === item.id}
-            onClick={() => {
-              if (item.id !== "chat") setSwarmNotice(null);
-              if (item.id === "terminal") setTerminalMounted(true);
-              setView(item.id);
-            }}
+            onClick={() => go(item.id)}
+            onContextMenu={(event) =>
+              contextMenu.open(event, {
+                eyebrow: "Rigel rail",
+                title: item.label,
+                subtitle: `${item.phase} · ${view === item.id ? "current surface" : "not open"}`,
+                sections: [
+                  {
+                    label: "Surface",
+                    items: [
+                      {
+                        label: view === item.id ? "Reload this surface" : "Open surface",
+                        detail: view === item.id ? "Leave and return to reset the view" : "Switch to this tab",
+                        icon: "open",
+                        onSelect: () => {
+                          if (view === item.id) {
+                            setView("shelf");
+                            window.setTimeout(() => go(item.id), 0);
+                          } else {
+                            go(item.id);
+                          }
+                        },
+                      },
+                      {
+                        label: "Command palette",
+                        detail: "Search everything from here",
+                        icon: "command",
+                        hint: "Ctrl K",
+                        onSelect: () => setPaletteOpen(true),
+                      },
+                    ],
+                  },
+                  {
+                    label: "Copy",
+                    items: [
+                      {
+                        label: "Surface name",
+                        icon: "copy",
+                        onSelect: () => void copyText(item.label, "Surface name"),
+                      },
+                    ],
+                  },
+                ],
+                footer: "Middle-click? Use the palette for quick jumps",
+              })
+            }
           >
             <svg
               width="18"
@@ -955,7 +1208,10 @@ ${task}`,
           onActive={setActive}
           onNotice={noticeFromSession}
           onOpenSettings={() => setView("settings")}
-          onBrowseSkills={() => setView("shelf")}
+          onBrowseSkills={() => {
+            setShelfKind("skills");
+            setView("shelf");
+          }}
           projectControls={projectControls}
           onSwarmPrepare={prepareSwarm}
           onSwarm={sendSwarm}
@@ -987,15 +1243,27 @@ ${task}`,
           onNotice={setNotice}
           onChooseProject={() => void chooseFolder()}
         />
+      ) : view === "account" ? (
+        <AccountView
+          project={sessionProject}
+          onNotice={setNotice}
+          onOpenSettings={(page) => {
+            setSettingsPage(page);
+            setView("settings");
+          }}
+        />
       ) : view === "settings" ? (
         <SettingsView
           keys={keys}
           project={sessionProject}
           session={activeSession?.id ?? null}
           source={source}
+          initialPage={settingsPage}
           onKeys={setKeys}
           onNotice={setNotice}
         />
+      ) : view === "shelf" && shelfKind === "mcps" ? (
+        <McpShelf project={project?.root ?? null} kind={shelfKind} onKind={setShelfKind} />
       ) : (
       <>
       <aside className="list-pane">
@@ -1010,6 +1278,8 @@ ${task}`,
                 : "Phase 2"}
             </span>
           </div>
+
+          <ShelfTabs kind={shelfKind} onKind={setShelfKind} />
 
           {view === "shelf" ? (
             <label className="search">
@@ -1059,6 +1329,85 @@ ${task}`,
                 aria-selected={selected?.id === row.id}
                 className={`row${selected?.id === row.id ? " on" : ""}`}
                 onClick={() => setSelectedId(row.id)}
+                onContextMenu={(event) =>
+                  contextMenu.open(event, {
+                    eyebrow: "Skill shelf",
+                    title: row.name,
+                    subtitle: `${row.source}${row.repo ? ` · ${row.repo}` : ""}`,
+                    sections: [
+                      {
+                        label: "Skill",
+                        items: [
+                          {
+                            label: selected?.id === row.id ? "Already open" : "Open skill",
+                            detail: row.description,
+                            icon: "open",
+                            disabled: selected?.id === row.id,
+                            onSelect: () => setSelectedId(row.id),
+                          },
+                          {
+                            label: "Copy name",
+                            icon: "copy",
+                            onSelect: () => void copyText(row.name, "Skill name"),
+                          },
+                          {
+                            label: "Copy description",
+                            icon: "quote",
+                            onSelect: () => void copyText(row.description, "Description"),
+                          },
+                        ],
+                      },
+                      {
+                        label: "Source",
+                        items: [
+                          {
+                            label: "Copy repository",
+                            detail: row.repo ?? "No repository recorded",
+                            icon: "link",
+                            disabled: !row.repo,
+                            onSelect: () => void copyText(row.repo ?? "", "Repository"),
+                          },
+                          {
+                            label: "Copy source URL",
+                            detail: row.url ?? "No source URL recorded",
+                            icon: "external",
+                            disabled: !row.url,
+                            onSelect: () => void copyText(row.url ?? "", "Source URL"),
+                          },
+                          {
+                            label: "Copy skill id",
+                            detail: row.id,
+                            icon: "copy",
+                            onSelect: () => void copyText(row.id, "Skill id"),
+                          },
+                        ],
+                      },
+                      {
+                        label: "Index",
+                        items: [
+                          {
+                            label: "Index a repository…",
+                            detail: "Walk a repo into the local shelf",
+                            icon: "cloud",
+                            disabled: !source.indexRepo || indexing,
+                            onSelect: () => {
+                              setView("shelf");
+                              searchRef.current?.blur();
+                              window.setTimeout(() => {
+                                document
+                                  .querySelector<HTMLInputElement>(
+                                    ".index-form input, input[aria-label='Repository to index']",
+                                  )
+                                  ?.focus();
+                              }, 0);
+                            },
+                          },
+                        ],
+                      },
+                    ],
+                    footer: `${row.variants} variant${row.variants === 1 ? "" : "s"} · ${row.stars ?? 0} stars`,
+                  })
+                }
               >
                 <span
                   className={`grade ${row.grade ? `grade-${row.grade.toLowerCase()}` : "grade-none"}`}
@@ -1141,6 +1490,33 @@ ${task}`,
             </p>
           </div>
 
+          {selected ? (
+            <div className="detail-actions">
+              <button
+                className="primary"
+                type="button"
+                onClick={() => void installSkill()}
+                disabled={
+                  !selected.has_body ||
+                  installingSkill ||
+                  skillInstalled ||
+                  !source.install ||
+                  !isTauri()
+                }
+                title={
+                  !isTauri() || !source.install
+                    ? "Skill installs run in the desktop app"
+                    : !selected.has_body
+                      ? "This row has no indexed SKILL.md body"
+                      : skillInstalled
+                        ? "Already installed"
+                        : "Copy the indexed SKILL.md into ~/.agents/skills and ~/.claude/skills"
+                }
+              >
+                {installingSkill ? "Installing…" : skillInstalled ? "✓ Installed" : "Install skill"}
+              </button>
+            </div>
+          ) : null}
         </header>
 
         <p className="notice" role="status">
@@ -1346,7 +1722,9 @@ ${task}`,
         <span>
           {view === "session" && activeSession
             ? `session ${activeSession.id.slice(0, 8)}`
-            : `${(total ?? rows.length).toLocaleString()} skills`}
+            : view === "shelf" && shelfKind === "mcps"
+              ? "MCP catalogue"
+              : `${(total ?? rows.length).toLocaleString()} skills`}
         </span>
         <span className="sep">·</span>
         <span>

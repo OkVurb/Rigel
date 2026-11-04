@@ -1,20 +1,12 @@
-#
-rigel cloud runs lists what is waiting, and rigel cloud show <id> prints one run in full. Both
-read the same documents back through the same rules, so a run that exists and cannot be listed
-is a rules or path bug, not a display bug.
- Cloud agents, paid for by someone else
+# Cloud agents, paid for by someone else
 
-
-rigel cloud cancel <id> takes an unstarted run out of the queue, and rigel cloud retry <id> puts a
-failed or cancelled one back with its prompt intact. Neither command can write leased, running,
-done or failed: a client that could claim those states could bill for work nobody did, so the
-transition table lives in one tested function and refuses anything a runner owns.
 The idea: a user without a provider key can send one turn to Rigel's runner, watch it stream back
 into the same window, and pay nothing — a sponsor covers the tokens. This is the Freebuff shape,
 applied to agent runs rather than chat.
 
-This document is the design and the arithmetic. **No runner, ad slot or credit ledger exists yet**;
-what exists is below, plus `scripts/cloud-economics.mjs`, which is what any of it has to clear.
+This document is the design and the arithmetic. **The queue exists; no runner, ad slot or credit
+ledger exists yet.** What exists is below, plus `scripts/cloud-economics.mjs`, which is what any of
+it has to clear.
 
 ## The arithmetic comes first
 
@@ -85,19 +77,21 @@ Reuses what is already in this repo; nothing here requires a new vendor.
 ## What is built, and what is not
 
 Built:
-- this design
-- `scripts/cloud-economics.mjs` — the break-even calculator, runnable now
+- this design and `scripts/cloud-economics.mjs`, the break-even calculator
+- the queue: `rigel cloud run`, `runs`, `show`, `cancel` and `retry`, backed by
+  `Cloud::enqueue_run` and the tested `queued → cancelled → queued` table. It writes one document
+  under the account's own subtree, so `firestore.rules` needed no change.
 - the identity and attestation pieces in `functions/` (the `contact` function is live; `appCheck`
   is written but undeployed and its secret is empty)
 
 Not built, in dependency order:
-1. Firestore schema and rules for `runs`, `credits`, `sponsors`.
-2. `rigel cloud run "<prompt>"` that enqueues and streams status — testable end to end against
-   `queued`, before any runner exists.
-3. The Cloud Run runner image and its sandbox.
-4. Sponsor inventory and the sponsor line in the transcript.
+1. A credit ledger and the global daily spend ceiling.
+2. The Cloud Run runner image, its lease loop and its sandbox.
+3. Sponsor inventory and the sponsor line above a transcript.
+4. A cloud-run surface in the window. Today the queue is CLI-only.
 
-Step 2 is the honest first slice: it is observable, it fails loudly when there is no runner, and it
+The queue is the honest first slice because it is observable and fails loudly: `run` writes
+`queued`, and with no runner the state stays there rather than pretending a turn happened. It also
 does not require anyone to approve a bill before it can be tested.
 
 ## The queue document
@@ -107,10 +101,11 @@ A run is one Firestore document at
 ```
 users/{uid}/runs/{id}
   prompt:       string      the turn, stored once and never used for targeting
-  state:        string      queued | leased | running | done | failed
+  state:        string      queued | cancelled | leased | running | done | failed
   maxMinutes:   integer     ceiling the runner enforces, recorded at enqueue time
   createdAtMs:  integer     when the desktop queued it
-  sponsor:      null        set only when a sponsor's bucket pays for the run
+  updatedAtMs:  integer     optional; written when a stopped run is cancelled or requeued
+  sponsor:      string|null set only when a sponsor's bucket pays for the run
 ```
 
 No rules change was needed: firestore.rules already allows an account to read and write its
@@ -120,3 +115,14 @@ shape a runner needs to lease work without impersonating anyone.
 rigel cloud run "..." --minutes 15 writes this document and prints its id. With no runner
 attached the state stays queued, which is the honest result and the useful test: the write
 path, the rules and the auth are exercised before any bill can exist.
+
+## The queue commands
+
+`rigel cloud runs` lists what is waiting, and `rigel cloud show <id>` prints one run in full. Both
+read the same documents back through the same rules, so a run that exists and cannot be listed is
+a rules or path bug, not a display bug.
+
+`rigel cloud cancel <id>` takes an unstarted run out of the queue, and `rigel cloud retry <id>` puts
+a failed or cancelled one back with its prompt intact. Neither command can write `leased`,
+`running`, `done` or `failed`: a client that could claim those states could bill for work nobody
+did, so the transition table lives in one tested function and refuses anything a runner owns.

@@ -43,8 +43,8 @@ pub use github::GitHubSource;
 pub use http::{Fetched, Http, HttpError};
 pub use hub::{SkillHubSource, SkillsMpSource};
 pub use index::{
-    ImportReport, IndexStats, IngestReport, RefreshReport, SkillDetail, SkillIndex, SourceRefresh,
-    SweepReport, VariantRow,
+    ImportReport, IndexStats, IngestReport, InstallReport, RefreshReport, SkillDetail, SkillIndex,
+    SourceRefresh, SweepReport, VariantRow, skill_dir_name,
 };
 pub use scan::{Capability, EvidenceLine, Severity};
 pub use search::{SearchHit, SearchOrder};
@@ -163,5 +163,52 @@ mod tests {
     fn error_codes_follow_the_cli_contract() {
         assert_eq!(SkillsError::NotIndexed("x".into()).exit_code(), 1);
         assert_eq!(SkillsError::Offline("no net".into()).exit_code(), 2);
+    }
+
+    #[test]
+    fn install_directories_are_portable_lowercase_names() {
+        assert_eq!(skill_dir_name("PDF Tools"), "pdf-tools");
+        assert_eq!(skill_dir_name("  browser_qa  "), "browser-qa");
+        assert_eq!(skill_dir_name("***"), "skill");
+    }
+
+    #[tokio::test]
+    async fn install_copies_the_indexed_body_into_every_store() {
+        use std::fs;
+
+        let data = tempfile::tempdir().unwrap();
+        let stores = tempfile::tempdir().unwrap();
+        let index = SkillIndex::open(data.path()).await.unwrap();
+        let body = "---\nname: PDF Tools\ndescription: test\n---\n\nRead the PDF.\n";
+        let sha = index.blobs().put(body.as_bytes()).unwrap();
+        let record = SkillRecord {
+            id: "test:pdf".to_string(),
+            name: "PDF Tools".to_string(),
+            description: "test".to_string(),
+            source: "test".to_string(),
+            repo: None,
+            path: None,
+            url: None,
+            body_sha: Some(sha),
+            grade: None,
+            grade_scope: None,
+            license: None,
+            stars: None,
+            installs: None,
+            tokens: None,
+            capabilities: Vec::new(),
+            simhash: None,
+        };
+        index.write_skill(&record).await.unwrap();
+
+        let roots = [stores.path().join("agents"), stores.path().join("claude")];
+        let report = index.install(&record.id, &roots).await.unwrap();
+
+        assert_eq!(report.directory, "pdf-tools");
+        assert_eq!(report.paths.len(), 2);
+        for path in &report.paths {
+            assert_eq!(fs::read_to_string(path).unwrap(), body);
+        }
+        assert!(index.installed(&record.id, &roots).await.unwrap());
     }
 }

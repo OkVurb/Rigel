@@ -145,10 +145,15 @@ pub async fn roster(
     }
     targets.truncate(MAX_CATALOGS);
 
+    // The doors are independent network round trips, so they are asked at once: in sequence the
+    // picker waited for the sum (measured 650 ms + 941 ms + 171 ms on this machine) instead of
+    // the slowest one. The merge below still runs in `targets` order, so the current provider
+    // leads and a failure is still reported per provider.
+    let reads = futures::future::join_all(targets.iter().map(|id| catalog(id, store))).await;
     let mut rows = Vec::new();
     let mut problems = Vec::new();
-    for id in &targets {
-        match catalog(id, store).await {
+    for (id, result) in targets.iter().zip(reads) {
+        match result {
             Ok(read) => rows.extend(read),
             Err(error) => problems.push(format!("{id}: {error}")),
         }

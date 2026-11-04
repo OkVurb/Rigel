@@ -1,5 +1,9 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
-import type { KeyboardEvent as ReactKeyboardEvent, ReactNode } from "react";
+import type {
+  KeyboardEvent as ReactKeyboardEvent,
+  MouseEvent as ReactMouseEvent,
+  ReactNode,
+} from "react";
 
 import {
   api,
@@ -28,8 +32,10 @@ import {
   type TurnTranscript,
 } from "./api";
 import { ModelControls } from "./modelpicker";
+import BrowserPanel, { latestBrowserCall } from "./browser";
 import RefineCard from "./refine";
 import { notify } from "./notify";
+import { useMenu } from "./menu";
 import {
   previewAgents,
   previewApprovals,
@@ -266,6 +272,96 @@ function writeSnippets(project: string, rows: Snippet[]): void {
   }
 }
 
+/**
+ * Which harness runs a turn. A native `<select>` looks like Windows, not Rigel, and its option
+ * list cannot be styled at all; the shared menu already has the theme, checked state, focus
+ * handling and viewport clamping this needs.
+ */
+function HarnessPicker({
+  value,
+  onChange,
+  disabled,
+}: {
+  value: "native" | "claude";
+  onChange: (next: "native" | "claude") => void;
+  disabled?: boolean;
+}) {
+  const contextMenu = useMenu();
+  const chosen = value === "claude" ? "Claude" : "Native";
+
+  const open = (event: ReactMouseEvent<HTMLButtonElement>) => {
+    const rect = event.currentTarget.getBoundingClientRect();
+    contextMenu.open(
+      {
+        clientX: rect.left,
+        clientY: rect.top,
+        preventDefault: () => event.preventDefault(),
+        stopPropagation: () => event.stopPropagation(),
+      },
+      {
+        eyebrow: "Agent",
+        title: "Who runs the turn?",
+        subtitle: value === "claude" ? "Claude Code harness" : "Rigel native loop",
+        sections: [
+          {
+            label: "Harness",
+            items: [
+              {
+                label: "Rigel native",
+                detail: "Rigel's own loop, with the selected model and tools.",
+                icon: "spark",
+                checked: value === "native",
+                onSelect: () => onChange("native"),
+              },
+              {
+                label: "Claude Code",
+                detail: "Hand the turn to the installed Claude harness.",
+                icon: "terminal",
+                checked: value === "claude",
+                onSelect: () => onChange("claude"),
+              },
+            ],
+          },
+        ],
+        footer: "This chooses who answers; the model picker still sets the model.",
+      },
+    );
+  };
+
+  return (
+    <div className="harness-pick">
+      <button
+        type="button"
+        className="harness-pick-button"
+        title="Choose whether Rigel or Claude answers"
+        aria-haspopup="menu"
+        aria-label={`Agent harness: ${value}`}
+        disabled={disabled}
+        onClick={open}
+      >
+        <span className={`harness-dot ${value}`} aria-hidden />
+        <span className="harness-pick-label">{chosen}</span>
+        <svg
+          className="harness-chevron"
+          width="12"
+          height="12"
+          viewBox="0 0 20 20"
+          fill="none"
+          aria-hidden
+        >
+          <path
+            d="m5 8 5 5 5-5"
+            stroke="currentColor"
+            strokeWidth="1.5"
+            strokeLinecap="round"
+            strokeLinejoin="round"
+          />
+        </svg>
+      </button>
+    </div>
+  );
+}
+
 export default function SessionView({
   project,
   onSessions,
@@ -281,6 +377,7 @@ export default function SessionView({
   onOpenHunk,
 }: Props) {
   const tauri = isTauri();
+  const contextMenu = useMenu();
   const [session, setSession] = useState<Session | null>(() => (tauri ? null : previewSession));
   const [agents, setAgents] = useState<Agent[]>(() => (tauri ? [] : previewAgents));
   const [team, setTeam] = useState<TeamAgent[]>([]);
@@ -334,6 +431,8 @@ export default function SessionView({
   // which agent answered.
   const [target, setTarget] = useState<"native" | "claude">("native");
   const [busy, setBusy] = useState(false);
+  // A refinement is in flight: Send is disabled so a draft cannot be sent twice.
+  const [refining, setRefining] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [starting, setStarting] = useState(false);
   // D148: the left pane is either the project's sessions or this session's agents. The list
@@ -347,6 +446,21 @@ export default function SessionView({
   const [renameText, setRenameText] = useState("");
   const renamingRef = useRef<string | null>(null);
   const [listBusy, setListBusy] = useState<string | null>(null);
+  const copyText = useCallback(
+    async (text: string, label: string) => {
+      if (!text) {
+        onNotice(`${label} is empty.`);
+        return;
+      }
+      try {
+        await navigator.clipboard.writeText(text);
+        onNotice(`${label} copied.`);
+      } catch {
+        onNotice(`Could not copy ${label.toLowerCase()} from this window.`);
+      }
+    },
+    [onNotice],
+  );
   // D136/D149: the filter is remembered per session; the outline tracks where the reader is.
   const [filter, setFilter] = useState<TranscriptFilter>("all");
   const [activeTurnId, setActiveTurnId] = useState<string | null>(null);
@@ -1390,15 +1504,85 @@ export default function SessionView({
     }
   }, [tauri, project]);
 
-  /** Send now reviews first: the agent receives only what the user confirmed in the card. */
-  const send = useCallback(() => {
+  const autoRefine = defaults?.auto_refine ?? false;
+
+  /**
+   * Send reviews first, unless auto-refine is on: then the cheap model tightens the brief and
+   * the result goes straight out. A refiner failure is not a gate — the typed draft still sends.
+   */
+  const send = useCallback(async () => {
     const prompt =
       text.trim() ||
       (attachments.length > 0 ? "Read the attached files and tell me what matters." : "");
-    if (!prompt || !session || busy || review) return;
+    if (!prompt || !session || busy || review || refining) return;
     setAddOpen(false);
-    setReview(prompt);
-  }, [text, session, busy, review, attachments]);
+    if (!autoRefine) {
+      setReview(prompt);
+      return;
+    }
+    setRefining(true);
+    setError(null);
+    try {
+      const result = await api.refine.run(project || null, {
+        draft: prompt,
+        target:
+          shown.length === 1
+            ? (agents.find((agent) => agent.id === shown[0])?.role ?? "watched agent")
+            : target === "claude"
+              ? "Claude Code"
+              : "Rigel native",
+        channel: null,
+        recent: turns
+          .slice(-4)
+          .map((entry) => entry.turn.prompt)
+          .filter((entry): entry is string => Boolean(entry))
+          .map((entry) => `user: ${entry.slice(0, 400)}`),
+        answers: [],
+        round: 0,
+      });
+      await deliver(result.refined.trim() || prompt);
+    } catch (problem) {
+      // The refiner is an optimisation, not a gate: a failure still sends what was typed, and
+      // says so. `deliver` clears the error line, so this notice is the durable record.
+      onNotice(
+        `Prompt refinement failed; sent the original draft. ${
+          problem instanceof Error ? problem.message : String(problem)
+        }`,
+      );
+      await deliver(prompt);
+    } finally {
+      setRefining(false);
+    }
+  }, [
+    text,
+    session,
+    busy,
+    review,
+    refining,
+    autoRefine,
+    attachments,
+    project,
+    shown,
+    agents,
+    target,
+    turns,
+    deliver,
+    onNotice,
+  ]);
+
+  /** Saved, not per-draft: a person who turns it on wants it on for the next prompt too. */
+  const toggleAutoRefine = useCallback(async () => {
+    if (!defaults) return;
+    const base: Settings = defaults;
+    const next = { ...base, auto_refine: !base.auto_refine };
+    setDefaults(next);
+    try {
+      setDefaults(await api.saveSettings(next));
+    } catch (problem) {
+      setDefaults(base);
+      setError(problem instanceof Error ? problem.message : String(problem));
+    }
+  }, [defaults]);
 
   /** D151: newest first, scoped to this session unless a modifier asks for the project. */
   const promptHistory = useCallback(
@@ -1930,6 +2114,12 @@ export default function SessionView({
         : "more than the cap leaves; the cap stops the turn after the step that crosses."
     : null;
   const nearCap = capMicros !== null && capMicros > 0 && spendMicros >= capMicros * 0.8;
+  // The newest browser call, whichever agent made it. `latestBrowserCall` reads the same item
+  // bodies the transcript renders, so no extra session query is needed.
+  const browserCall = useMemo(() => latestBrowserCall(turns), [turns]);
+  const browserAgent = browserCall
+    ? (agents.find((agent) => agent.id === browserCall.agentId) ?? null)
+    : null;
 
   if (!project) {
     return (
@@ -2213,6 +2403,69 @@ export default function SessionView({
               <div
                 key={row.id}
                 className={`session-row${session?.id === row.id ? " on" : ""}`}
+                onContextMenu={(event) => {
+                  if ((event.target as HTMLElement).closest("input, textarea")) return;
+                  contextMenu.open(event, {
+                    eyebrow: "Session",
+                    title: row.title ?? "Untitled session",
+                    subtitle: `${row.status} · ${money(row.spend_micros)} · ${when(row.created_at)}`,
+                    sections: [
+                      {
+                        label: "Session",
+                        items: [
+                          {
+                            label: session?.id === row.id ? "Current session" : "Open session",
+                            detail: row.archived_at !== null ? "Archived, still resumable" : row.status,
+                            icon: "open",
+                            disabled: session?.id === row.id,
+                            onSelect: () => void openListItem(row),
+                          },
+                          {
+                            label: row.pinned_at !== null ? "Unpin from top" : "Pin to top",
+                            icon: "pin",
+                            checked: row.pinned_at !== null,
+                            disabled: listBusy === row.id,
+                            onSelect: () => void togglePin(row),
+                          },
+                          {
+                            label: "Rename…",
+                            detail: row.title ?? "Untitled session",
+                            icon: "edit",
+                            onSelect: () => beginRename(row),
+                          },
+                          {
+                            label: row.archived_at !== null ? "Restore to list" : "Archive session",
+                            detail:
+                              row.archived_at !== null
+                                ? "Searchable again"
+                                : "Stays searchable and resumable",
+                            icon: "archive",
+                            disabled: listBusy === row.id,
+                            onSelect: () => void toggleArchive(row),
+                          },
+                        ],
+                      },
+                      {
+                        label: "Copy",
+                        items: [
+                          {
+                            label: "Session id",
+                            detail: row.id,
+                            icon: "copy",
+                            onSelect: () => void copyText(row.id, "Session id"),
+                          },
+                          {
+                            label: "Session title",
+                            icon: "quote",
+                            onSelect: () =>
+                              void copyText(row.title ?? "Untitled session", "Session title"),
+                          },
+                        ],
+                      },
+                    ],
+                    footer: `${row.id.slice(0, 8)} · ${row.status}`,
+                  });
+                }}
               >
                 {renaming === row.id ? (
                   <input
@@ -2339,15 +2592,11 @@ export default function SessionView({
               disabled={spawning}
             />
             <div className="agent-spawn-actions">
-              <select
+              <HarnessPicker
                 value={spawnHarness}
-                onChange={(event) => setSpawnHarness(event.target.value as "native" | "claude")}
-                aria-label="Agent harness"
+                onChange={setSpawnHarness}
                 disabled={spawning}
-              >
-                <option value="native">native</option>
-                <option value="claude">claude</option>
-              </select>
+              />
               <button className="primary" type="submit" disabled={spawning}>
                 {spawning ? "Spawning…" : "Spawn"}
               </button>
@@ -2454,6 +2703,11 @@ export default function SessionView({
               onModel={(next, provider) => void applyModel(next, effort, provider)}
               onEffort={(next) => void applyModel(model, next)}
               onChatOnly={(next) => void applyChatOnly(next)}
+            />
+            <HarnessPicker
+              value={target}
+              onChange={setTarget}
+              disabled={live || review !== null}
             />
             {keyPresent === false && onOpenSettings ? (
               <button className="chip warn" onClick={onOpenSettings}>
@@ -2637,6 +2891,7 @@ export default function SessionView({
                         filter={filter}
                         bookmarks={bookmarks}
                         onBookmark={toggleItemBookmark}
+                        onCopy={copyText}
                         stream={stream}
                         checkpoint={checkpoints.find((row) => row.turn_id === entry.turn.id)}
                         onRestore={async (checkpoint) => {
@@ -2755,14 +3010,16 @@ export default function SessionView({
                   placeholder={
                     review
                       ? "Review the brief above before it sends…"
-                      : live
-                        ? "A turn is running…"
-                        : attachments.length > 0
-                          ? "Ask about the attached files…"
-                          : "Ask the agent; Enter sends, Shift+Enter adds a line"
+                      : refining
+                        ? "Tightening the brief…"
+                        : live
+                          ? "A turn is running…"
+                          : attachments.length > 0
+                            ? "Ask about the attached files…"
+                            : "Ask the agent; Enter sends, Shift+Enter adds a line"
                   }
                   rows={2}
-                  disabled={live || review !== null}
+                  disabled={live || review !== null || refining}
                 />
                 <div className="composer-tray">
                   <div className="composer-add" ref={addRef}>
@@ -2927,6 +3184,20 @@ export default function SessionView({
                       </div>
                     ) : null}
                   </div>
+                  <button
+                    type="button"
+                    className="composer-snippet-toggle"
+                    aria-pressed={autoRefine}
+                    title={
+                      autoRefine
+                        ? "Auto-refine is on: every prompt is tightened by the cheap model, then sent without the review card"
+                        : "Auto-refine is off: Send opens the review card. Turn this on to refine and send every prompt"
+                    }
+                    onClick={() => void toggleAutoRefine()}
+                    disabled={!defaults || live || review !== null || refining}
+                  >
+                    auto-refine {autoRefine ? "on" : "off"}
+                  </button>
                   {attachments.length > 0 ? (
                     <ul className="composer-attachments" aria-label="Attached files">
                       {attachments.map((path) => {
@@ -2954,17 +3225,6 @@ export default function SessionView({
                 </div>
               </div>
               <div className="composer-actions">
-                <label className="harness-pick" title="Which agent answers the next turn">
-                  <select
-                    value={target}
-                    onChange={(event) => setTarget(event.target.value as "native" | "claude")}
-                    disabled={live || review !== null}
-                    aria-label="Agent"
-                  >
-                    <option value="native">native</option>
-                    <option value="claude">claude</option>
-                  </select>
-                </label>
                 {onSwarmPrepare ? (
                   <button
                     className="chip swarm"
@@ -2988,9 +3248,14 @@ export default function SessionView({
                 <button
                   className="primary"
                   onClick={() => void send()}
-                  disabled={live || review !== null || (!text.trim() && attachments.length === 0)}
+                  disabled={
+                    refining ||
+                    live ||
+                    review !== null ||
+                    (!text.trim() && attachments.length === 0)
+                  }
                 >
-                  {live ? "Running…" : "Send"}
+                  {refining ? "Refining…" : live ? "Running…" : "Send"}
                 </button>
               </div>
             </div>
@@ -3096,6 +3361,12 @@ export default function SessionView({
       </main>
 
       <aside className="inspector">
+        <BrowserPanel
+          call={browserCall}
+          agent={browserAgent}
+          sessionId={session?.id ?? null}
+        />
+
         <section>
           <h3>Budget</h3>
           <div className="budget-line">
@@ -3367,6 +3638,7 @@ function TurnCard({
   filter,
   bookmarks,
   onBookmark,
+  onCopy,
 }: {
   entry: TurnTranscript;
   turns: TurnTranscript[];
@@ -3377,7 +3649,9 @@ function TurnCard({
   filter: TranscriptFilter;
   bookmarks: Bookmark[];
   onBookmark: (item: Item, seq: number) => void;
+  onCopy: (text: string, label: string) => void;
 }) {
+  const contextMenu = useMenu();
   const children = turns.filter((candidate) => candidate.turn.parent_turn_id === entry.turn.id);
   const visibleItems = entry.items.filter((item) => matchesFilter(item, filter));
   const hidden =
@@ -3393,6 +3667,61 @@ function TurnCard({
       className="turn"
       id={`turn-${entry.turn.id}`}
       aria-label={`Turn ${entry.turn.seq}, ${entry.turn.status}`}
+      onContextMenu={(event) =>
+        contextMenu.open(event, {
+          eyebrow: "Transcript turn",
+          title: `Turn ${entry.turn.seq} · ${entry.turn.status}`,
+          subtitle: entry.turn.prompt?.slice(0, 90) ?? "No prompt recorded",
+          sections: [
+            {
+              label: "Turn",
+              items: [
+                {
+                  label: "Copy prompt",
+                  detail: entry.turn.prompt ?? "No prompt recorded",
+                  icon: "copy",
+                  disabled: !entry.turn.prompt,
+                  onSelect: () => onCopy(entry.turn.prompt ?? "", "Turn prompt"),
+                },
+                {
+                  label: "Copy turn id",
+                  detail: entry.turn.id,
+                  icon: "copy",
+                  onSelect: () => onCopy(entry.turn.id, "Turn id"),
+                },
+                {
+                  label: "Copy raw JSON",
+                  detail: "The turn record, not the rendered rows",
+                  icon: "quote",
+                  onSelect: () => onCopy(JSON.stringify(entry.turn, null, 2), "Turn JSON"),
+                },
+                {
+                  label: "Copy transcript rows",
+                  detail: `${entry.items.length} row${entry.items.length === 1 ? "" : "s"}`,
+                  icon: "diff",
+                  disabled: entry.items.length === 0,
+                  onSelect: () => onCopy(JSON.stringify(entry.items, null, 2), "Transcript rows"),
+                },
+              ],
+            },
+            {
+              label: "Checkpoint",
+              items: [
+                {
+                  label: "Restore this checkpoint",
+                  detail: checkpoint ? when(checkpoint.created_at) : "No checkpoint for this turn",
+                  icon: "restart",
+                  disabled: !checkpoint || entry.turn.status !== "completed" || !onRestore,
+                  onSelect: () => {
+                    if (checkpoint) onRestore?.(checkpoint);
+                  },
+                },
+              ],
+            },
+          ],
+          footer: `${entry.turn.id.slice(0, 8)} · ${entry.turn.usage ? money(entry.turn.usage.cost_micros) : "no cost yet"}`,
+        })
+      }
     >
       <header className="turn-head">
         <span className="turn-seq">turn {entry.turn.seq}</span>

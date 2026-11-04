@@ -26,6 +26,7 @@ import {
   type WritableAgentView,
   type WritableDiffView,
 } from "./api";
+import { useMenu } from "./menu";
 
 /** One rendered line of a hunk, with the number the reader would find in the new file. */
 interface DiffLine {
@@ -102,6 +103,7 @@ function PatchBody({
   onDeliver,
   bookmarks,
   onBookmark,
+  onCopy,
   chain,
   onProvenance,
   onCloseChain,
@@ -115,10 +117,12 @@ function PatchBody({
   onDeliver: (comment: HunkComment) => Promise<void>;
   bookmarks: Bookmark[];
   onBookmark: (hunkId: string, label: string) => void;
+  onCopy: (text: string, label: string) => void;
   chain: ChainView | null;
   onProvenance: (hunkId: string | null, line: number | null) => void;
   onCloseChain: () => void;
 }) {
+  const contextMenu = useMenu();
   const [drafts, setDrafts] = useState<Record<string, string>>({});
   const blocks = diffBlocks(patch.diff);
   if (blocks.length === 0) {
@@ -141,6 +145,48 @@ function PatchBody({
             className="hunk"
             key={`${patch.id}-${index}`}
             id={hunk ? `hunk-${hunk.id}` : undefined}
+            onContextMenu={(event) =>
+              contextMenu.open(event, {
+                eyebrow: "Diff hunk",
+                title: patch.path,
+                subtitle: block.header,
+                sections: [
+                  {
+                    label: "Hunk",
+                    items: [
+                      {
+                        label: "Copy hunk",
+                        detail: `${block.body.split("\n").length} lines`,
+                        icon: "copy",
+                        onSelect: () => onCopy(`${block.header}\n${block.body}`, "Hunk"),
+                      },
+                      {
+                        label: "Copy file path",
+                        icon: "link",
+                        onSelect: () => onCopy(patch.path, "File path"),
+                      },
+                      {
+                        label: marked ? "Remove bookmark" : "Bookmark this hunk",
+                        icon: "pin",
+                        checked: marked,
+                        disabled: !hunk,
+                        onSelect: () => {
+                          if (hunk)
+                            onBookmark(hunk.id, `${patch.path} · ${block.header}`.slice(0, 160));
+                        },
+                      },
+                      {
+                        label: "Show where this came from",
+                        detail: hunk ? `${agent} · ${hunk.status}` : "Unattributed hunk",
+                        icon: "info",
+                        onSelect: () => onProvenance(hunk?.id ?? null, null),
+                      },
+                    ],
+                  },
+                ],
+                footer: hunk ? `${hunk.old_lines} old · ${hunk.new_lines} new` : "No attributed hunk",
+              })
+            }
           >
             <div className="hunk-head">
               <span className="hunk-agent" title={hunk ? hunk.agent_id : patch.agent_id}>
@@ -523,6 +569,7 @@ export default function DiffView({
   onFocusHandled?: () => void;
 }) {
   const tauri = isTauri();
+  const contextMenu = useMenu();
   const [view, setView] = useState<CoordinationView>(() => (tauri ? { claims: [], unverified_changes: [], conflicts: [] } : PREVIEW));
   const [prBusy, setPrBusy] = useState(false);
   const [prResult, setPrResult] = useState<string | null>(null);
@@ -550,6 +597,15 @@ export default function DiffView({
   const [applied, setApplied] = useState<Record<string, AppliedMerge>>({});
   // The first read gates a palette jump: scrolling before the patch list exists would miss.
   const [loaded, setLoaded] = useState(!tauri);
+  const copyText = async (text: string, label: string) => {
+    if (!text) return;
+    try {
+      await navigator.clipboard.writeText(text);
+      setError(`${label} copied.`);
+    } catch {
+      setError(`Could not copy ${label.toLowerCase()} from this window.`);
+    }
+  };
 
   useEffect(() => {
     if (tauri) setLoaded(false);
@@ -1313,7 +1369,51 @@ Open this pull request from ${plan.branch} into ${plan.base} with gh?`,
           <p className="empty">No patch has been applied in this session.</p>
         ) : (
           patches.map((patch) => (
-            <article className="patch" key={patch.id} id={`patch-${patch.id}`}>
+            <article
+              className="patch"
+              key={patch.id}
+              id={`patch-${patch.id}`}
+              onContextMenu={(event) =>
+                contextMenu.open(event, {
+                  eyebrow: "Patch",
+                  title: patch.path,
+                  subtitle: `${patch.status} · ${ago(patch.created_at)} · ${name(patch.agent_id)}`,
+                  sections: [
+                    {
+                      label: "Patch",
+                      items: [
+                        {
+                          label: "Copy file path",
+                          icon: "copy",
+                          onSelect: () => void copyText(patch.path, "File path"),
+                        },
+                        {
+                          label: "Copy patch",
+                          detail: `${patch.diff.split("\n").length} lines of unified diff`,
+                          icon: "diff",
+                          onSelect: () => void copyText(patch.diff, "Patch"),
+                        },
+                        {
+                          label: "Copy patch id",
+                          detail: patch.id,
+                          icon: "copy",
+                          onSelect: () => void copyText(patch.id, "Patch id"),
+                        },
+                        {
+                          label: "Revert this patch",
+                          detail: "Only applied patches can be reverted",
+                          icon: "restart",
+                          danger: true,
+                          disabled: patch.status !== "applied" || busy === patch.id,
+                          onSelect: () => void revert(patch),
+                        },
+                      ],
+                    },
+                  ],
+                  footer: `${patch.path} · ${name(patch.agent_id)}`,
+                })
+              }
+            >
               <header>
                 <span className={`pill ${patch.status}`}>{patch.status}</span>
                 <span className="mono patch-path">{patch.path}</span>
@@ -1337,6 +1437,7 @@ Open this pull request from ${plan.branch} into ${plan.base} with gh?`,
                 onDeliver={deliver}
                 bookmarks={bookmarks}
                 onBookmark={(hunkId, label) => void toggleHunkBookmark(hunkId, label)}
+                onCopy={copyText}
                 chain={chain?.patchId === patch.id ? chain : null}
                 onProvenance={(hunkId, line) => void openChain(patch.id, hunkId, line)}
                 onCloseChain={() => setChain(null)}

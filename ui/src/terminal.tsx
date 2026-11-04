@@ -18,6 +18,7 @@ import { Terminal, type ITheme } from "@xterm/xterm";
 import "@xterm/xterm/css/xterm.css";
 
 import { api, isTauri, type Settings, type TerminalOutput } from "./api";
+import { useMenu } from "./menu";
 import { currentTheme, type Theme } from "./theme";
 
 /**
@@ -114,6 +115,7 @@ const PREVIEW_BANNER =
 const PROMPT = "\x1b[90m$\x1b[0m ";
 
 export default function TerminalView({ project }: { project: string | null }) {
+  const contextMenu = useMenu();
   const hostRef = useRef<HTMLDivElement | null>(null);
   const termRef = useRef<Terminal | null>(null);
   const fitRef = useRef<FitAddon | null>(null);
@@ -187,15 +189,36 @@ export default function TerminalView({ project }: { project: string | null }) {
     let disposed = false;
     let id: string | null = null;
     let release: (() => void) | undefined;
+    // PowerShell can print its first prompt before `terminal_open` has returned the id. Keep the
+    // first chunks instead of dropping them; they are replayed as soon as the id arrives.
+    let pending: TerminalOutput[] = [];
+    // xterm answers PowerShell's cursor query through `onData`; before the PTY id arrives that
+    // reply had nowhere to go. Hold early input for the same short window.
+    let pendingInput: string[] = [];
     let line = "";
     const shellPath = settingsRef.current?.terminal_shell ?? "";
+
+    const receive = (payload: TerminalOutput) => {
+      if (payload.id !== id) return;
+      if (payload.exit) {
+        setLive(false);
+        terminal.write("\r\n\x1b[90m[shell exited — press Restart to open another]\x1b[0m\r\n");
+        return;
+      }
+      const binary = window.atob(payload.data);
+      const bytes = Uint8Array.from(binary, (character) => character.charCodeAt(0));
+      terminal.write(bytes);
+    };
 
     const input = terminal.onData((data) => {
       if (id) {
         void api.terminal.write(id, data).catch(() => {});
         return;
       }
-      if (isTauri()) return;
+      if (isTauri()) {
+        if (pendingInput.length < 64) pendingInput.push(data);
+        return;
+      }
       // Preview only: a line editor good enough to prove the surface works without a PTY.
       if (data === "\r") {
         terminal.write("\r\n");
@@ -238,15 +261,12 @@ export default function TerminalView({ project }: { project: string | null }) {
       if (!isTauri()) return;
       const { listen } = await import("@tauri-apps/api/event");
       const unlisten = await listen<TerminalOutput>("rigel://terminal", (event) => {
-        if (event.payload.id !== id) return;
-        if (event.payload.exit) {
-          setLive(false);
-          terminal.write("\r\n\x1b[90m[shell exited — press Restart to open another]\x1b[0m\r\n");
+        if (!id) {
+          // The event stream is app-wide; a chunk from another terminal is filtered when replayed.
+          if (pending.length < 64) pending.push(event.payload);
           return;
         }
-        const binary = window.atob(event.payload.data);
-        const bytes = Uint8Array.from(binary, (character) => character.charCodeAt(0));
-        terminal.write(bytes);
+        receive(event.payload);
       });
       if (disposed) {
         unlisten();
@@ -264,6 +284,12 @@ export default function TerminalView({ project }: { project: string | null }) {
         setShell(info.shell);
         setCwd(info.cwd);
         setLive(true);
+        const queuedOutput = pending;
+        pending = [];
+        for (const payload of queuedOutput) receive(payload);
+        const queuedInput = pendingInput;
+        pendingInput = [];
+        for (const data of queuedInput) void api.terminal.write(info.id, data).catch(() => {});
         terminal.focus();
       } catch (problem) {
         const message = problem instanceof Error ? problem.message : String(problem);
@@ -344,7 +370,97 @@ export default function TerminalView({ project }: { project: string | null }) {
 
       <main id="main" tabIndex={-1} className="detail terminal-main">
         <div className="terminal-frame">
-          <div className="terminal-host" ref={hostRef} role="application" aria-label="Terminal" />
+          <div
+            className="terminal-host"
+            ref={hostRef}
+            role="application"
+            aria-label="Terminal"
+            onContextMenu={(event) => {
+              event.preventDefault();
+              const terminal = termRef.current;
+              const selection = terminal?.getSelection() ?? "";
+              contextMenu.open(event, {
+                eyebrow: "Terminal",
+                title: shell ?? "Shell",
+                subtitle: cwd ?? project ?? "No project open",
+                sections: [
+                  {
+                    label: "Edit",
+                    items: [
+                      {
+                        label: "Copy selection",
+                        detail: selection ? `${selection.length} characters` : "Select text first",
+                        icon: "copy",
+                        hint: "Ctrl C",
+                        disabled: !selection,
+                        onSelect: () => void navigator.clipboard.writeText(selection),
+                      },
+                      {
+                        label: "Paste",
+                        detail: "Send the clipboard to the PTY",
+                        icon: "quote",
+                        hint: "Ctrl V",
+                        onSelect: async () => {
+                          try {
+                            const text = await navigator.clipboard.readText();
+                            if (text) {
+                              termRef.current?.paste(text);
+                              termRef.current?.focus();
+                            }
+                          } catch {
+                            setError("The clipboard is not readable in this window.");
+                          }
+                        },
+                      },
+                      {
+                        label: "Select all",
+                        icon: "select",
+                        onSelect: () => {
+                          termRef.current?.selectAll();
+                          termRef.current?.focus();
+                        },
+                      },
+                      {
+                        label: "Clear scrollback",
+                        detail: "The shell keeps running",
+                        icon: "clear",
+                        onSelect: () => {
+                          termRef.current?.clear();
+                          termRef.current?.focus();
+                        },
+                      },
+                    ],
+                  },
+                  {
+                    label: "Shell",
+                    items: [
+                      {
+                        label: "Restart shell",
+                        detail: "Closes this PTY and opens another",
+                        icon: "restart",
+                        onSelect: () => setGeneration((value) => value + 1),
+                      },
+                      {
+                        label: "Copy working directory",
+                        detail: cwd ?? "Not reported",
+                        icon: "copy",
+                        disabled: !cwd,
+                        onSelect: () => void navigator.clipboard.writeText(cwd ?? ""),
+                      },
+                      {
+                        label: "Copy shell path",
+                        detail: shell ?? "Not reported",
+                        icon: "terminal",
+                        disabled: !shell,
+                        onSelect: () => void navigator.clipboard.writeText(shell ?? ""),
+                      },
+                    ],
+                  },
+                ],
+                footer: "Keys go straight to the PTY; the app does not parse them",
+              });
+            }}
+          />
         </div>
       </main>
     </>

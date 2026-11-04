@@ -33,6 +33,8 @@ pub struct ClaudeTurn {
     pub turn: Turn,
     pub prompt: String,
     pub model: String,
+    /// Publish the session once the harness finishes, the same switch the native loop honours.
+    pub publish_after_turn: bool,
 }
 
 pub fn start(app: tauri::AppHandle, request: ClaudeTurn) -> Result<(), String> {
@@ -44,6 +46,7 @@ pub fn start(app: tauri::AppHandle, request: ClaudeTurn) -> Result<(), String> {
         turn,
         prompt,
         model,
+        publish_after_turn,
     } = request;
     let data_dir = super::index_dir();
 
@@ -131,6 +134,23 @@ pub fn start(app: tauri::AppHandle, request: ClaudeTurn) -> Result<(), String> {
 
             runtime.block_on(recorded.record_items(&items, &[]));
             let usage = runtime.block_on(recorded.finish_claude(&outcome, &model_name));
+
+            // The switch is `cloud_sync_sessions`, captured when the turn started. A refusal is
+            // logged and does not turn a finished harness turn into a failure.
+            if publish_after_turn {
+                let publish = async {
+                    let cloud = rigel_core::cloud::Cloud::open(&data_dir)
+                        .map_err(|error| error.to_string())?;
+                    cloud
+                        .publish_session(&recorded.service, &recorded.session_id)
+                        .await
+                        .map(|_| ())
+                        .map_err(|error| error.to_string())
+                };
+                if let Err(error) = runtime.block_on(publish) {
+                    eprintln!("rigel: session not published: {error}");
+                }
+            }
 
             let (status, stop) = if outcome.is_ok() {
                 ("completed", "completed")

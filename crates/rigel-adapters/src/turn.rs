@@ -8,6 +8,7 @@
 
 use std::path::{Path, PathBuf};
 
+use rigel_core::agent::obscura;
 use rigel_core::{Agent, BudgetService, CostSource, SessionService, Turn};
 use serde_json::{Value, json};
 
@@ -411,7 +412,7 @@ impl Recorded {
     }
 }
 
-/// The MCP config Claude reads with `--mcp-config`: one stdio server, this binary, this project.
+/// The MCP config Claude reads with `--mcp-config`: this binary and the shared Rigel b browser.
 ///
 /// The data directory is spelled out so the child resolves the same approval channel the caller
 /// watches, even when `--data-dir` pointed somewhere other than the default.
@@ -423,7 +424,7 @@ pub fn write_mcp_config(
 ) -> Result<PathBuf, String> {
     let exe =
         std::env::current_exe().map_err(|error| format!("could not find this binary: {error}"))?;
-    let config = json!({
+    let mut config = json!({
         "mcpServers": {
             "rigel": {
                 "command": exe,
@@ -437,6 +438,7 @@ pub fn write_mcp_config(
             }
         }
     });
+    config["mcpServers"][obscura::SERVER_NAME] = obscura::mcp_server_for(session, agent, dir);
     std::fs::create_dir_all(dir)
         .map_err(|error| format!("could not create {}: {error}", dir.display()))?;
     let path = dir.join("claude-mcp.json");
@@ -671,6 +673,11 @@ mod session_tests {
         assert!(
             args.contains(&dir.path().display().to_string().as_str()),
             "the child is told the same data directory the pump watches"
+        );
+        assert_eq!(
+            config["mcpServers"]["obscura"],
+            obscura::mcp_server_for("session-1", "agent-1", dir.path()),
+            "Claude gets the same Rigel b browser as every other agent"
         );
     }
 }

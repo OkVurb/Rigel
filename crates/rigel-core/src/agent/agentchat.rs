@@ -22,6 +22,8 @@ use futures::{SinkExt, StreamExt};
 use serde::Serialize;
 use serde_json::Value;
 
+use super::obscura;
+
 /// Where agentchattr listens by default (vendor config.toml `[server] port`).
 pub const DEFAULT_ORIGIN: &str = "http://127.0.0.1:8300";
 
@@ -75,6 +77,16 @@ pub struct ChatMessage {
     /// `chat` / `join` / `leave` / `system`.
     pub kind: String,
     pub channel: String,
+    /// Room uploads the message carries. `url` is the room's own `/uploads/<name>` path; the
+    /// renderer never receives an absolute URL or the server origin.
+    pub attachments: Vec<ChatAttachment>,
+}
+
+/// One file a message carries.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct ChatAttachment {
+    pub name: String,
+    pub url: String,
 }
 
 fn origin() -> String {
@@ -223,6 +235,7 @@ fn parse_message(value: &Value) -> Option<ChatMessage> {
             .and_then(Value::as_str)
             .unwrap_or("general")
             .to_string(),
+        attachments: parse_attachments(value.get("attachments")),
     })
 }
 
@@ -231,6 +244,123 @@ fn parse_messages(value: Value) -> Vec<ChatMessage> {
         Value::Array(rows) => rows.iter().filter_map(parse_message).collect(),
         _ => Vec::new(),
     }
+}
+
+/// The largest attachment the window will draw, before base64 inflates it.
+const ATTACHMENT_CAP: usize = 8 * 1024 * 1024;
+
+/// A room upload path, or a refusal. Attachments are plain files under `/uploads/`: no scheme, no
+/// traversal, no nested path, so the core can never be asked to fetch somewhere else.
+fn attachment_path(url: &str) -> Result<&str, String> {
+    let path = url.trim();
+    let Some(name) = path.strip_prefix("/uploads/") else {
+        return Err("an attachment must be a room upload, not an arbitrary URL".to_string());
+    };
+    if name.is_empty() || name.contains('/') || name.contains('\\') || name.contains("..") {
+        return Err("the attachment name is not a plain file".to_string());
+    }
+    Ok(path)
+}
+
+/// Attachments as the room stores them (`name`, `url`), dropping anything that is not a plain
+/// upload path. A message with no files is the common case and costs one `None` check.
+fn parse_attachments(value: Option<&Value>) -> Vec<ChatAttachment> {
+    let Some(rows) = value.and_then(Value::as_array) else {
+        return Vec::new();
+    };
+    rows.iter()
+        .filter_map(|row| {
+            let path = attachment_path(row.get("url")?.as_str()?).ok()?;
+            let name = row
+                .get("name")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|name| !name.is_empty())
+                .unwrap_or_else(|| path.rsplit('/').next().unwrap_or(path));
+            Some(ChatAttachment {
+                name: name.to_string(),
+                url: path.to_string(),
+            })
+        })
+        .collect()
+}
+
+/// The content types an `<img>` can draw here. A PDF or a zip stays a named chip: there is no
+/// renderer for it, and guessing a type would widen what the webview trusts.
+fn image_mime(name: &str) -> Option<&'static str> {
+    match name.rsplit('.').next()?.to_ascii_lowercase().as_str() {
+        "png" => Some("image/png"),
+        "jpg" | "jpeg" => Some("image/jpeg"),
+        "gif" => Some("image/gif"),
+        "webp" => Some("image/webp"),
+        "avif" => Some("image/avif"),
+        "bmp" => Some("image/bmp"),
+        _ => None,
+    }
+}
+
+/// Standard base64 with padding. Small enough to keep here rather than add a dependency for one
+/// data URL.
+fn base64(bytes: &[u8]) -> String {
+    const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
+    for chunk in bytes.chunks(3) {
+        let second = chunk.get(1).copied().unwrap_or(0);
+        let third = chunk.get(2).copied().unwrap_or(0);
+        let packed = ((chunk[0] as u32) << 16) | ((second as u32) << 8) | third as u32;
+        out.push(TABLE[(packed >> 18) as usize & 63] as char);
+        out.push(TABLE[(packed >> 12) as usize & 63] as char);
+        out.push(if chunk.len() > 1 {
+            TABLE[(packed >> 6) as usize & 63] as char
+        } else {
+            '='
+        });
+        out.push(if chunk.len() > 2 {
+            TABLE[packed as usize & 63] as char
+        } else {
+            '='
+        });
+    }
+    out
+}
+
+/// One room upload as a `data:` URL, so the window can draw it without seeing the session token
+/// or the server's origin. Images only; the size cap is checked before and after the body.
+pub async fn attachment(url: &str) -> Result<String, String> {
+    let path = attachment_path(url)?;
+    let mime =
+        image_mime(path).ok_or_else(|| "only images are drawn in a chat message".to_string())?;
+    let token = token().ok_or({
+        "the chat server is up but exposed no session token — stop it and start the room from the Chat tab"
+    })?;
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(15))
+        .connect_timeout(Duration::from_millis(800))
+        .build()
+        .map_err(|error| format!("could not build the attachment client: {error}"))?;
+    let response = client
+        .get(format!("{}{}", origin(), path))
+        .header("x-session-token", token)
+        .send()
+        .await
+        .map_err(|error| format!("attachment fetch failed: {error}"))?;
+    if !response.status().is_success() {
+        return Err(format!(
+            "the room answered {} for that attachment",
+            response.status()
+        ));
+    }
+    if response.content_length().unwrap_or(0) > ATTACHMENT_CAP as u64 {
+        return Err("that attachment is larger than 8 MB".to_string());
+    }
+    let bytes = response
+        .bytes()
+        .await
+        .map_err(|error| format!("attachment body failed: {error}"))?;
+    if bytes.len() > ATTACHMENT_CAP {
+        return Err("that attachment is larger than 8 MB".to_string());
+    }
+    Ok(format!("data:{mime};base64,{}", base64(&bytes)))
 }
 
 /* -------------------------------- sidecar -------------------------------- */
@@ -568,6 +698,36 @@ fn setup_help(project_root: Option<&str>) -> String {
     )
 }
 
+/// Muse Code is Meta's terminal agent. The vendor checkout has no table for it, so the first room
+/// start writes one into the writable `config.local.toml`; a user who already has an
+/// `[agents.muse]` table keeps theirs, flags included. `cwd` is the open project because the room
+/// runs from app data and `..` there is not the project.
+fn ensure_muse_agent(dir: &Path, project: Option<&str>) -> Result<(), String> {
+    let Some(project) = project.map(str::trim).filter(|path| !path.is_empty()) else {
+        return Ok(());
+    };
+    let path = dir.join("config.local.toml");
+    let existing = std::fs::read_to_string(&path).unwrap_or_default();
+    if existing.lines().any(|line| line.trim() == "[agents.muse]") {
+        return Ok(());
+    }
+    let cwd = project.replace('\\', "\\\\").replace('"', "\\\"");
+    let mut text = existing;
+    if !text.is_empty() && !text.ends_with('\n') {
+        text.push('\n');
+    }
+    text.push_str(&format!(
+        "\n# Added by Rigel: Meta's Muse Code, when `muse` is on PATH.\n\
+         [agents.muse]\n\
+         command = \"muse\"\n\
+         cwd = \"{cwd}\"\n\
+         color = \"#0866ff\"\n\
+         label = \"Muse\"\n"
+    ));
+    std::fs::write(&path, text)
+        .map_err(|error| format!("could not add Muse to config.local.toml: {error}"))
+}
+
 /// Serialises cold starts: the window's boot and a tab action can both see a dead server,
 /// and only one of them should spawn a process.
 fn start_lock() -> &'static tokio::sync::Mutex<()> {
@@ -586,6 +746,8 @@ pub async fn ensure_server(project_root: Option<&str>) -> Result<ChatStatus, Str
     }
 
     let dir = dir_for(project_root).ok_or_else(missing_checkout)?;
+    ensure_project_mcps(project_root)?;
+    ensure_muse_agent(&dir, project_root)?;
 
     spawn_server(&dir)?;
 
@@ -995,6 +1157,8 @@ fn unattended_flag(name: &str) -> Option<&'static str> {
     match name {
         "claude" => Some("--dangerously-skip-permissions"),
         "codex" => Some("--dangerously-bypass-approvals-and-sandbox"),
+        // Muse Code keeps its OS sandbox; only the interactive approval prompt is turned off.
+        "muse" => Some("--disable-approval"),
         _ => None,
     }
 }
@@ -1011,6 +1175,16 @@ fn harness_argv(harness: &ChatHarness) -> Vec<String> {
         argv.push(flag.to_string());
     }
     argv
+}
+
+/// A per-launch identity for Concord. The timestamp keeps two instances of the same configured
+/// harness distinct; the pid keeps identities distinct across Rigel processes.
+fn concord_agent_id(name: &str) -> String {
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_nanos())
+        .unwrap_or_default();
+    format!("agentchattr:{name}:{}:{stamp}", std::process::id())
 }
 
 fn spawn_harness(dir: &Path, harness: &ChatHarness) -> Result<ChatProcess, String> {
@@ -1037,6 +1211,10 @@ fn launch_hidden(
     command
         .args(argv)
         .current_dir(dir)
+        // Concord treats this as the session owner. It must be unique per harness process; a
+        // shared `.mcp.json` entry would otherwise make every Chat agent the same agent.
+        .env("CONCORD_AGENT_ID", concord_agent_id(name))
+        .env("CONCORD_AGENT_KIND", "agentchattr")
         // Inherited on purpose: `CREATE_NO_WINDOW` hands the child its own console, and the
         // wrapper injects keystrokes through those inherited handles. Redirecting them would
         // leave the agent deaf.
@@ -1213,12 +1391,188 @@ fn online_names(status: &Value) -> Vec<String> {
 
 /// Start every configured agent that is not already in the room, hidden. Returns the labels
 /// launched so the tab can say what just happened.
+/// agentchattr merges the project's `.mcp.json` into the harnesses it launches (Claude,
+/// Codex, Gemini and Kimi). Adding Rigel b there gives the chat room the same browser as the
+/// session roster; an existing entry is the user's and is never overwritten.
+fn ensure_obscura(project_root: Option<&str>) -> Result<(), String> {
+    let Some(root) = project_root.filter(|root| !root.trim().is_empty()) else {
+        return Ok(());
+    };
+    let root = Path::new(root);
+    if !root.is_dir() {
+        return Ok(());
+    }
+    obscura::ensure_project_mcp(root).map(|_| ())
+}
+
+/// Add the project-scoped MCP servers a Chat room needs. Rigel b is the browser; Concord is the
+/// shared work-state layer across harnesses; AgentCAD is the optional CAD tool. Existing user
+/// entries are preserved, but a malformed `.mcp.json` is reported rather than silently ignored.
+fn ensure_project_mcps(project_root: Option<&str>) -> Result<(), String> {
+    ensure_obscura(project_root)?;
+    ensure_concord(project_root)?;
+    ensure_agentcad(project_root)
+}
+
+/// Concord needs a unique `CONCORD_AGENT_ID` per live session, so the server entry itself carries
+/// only the repository root; `launch_hidden` supplies the per-harness identity. Adding a fixed ID
+/// here would make every Chat agent act as the same owner, which Concord's manual setup explicitly
+/// warns against. The package is resolved through `npx`, so Node 22.12+ is required for this
+/// optional integration.
+fn ensure_concord(project_root: Option<&str>) -> Result<(), String> {
+    let Some(root) = project_root.map(str::trim).filter(|root| !root.is_empty()) else {
+        return Ok(());
+    };
+    let root = Path::new(root);
+    if !root.is_dir() {
+        return Ok(());
+    }
+    ensure_project_server(root, "concord", concord_server(root))
+}
+
+/// AgentCAD is Python-only and its OpenCascade binding supports Python 3.10–3.12. Register it
+/// only when a launcher can actually import `agentcad.mcp`, rather than leaving every Chat agent
+/// with a server that fails to launch: an installed interpreter first, else `uv run --with`.
+fn ensure_agentcad(project_root: Option<&str>) -> Result<(), String> {
+    let Some(root) = project_root.map(str::trim).filter(|root| !root.is_empty()) else {
+        return Ok(());
+    };
+    let root = Path::new(root);
+    if !root.is_dir() {
+        return Ok(());
+    }
+    let Some((program, prefix)) = agentcad_launcher() else {
+        return Ok(());
+    };
+    ensure_project_server(root, "agentcad", agentcad_server(&program, &prefix))
+}
+
+/// Merge one named server into a project's `.mcp.json` without touching any other server.
+fn ensure_project_server(root: &Path, name: &str, server: Value) -> Result<(), String> {
+    let path = root.join(".mcp.json");
+    let mut config = match std::fs::read_to_string(&path) {
+        Ok(text) if text.trim().is_empty() => serde_json::json!({}),
+        Ok(text) => serde_json::from_str::<Value>(&text)
+            .map_err(|error| format!("{} is not valid JSON: {error}", path.display()))?,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => serde_json::json!({}),
+        Err(error) => return Err(format!("could not read {}: {error}", path.display())),
+    };
+    let object = config
+        .as_object_mut()
+        .ok_or_else(|| format!("{} must contain a JSON object", path.display()))?;
+    let servers = object
+        .entry("mcpServers")
+        .or_insert_with(|| serde_json::json!({}))
+        .as_object_mut()
+        .ok_or_else(|| format!("{} has a non-object `mcpServers`", path.display()))?;
+    if servers.contains_key(name) {
+        return Ok(());
+    }
+    servers.insert(name.to_string(), server);
+    let text = format!(
+        "{}\n",
+        serde_json::to_string_pretty(&config)
+            .map_err(|error| format!("could not serialize .mcp.json: {error}"))?
+    );
+    std::fs::write(&path, text)
+        .map_err(|error| format!("could not write {}: {error}", path.display()))?;
+    Ok(())
+}
+
+/// A command line that can import `agentcad.mcp`, as `(program, args-before--m)`.
+fn agentcad_launcher() -> Option<(PathBuf, Vec<String>)> {
+    agentcad_python().or_else(agentcad_uv)
+}
+
+/// Find a compatible Python that can import both `agentcad` and its MCP extra. `py -3.12` is
+/// tried first on Windows because a machine often has 3.12 beside a newer default `python`.
+fn agentcad_python() -> Option<(PathBuf, Vec<String>)> {
+    let mut candidates: Vec<(PathBuf, Vec<String>)> = Vec::new();
+    #[cfg(windows)]
+    if let Some(py) = which("py") {
+        candidates.push((py, vec!["-3.12".to_string()]));
+    }
+    if let Some(python) = which("python3.12") {
+        candidates.push((python, Vec::new()));
+    }
+    if let Some(python) = which("python3") {
+        candidates.push((python, Vec::new()));
+    }
+    if let Some(python) = which("python") {
+        candidates.push((python, Vec::new()));
+    }
+
+    candidates.into_iter().find(|(program, prefix)| {
+        std::process::Command::new(program)
+            .args(prefix)
+            .args([
+                "-c",
+                "import sys, agentcad.mcp; sys.exit(0 if (3,10) <= sys.version_info[:2] <= (3,12) else 1)",
+            ])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .is_ok_and(|status| status.success())
+    })
+}
+
+/// Fall back to `uv run --with`, which builds its environment under uv's own cache instead of a
+/// system interpreter. The prefix stops at `python`, so `agentcad_server` still appends the module.
+fn agentcad_uv() -> Option<(PathBuf, Vec<String>)> {
+    let uv = which("uv")?;
+    Some((
+        uv,
+        [
+            "run",
+            "--python",
+            "3.12",
+            "--with",
+            "agentcad[mcp]",
+            "python",
+        ]
+        .map(str::to_string)
+        .to_vec(),
+    ))
+}
+
+fn agentcad_server(program: &Path, prefix: &[String]) -> Value {
+    let mut args = prefix.to_vec();
+    args.extend(["-m".to_string(), "agentcad.mcp".to_string()]);
+    serde_json::json!({
+        "command": program.to_string_lossy().to_string(),
+        "args": args
+    })
+}
+
+/// The stdio launch recipe for Concord. Windows resolves `npx.cmd` through `cmd /c`, matching
+/// the MCP catalogue's package recipe and the way the harnesses already launch npm-backed tools.
+fn concord_server(root: &Path) -> Value {
+    let mut server = if cfg!(windows) {
+        serde_json::json!({
+            "command": "cmd",
+            "args": ["/c", "npx", "-y", "@concord-ai/concord-mcp"]
+        })
+    } else {
+        serde_json::json!({
+            "command": "npx",
+            "args": ["-y", "@concord-ai/concord-mcp"]
+        })
+    };
+    server["env"] = serde_json::json!({
+        "CONCORD_REPO_ROOT": root.to_string_lossy().to_string(),
+        "CONCORD_AGENT_KIND": "agentchattr"
+    });
+    server
+}
+
 pub async fn start_agents(project_root: Option<&str>) -> Result<Vec<String>, String> {
     let client = http_client();
     if !healthy(&client).await {
         return Err("the room is not running — start it first".to_string());
     }
     let dir = dir_for(project_root).ok_or_else(missing_checkout)?;
+    ensure_project_mcps(project_root)?;
+    ensure_muse_agent(&dir, project_root)?;
 
     let present = api_call(reqwest::Method::GET, "/api/status", None)
         .await
@@ -1255,6 +1609,8 @@ pub async fn start_agent(project_root: Option<&str>, name: &str) -> Result<Strin
         return Err("the room is not running — start it first".to_string());
     }
     let dir = dir_for(project_root).ok_or_else(missing_checkout)?;
+    ensure_project_mcps(project_root)?;
+    ensure_muse_agent(&dir, project_root)?;
     let harness = harnesses(&dir)
         .into_iter()
         .find(|harness| same_agent(name, &harness.name))
@@ -1477,6 +1833,169 @@ label = "Phi4 (local)"
             "[agents.local]"
         );
         std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn a_room_start_adds_muse_once_and_keeps_the_users_table() {
+        let root = tempfile::tempdir().unwrap();
+        let project = tempfile::tempdir().unwrap();
+        let project_path = project.path().to_str().unwrap();
+
+        ensure_muse_agent(root.path(), Some(project_path)).unwrap();
+        let text = std::fs::read_to_string(root.path().join("config.local.toml")).unwrap();
+        assert!(text.contains("[agents.muse]"), "{text}");
+        assert!(text.contains("command = \"muse\""), "{text}");
+        assert!(text.contains("label = \"Muse\""), "{text}");
+        // The TOML string escapes Windows separators, so compare the escaped path.
+        let cwd = project_path.replace('\\', "\\\\");
+        assert!(text.contains(&cwd), "the cwd is the open project: {text}");
+
+        // A second start is a no-op.
+        ensure_muse_agent(root.path(), Some(project_path)).unwrap();
+        assert_eq!(
+            text,
+            std::fs::read_to_string(root.path().join("config.local.toml")).unwrap()
+        );
+
+        // A user's own table wins, flags included.
+        let custom = "[agents.muse]\ncommand = \"muse\"\nargs = \"--yolo\"\n";
+        std::fs::write(root.path().join("config.local.toml"), custom).unwrap();
+        ensure_muse_agent(root.path(), Some(project_path)).unwrap();
+        assert_eq!(
+            custom,
+            std::fs::read_to_string(root.path().join("config.local.toml")).unwrap()
+        );
+    }
+
+    #[test]
+    fn a_chat_start_adds_obscura_and_concord_to_the_project_mcp_file() {
+        let project = tempfile::tempdir().unwrap();
+        ensure_project_mcps(Some(project.path().to_str().unwrap())).unwrap();
+        let config: Value = serde_json::from_str(
+            &std::fs::read_to_string(project.path().join(".mcp.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            config["mcpServers"]["obscura"]["args"],
+            serde_json::json!(["mcp"])
+        );
+        assert_eq!(
+            config["mcpServers"]["concord"]["env"]["CONCORD_REPO_ROOT"],
+            serde_json::json!(project.path().to_string_lossy())
+        );
+        assert_eq!(
+            config["mcpServers"]["concord"]["env"]["CONCORD_AGENT_KIND"],
+            "agentchattr"
+        );
+        let args = config["mcpServers"]["concord"]["args"].as_array().unwrap();
+        assert!(args.iter().any(|arg| arg == "@concord-ai/concord-mcp"));
+
+        // A second start is a no-op and does not rewrite the user's existing entry.
+        let before = std::fs::read_to_string(project.path().join(".mcp.json")).unwrap();
+        ensure_project_mcps(Some(project.path().to_str().unwrap())).unwrap();
+        assert_eq!(
+            before,
+            std::fs::read_to_string(project.path().join(".mcp.json")).unwrap()
+        );
+    }
+
+    #[test]
+    fn agentcad_uses_the_python_module_and_keeps_launcher_args() {
+        let server = agentcad_server(Path::new("C:/Windows/py.exe"), &["-3.12".to_string()]);
+        assert_eq!(server["command"], "C:/Windows/py.exe");
+        assert_eq!(
+            server["args"],
+            serde_json::json!(["-3.12", "-m", "agentcad.mcp"])
+        );
+
+        // The uv fallback stops at `python`, so the module flags are appended the same way.
+        let uv = agentcad_server(
+            Path::new("C:/Tools/uv.exe"),
+            &["run", "--with", "agentcad[mcp]", "python"].map(str::to_string),
+        );
+        assert_eq!(
+            uv["args"],
+            serde_json::json!([
+                "run",
+                "--with",
+                "agentcad[mcp]",
+                "python",
+                "-m",
+                "agentcad.mcp"
+            ])
+        );
+    }
+
+    #[test]
+    fn attachments_keep_only_room_uploads_and_their_names() {
+        let message = parse_message(&serde_json::json!({
+            "id": 4,
+            "sender": "claude",
+            "text": "the screenshot",
+            "time": "21:18:02",
+            "type": "chat",
+            "channel": "general",
+            "attachments": [
+                {"name": "shot.png", "url": "/uploads/shot.png"},
+                {"url": "/uploads/plain.jpg"},
+                {"name": "outside", "url": "https://example.com/a.png"},
+                {"name": "nested", "url": "/uploads/../secret.png"},
+                {"name": "scheme", "url": "file:///C:/secret.png"}
+            ]
+        }))
+        .expect("a message");
+        assert_eq!(message.attachments.len(), 2, "only room uploads survive");
+        assert_eq!(message.attachments[0].name, "shot.png");
+        assert_eq!(message.attachments[1].name, "plain.jpg");
+    }
+
+    #[test]
+    fn the_attachment_reader_refuses_anything_but_a_plain_upload_name() {
+        assert!(attachment_path("/uploads/shot.png").is_ok());
+        for bad in [
+            "/uploads/",
+            "/uploads/../secret.png",
+            "/uploads/a/b.png",
+            "http://127.0.0.1:8300/uploads/a.png",
+            "file:///C:/secret.png",
+            "/api/messages",
+        ] {
+            assert!(attachment_path(bad).is_err(), "{bad} should be refused");
+        }
+    }
+
+    #[test]
+    fn base64_matches_the_standard_alphabet() {
+        assert_eq!(base64(b""), "");
+        assert_eq!(base64(b"f"), "Zg==");
+        assert_eq!(base64(b"fo"), "Zm8=");
+        assert_eq!(base64(b"foo"), "Zm9v");
+        assert_eq!(base64(b"foob"), "Zm9vYg==");
+        assert_eq!(base64(b"fooba"), "Zm9vYmE=");
+        assert_eq!(base64(b"foobar"), "Zm9vYmFy");
+    }
+
+    #[test]
+    fn only_image_uploads_have_a_mime() {
+        assert_eq!(image_mime("a.PNG"), Some("image/png"));
+        assert_eq!(image_mime("a.jpeg"), Some("image/jpeg"));
+        assert_eq!(image_mime("a.pdf"), None);
+        assert_eq!(image_mime("noextension"), None);
+    }
+
+    #[test]
+    fn concord_does_not_overwrite_a_users_entry() {
+        let project = tempfile::tempdir().unwrap();
+        let path = project.path().join(".mcp.json");
+        std::fs::write(
+            &path,
+            r#"{"mcpServers":{"concord":{"command":"custom"},"keep":{"command":"keep"}}}"#,
+        )
+        .unwrap();
+        ensure_concord(Some(project.path().to_str().unwrap())).unwrap();
+        let config: Value = serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+        assert_eq!(config["mcpServers"]["concord"]["command"], "custom");
+        assert_eq!(config["mcpServers"]["keep"]["command"], "keep");
     }
 
     #[test]

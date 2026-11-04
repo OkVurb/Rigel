@@ -14,6 +14,7 @@
 import { useCallback, useEffect, useState } from "react";
 
 import { api, isTauri, when, type Attention } from "./api";
+import { useMenu } from "./menu";
 
 export interface AttentionJump {
   sessionId: string;
@@ -40,6 +41,7 @@ export default function AttentionView({
   onJump: (target: AttentionJump) => void;
   onOpenSession: () => void;
 }) {
+  const contextMenu = useMenu();
   const [view, setView] = useState<Attention | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
@@ -164,6 +166,38 @@ export default function AttentionView({
                     <button
                       className="attention-row"
                       onClick={() => open(item)}
+                      onContextMenu={(event) =>
+                        contextMenu.open(event, {
+                          eyebrow: "Attention",
+                          title: item.label,
+                          subtitle: `${KIND_LABEL[item.kind] ?? item.kind} · ${when(item.at)}`,
+                          sections: [
+                            {
+                              label: "Resolve",
+                              items: [
+                                {
+                                  label: "Open the place to resolve it",
+                                  detail: item.detail,
+                                  icon: "open",
+                                  onSelect: () => open(item),
+                                },
+                                {
+                                  label: "Copy label",
+                                  icon: "copy",
+                                  onSelect: () => void navigator.clipboard.writeText(item.label),
+                                },
+                                {
+                                  label: "Copy detail",
+                                  icon: "quote",
+                                  disabled: !item.detail,
+                                  onSelect: () => void navigator.clipboard.writeText(item.detail),
+                                },
+                              ],
+                            },
+                          ],
+                          footer: group.title,
+                        })
+                      }
                       title={
                         item.kind === "approval"
                           ? item.turn_id

@@ -68,6 +68,7 @@ pub const PRESETS: &[RolePreset] = &[
             "read_file",
             "list_files",
             "fetch_url",
+            "browser_open",
             "skills_search",
             "skill_load",
             "budget",

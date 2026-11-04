@@ -12,12 +12,13 @@
  * nothing is worse than no switch: it teaches the user not to trust the screen.
  */
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 
 import {
   api,
   when,
   type CloudPullReport,
+  type CloudPublishAllReport,
   type CloudPushReport,
   type CloudStatus,
   type HarnessInfo,
@@ -42,6 +43,7 @@ import { UI_SCALES, applyDisplay } from "./display";
 import { ModelControls } from "./modelpicker";
 import { ensurePermission } from "./notify";
 import { applyTheme, type Theme } from "./theme";
+import { useMenu } from "./menu";
 
 interface Props {
   keys: KeyStatus | null;
@@ -49,6 +51,8 @@ interface Props {
   session: string | null;
   /** The shelf itself: the real index through Rust, the sample rows in the preview. */
   source: SkillSource;
+  /** A page to open when Account deep-links here; later navigation stays inside this view. */
+  initialPage?: SettingsPage;
   onKeys: (status: KeyStatus) => void;
   onNotice: (notice: string) => void;
 }
@@ -122,10 +126,32 @@ const PAGES = [
   { id: "rules", label: "Project rules", blurb: "AGENTS.md, CLAUDE.md and memory export" },
   { id: "notifications", label: "Notifications", blurb: "Desktop events while the window is hidden" },
   { id: "updates", label: "Updates", blurb: "The signed self-update" },
+  { id: "advanced", label: "Advanced", blurb: "Every preference in one place, with the values Rigel resolved" },
   { id: "diagnostics", label: "Diagnostics", blurb: "One redacted bundle for a bug report" },
 ] as const;
 
 type PageId = (typeof PAGES)[number]["id"];
+
+export type SettingsPage = PageId;
+
+/** Extra words the search should understand, beyond a page's label and blurb. */
+const SETTINGS_KEYWORDS: Record<PageId, string> = {
+  agent: "model provider effort reasoning steps budget chat picker",
+  providers: "api key vertex google cloud omniroute openrouter anthropic openai gemini keys",
+  harnesses: "claude codex cursor cline gemini cli installed path",
+  safety: "writable agents daily cap budget permissions unattended",
+  spending: "cost usage tokens spend money",
+  terminal: "font size scrollback shell powershell bash",
+  appearance: "theme dark light scale density compact display",
+  shelf: "skills sources refresh index repository stale",
+  cloud: "firebase firestore account sign in login sessions publishing push pull shelf mirror",
+  mail: "email agentmail inbox key send",
+  rules: "agents.md claude.md memory project rules export",
+  notifications: "desktop permission approval turn done failed",
+  updates: "version github signed installer auto update",
+  advanced: "all preferences settings auto refine session sync account status runtime fields",
+  diagnostics: "bundle redact logs crash support report",
+};
 
 /**
  * The auth line the handoff requires: a harness that is not on an API key says so, and names the
@@ -364,13 +390,35 @@ function dollars(micros: number): string {
   return `${sign}$${Math.floor(value / 1_000_000)}.${String(Math.floor((value % 1_000_000) / 100)).padStart(4, "0")}`;
 }
 
-export default function SettingsView({ keys, project, session, source, onKeys, onNotice }: Props) {
-  const [page, setPage] = useState<PageId>("agent");
+export default function SettingsView({
+  keys,
+  project,
+  session,
+  source,
+  initialPage = "agent",
+  onKeys,
+  onNotice,
+}: Props) {
+  const [page, setPage] = useState<PageId>(initialPage);
+  const contextMenu = useMenu();
+  const copyText = async (text: string, label: string) => {
+    if (!text) return;
+    try {
+      await navigator.clipboard.writeText(text);
+      onNotice(`${label} copied.`);
+    } catch {
+      onNotice(`Could not copy ${label.toLowerCase()} from this window.`);
+    }
+  };
+  const [filter, setFilter] = useState("");
+  const settingsSearch = useRef<HTMLInputElement | null>(null);
   const [value, setValue] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [confirmRemove, setConfirmRemove] = useState(false);
   const [settings, setSettings] = useState<Settings | null>(null);
+  // The Vertex project, edited here but saved in settings.toml, not the keychain.
+  const [vertexProject, setVertexProject] = useState("");
   const [server, setServer] = useState<OmnirouteStatus | null>(null);
   const [serverBusy, setServerBusy] = useState(false);
   const [harnesses, setHarnesses] = useState<HarnessInfo[] | null>(null);
@@ -400,6 +448,7 @@ export default function SettingsView({ keys, project, session, source, onKeys, o
   const [cloudMode, setCloudMode] = useState<"signin" | "signup">("signin");
   const [lastPush, setLastPush] = useState<CloudPushReport | null>(null);
   const [lastPull, setLastPull] = useState<CloudPullReport | null>(null);
+  const [lastPublishAll, setLastPublishAll] = useState<CloudPublishAllReport | null>(null);
   // Whether this sitting has already sent a verification link, so the button can say "Resend".
   const [verificationSent, setVerificationSent] = useState(false);
   const [cloudAppCheckUrl, setCloudAppCheckUrl] = useState("");
@@ -456,7 +505,11 @@ export default function SettingsView({ keys, project, session, source, onKeys, o
     let live = true;
     api
       .getSettings()
-      .then((next) => live && setSettings(next))
+      .then((next) => {
+        if (!live) return;
+        setSettings(next);
+        setVertexProject(next.vertex_project);
+      })
       .catch(() => live && setSettings(null));
     api
       .omnirouteStatus()
@@ -836,6 +889,18 @@ export default function SettingsView({ keys, project, session, source, onKeys, o
     }
   };
 
+  /** The GCP project the Vertex endpoint is billed to; validated and written by the core. */
+  const saveVertexProject = async () => {
+    const project = vertexProject.trim();
+    setVertexProject(project);
+    await patch(
+      { vertex_project: project },
+      project
+        ? `Vertex project saved: ${project}.`
+        : "Vertex project cleared; Rigel reads the Cloud CLI's project instead.",
+    );
+  };
+
   /** Save the project id and web API key; the core owns validation and the file. */
   const saveCloudProject = async () => {
     const project = cloudProject.trim();
@@ -1019,6 +1084,29 @@ export default function SettingsView({ keys, project, session, source, onKeys, o
     }
   };
 
+  /** Publish every session in the open project in one go. */
+  const publishAllSessions = async () => {
+    if (!project) {
+      onNotice("Open a project before publishing its sessions.");
+      return;
+    }
+    setCloudBusy(true);
+    setError(null);
+    try {
+      const report = await api.cloudPublishAll(project);
+      setLastPublishAll(report);
+      onNotice(
+        report.failed.length > 0
+          ? `Published ${report.sessions} session(s); ${report.failed.length} failed. ${report.failed[0]}`
+          : `Published ${report.sessions} session(s), ${report.turns} turn(s) to ${report.project_id}.`,
+      );
+    } catch (failure) {
+      setError(failure instanceof Error ? failure.message : String(failure));
+    } finally {
+      setCloudBusy(false);
+    }
+  };
+
   const pushShelf = async () => {
     setCloudBusy(true);
     setError(null);
@@ -1065,6 +1153,20 @@ export default function SettingsView({ keys, project, session, source, onKeys, o
       setCloudBusy(false);
     }
   };
+
+  // Slash focuses the filter without stealing keys from a field that is already being typed in.
+  useEffect(() => {
+    const focusSearch = (event: KeyboardEvent) => {
+      if (event.key !== "/" || event.metaKey || event.ctrlKey || event.altKey) return;
+      const target = event.target as HTMLElement | null;
+      const tag = target?.tagName;
+      if (tag === "INPUT" || tag === "TEXTAREA" || target?.isContentEditable) return;
+      event.preventDefault();
+      settingsSearch.current?.focus();
+    };
+    window.addEventListener("keydown", focusSearch);
+    return () => window.removeEventListener("keydown", focusSearch);
+  }, []);
 
   /** The right-hand column of one nav row: a short fact and, when it is a state, a dot. */
   const navMeta = (id: PageId): { text: string; dot: "idle" | "failed" | null } => {
@@ -1137,6 +1239,8 @@ export default function SettingsView({ keys, project, session, source, onKeys, o
           text: updateStatus ? (updateStatus.enabled ? `v${updateStatus.current}` : "off") : "…",
           dot: updateStatus ? (updateStatus.enabled ? "idle" : "failed") : null,
         };
+      case "advanced":
+        return { text: settings ? Object.keys(settings).length + " fields" : "…", dot: null };
       case "diagnostics":
         return { text: diagnostics ? "ready" : "local", dot: null };
     }
@@ -1144,6 +1248,14 @@ export default function SettingsView({ keys, project, session, source, onKeys, o
 
   const active = PAGES.find((item) => item.id === page) ?? PAGES[0];
   const theme: Theme = settings?.theme === "light" ? "light" : "dark";
+  const settingsQuery = filter.trim().toLowerCase();
+  const shownPages = settingsQuery
+    ? PAGES.filter((item) =>
+        (item.label + " " + item.blurb + " " + SETTINGS_KEYWORDS[item.id])
+          .toLowerCase()
+          .includes(settingsQuery),
+      )
+    : PAGES;
 
   const agentPage = (
     <>
@@ -1281,6 +1393,47 @@ export default function SettingsView({ keys, project, session, source, onKeys, o
           <p className="fine">
             Runs <code>omniroute serve --daemon --no-open</code> and waits for{" "}
             <code>/api/health</code>. Override the address with <code>RIGEL_OMNIROUTE_URL</code>.
+          </p>
+        </section>
+      ) : null}
+
+      {provider === "vertex" ? (
+        <section className="settings-section">
+          <div className="settings-head">
+            <h3>Google Cloud project</h3>
+            <span className={`pill ${settings?.vertex_project ? "completed" : "cancelled"}`}>
+              {settings?.vertex_project ? "saved" : "not set"}
+            </span>
+          </div>
+          <label className="key-field">
+            <span>Project id</span>
+            <input
+              value={vertexProject}
+              onChange={(event) => setVertexProject(event.target.value)}
+              onKeyDown={(event) => {
+                if (event.key === "Enter") {
+                  event.preventDefault();
+                  void saveVertexProject();
+                }
+              }}
+              placeholder="my-gcp-project"
+              autoComplete="off"
+              spellCheck={false}
+            />
+          </label>
+          <div className="settings-actions">
+            <button
+              className="primary"
+              onClick={() => void saveVertexProject()}
+              disabled={!settings || vertexProject.trim() === settings.vertex_project}
+            >
+              Save project
+            </button>
+          </div>
+          <p className="fine">
+            The project the Vertex endpoint is billed to. A turn reads <code>VERTEX_PROJECT</code>{" "}
+            first, then this field, then the project <code>gcloud</code> is already set to. The
+            access token below is separate, and it still expires.
           </p>
         </section>
       ) : null}
@@ -2624,6 +2777,250 @@ export default function SettingsView({ keys, project, session, source, onKeys, o
           </p>
         ) : null}
       </section>
+
+      <section className="settings-section">
+        <div className="settings-head">
+          <h3>Sessions online</h3>
+          <span className={`pill ${settings?.cloud_sync_sessions ? "ok" : "cancelled"}`}>
+            {settings?.cloud_sync_sessions ? "automatic" : "manual"}
+          </span>
+        </div>
+        <p className="fine">
+          Publishing writes a session's prompts and the assistant's own replies to{" "}
+          <code>{"users/{uid}/sessions"}</code>, where the phone and the web can read them. Tool
+          calls, command output, file changes and the project path never leave the machine.
+        </p>
+        <label className="toggle">
+          <input
+            type="checkbox"
+            checked={settings?.cloud_sync_sessions ?? false}
+            disabled={!settings || !cloud?.signed_in}
+            onChange={(event) =>
+              void patch(
+                { cloud_sync_sessions: event.target.checked },
+                event.target.checked
+                  ? "Each finished turn publishes its session; the phone sees it without a click."
+                  : "Automatic publishing is off; Publish to phone still works per session.",
+              )
+            }
+          />
+          publish every session automatically
+        </label>
+        <div className="settings-actions">
+          <button
+            className="chip"
+            onClick={() => void publishAllSessions()}
+            disabled={cloudBusy || !cloud?.signed_in || !project}
+          >
+            {cloudBusy ? "Working…" : "Publish all sessions"}
+          </button>
+        </div>
+        {lastPublishAll ? (
+          <p className="fine">
+            {lastPublishAll.sessions} session(s), {lastPublishAll.turns} turn(s) on{" "}
+            {lastPublishAll.project_id}.
+            {lastPublishAll.failed.length > 0
+              ? ` ${lastPublishAll.failed.length} failed: ${lastPublishAll.failed[0]}`
+              : null}
+          </p>
+        ) : null}
+      </section>
+    </>
+  );
+
+  const preferenceRows: { label: string; value: string; page: PageId }[] = settings
+    ? [
+        { label: "Provider", value: settings.provider, page: "providers" },
+        { label: "Model", value: settings.model, page: "agent" },
+        { label: "Reasoning effort", value: settings.effort, page: "agent" },
+        { label: "Step budget", value: settings.max_steps + " steps", page: "agent" },
+        {
+          label: "Default cap",
+          value: "$" + (settings.default_budget_cents / 100).toFixed(2),
+          page: "safety",
+        },
+        {
+          label: "Unattended turns",
+          value: settings.unattended_default ? "allowed" : "refused",
+          page: "safety",
+        },
+        {
+          label: "Chat-only picker",
+          value: settings.chat_models_only ? "on" : "off",
+          page: "agent",
+        },
+        {
+          label: "Refine before send",
+          value: settings.auto_refine ? "on" : "off",
+          page: "advanced",
+        },
+        {
+          label: "Publish sessions",
+          value: settings.cloud_sync_sessions ? "automatic" : "manual",
+          page: "cloud",
+        },
+        { label: "Theme", value: settings.theme, page: "appearance" },
+        { label: "Window scale", value: settings.ui_scale + "%", page: "appearance" },
+        {
+          label: "Compact density",
+          value: settings.compact_density ? "on" : "off",
+          page: "appearance",
+        },
+        {
+          label: "Notifications",
+          value:
+            [
+              settings.notify_approval,
+              settings.notify_turn_done,
+              settings.notify_turn_failed,
+            ].filter(Boolean).length + " of 3",
+          page: "notifications",
+        },
+        {
+          label: "Terminal",
+          value:
+            settings.terminal_font_size +
+            "px · " +
+            settings.terminal_scrollback +
+            " lines · " +
+            (settings.terminal_shell || "OS default"),
+          page: "terminal",
+        },
+        {
+          label: "Skill sources",
+          value: settings.skills_auto_update ? "auto-refresh" : "manual refresh",
+          page: "shelf",
+        },
+        {
+          label: "Vertex project",
+          value: settings.vertex_project || "environment / Cloud CLI",
+          page: "providers",
+        },
+      ]
+    : [];
+
+  const advancedPage = (
+    <>
+      <section className="settings-section">
+        <h3>Composer and sessions</h3>
+        <p className="fine">
+          These two switches also live where they are used — the composer and the Cloud page. This
+          page is the consolidated view, and it saves through the same settings.toml.
+        </p>
+        <label className="toggle">
+          <input
+            type="checkbox"
+            checked={settings?.auto_refine ?? false}
+            disabled={!settings}
+            onChange={(event) =>
+              void patch(
+                { auto_refine: event.target.checked },
+                event.target.checked
+                  ? "Drafts are refined and sent without the review card."
+                  : "Send opens the review card again.",
+              )
+            }
+          />
+          refine each draft before sending
+        </label>
+        <label className="toggle">
+          <input
+            type="checkbox"
+            checked={settings?.cloud_sync_sessions ?? false}
+            disabled={!settings || !cloud?.signed_in}
+            onChange={(event) =>
+              void patch(
+                { cloud_sync_sessions: event.target.checked },
+                event.target.checked
+                  ? "Each finished turn publishes its session."
+                  : "Automatic session publishing is off.",
+              )
+            }
+          />
+          publish each session after its turn finishes
+        </label>
+        <p className="fine">
+          {cloud?.signed_in
+            ? "Publishing writes prompts and assistant replies only. Tool calls, command output, file changes and project paths stay local."
+            : "Sign in under Cloud to enable automatic publishing; Publish to phone still works per session."}
+        </p>
+      </section>
+
+      <section className="settings-section">
+        <h3>Every preference</h3>
+        <p className="fine">
+          The values Rigel resolved from settings.toml and the OS keychain. Each row opens the page
+          that owns the control.
+        </p>
+        {settings ? (
+          <div className="settings-field-grid">
+            {preferenceRows.map((row) => (
+              <div className="settings-field" key={row.label}>
+                <span>{row.label}</span>
+                <div className="settings-field-row">
+                  <code>{row.value}</code>
+                  <span className="grow" />
+                  <button className="link" onClick={() => setPage(row.page)}>
+                    Open
+                  </button>
+                </div>
+              </div>
+            ))}
+          </div>
+        ) : (
+          <p className="fine">Reading settings.toml…</p>
+        )}
+      </section>
+
+      <section className="settings-section">
+        <h3>Runtime facts</h3>
+        <div className="settings-field-grid">
+          <div className="settings-field">
+            <span>Provider keys</span>
+            <div className="settings-field-row">
+              <code>{heldKeys + " of " + providers.length + " stored"}</code>
+            </div>
+          </div>
+          <div className="settings-field">
+            <span>Harnesses</span>
+            <div className="settings-field-row">
+              <code>{installed + " installed"}</code>
+            </div>
+          </div>
+          <div className="settings-field">
+            <span>Skill sources</span>
+            <div className="settings-field-row">
+              <code>
+                {staleSources === null
+                  ? "reading"
+                  : staleSources > 0
+                    ? staleSources + " stale"
+                    : "fresh"}
+              </code>
+            </div>
+          </div>
+          <div className="settings-field">
+            <span>Cloud account</span>
+            <div className="settings-field-row">
+              <code>
+                {cloud
+                  ? cloud.signed_in
+                    ? cloud.email ?? "signed in"
+                    : "signed out"
+                  : "reading"}
+              </code>
+            </div>
+          </div>
+          <div className="settings-field">
+            <span>Local settings</span>
+            <div className="settings-field-row">
+              <code>
+                {settings ? Object.keys(settings).length + " fields in settings.toml" : "reading"}
+              </code>
+            </div>
+          </div>
+        </div>
+      </section>
     </>
   );
 
@@ -2655,6 +3052,8 @@ export default function SettingsView({ keys, project, session, source, onKeys, o
         return notificationsPage;
       case "updates":
         return updatesPage;
+      case "advanced":
+        return advancedPage;
       case "diagnostics":
         return diagnosticsPage;
     }
@@ -2666,11 +3065,56 @@ export default function SettingsView({ keys, project, session, source, onKeys, o
         <div className="list-head">
           <div className="list-title">
             <h1>Settings</h1>
-            <span>{project ? "project open" : "no project"}</span>
+            <span>
+              {settingsQuery
+                ? shownPages.length + (shownPages.length === 1 ? " match" : " matches")
+                : project
+                  ? "project open"
+                  : "no project"}
+            </span>
           </div>
         </div>
+        <div className="settings-search">
+          <label className="search">
+            <span aria-hidden>⌕</span>
+            <input
+              ref={settingsSearch}
+              value={filter}
+              onChange={(event) => setFilter(event.target.value)}
+              onKeyDown={(event) => {
+                if (event.key === "Escape") {
+                  setFilter("");
+                  event.currentTarget.blur();
+                }
+                if (event.key === "Enter" && shownPages[0]) setPage(shownPages[0].id);
+              }}
+              placeholder="Search settings…"
+              aria-label="Search settings"
+              autoComplete="off"
+              spellCheck={false}
+            />
+            {filter ? (
+              <button
+                type="button"
+                className="settings-search-clear"
+                aria-label="Clear settings search"
+                onClick={() => {
+                  setFilter("");
+                  settingsSearch.current?.focus();
+                }}
+              >
+                ×
+              </button>
+            ) : (
+              <kbd>/</kbd>
+            )}
+          </label>
+        </div>
         <div className="rows">
-          {PAGES.map((item) => {
+          {shownPages.length === 0 ? (
+            <p className="empty settings-no-match">No setting matches “{filter.trim()}”.</p>
+          ) : null}
+          {shownPages.map((item) => {
             const meta = navMeta(item.id);
             return (
               <button
@@ -2679,6 +3123,40 @@ export default function SettingsView({ keys, project, session, source, onKeys, o
                 aria-selected={page === item.id}
                 className={`row${page === item.id ? " on" : ""}`}
                 onClick={() => setPage(item.id)}
+                onContextMenu={(event) =>
+                  contextMenu.open(event, {
+                    eyebrow: "Settings",
+                    title: item.label,
+                    subtitle: item.blurb,
+                    sections: [
+                      {
+                        label: "Page",
+                        items: [
+                          {
+                            label: page === item.id ? "Current page" : "Open page",
+                            detail: item.blurb,
+                            icon: "open",
+                            disabled: page === item.id,
+                            onSelect: () => setPage(item.id),
+                          },
+                          {
+                            label: "Copy page name",
+                            icon: "copy",
+                            onSelect: () => void copyText(item.label, "Page name"),
+                          },
+                          {
+                            label: "Search settings",
+                            detail: filter ? `Filter: ${filter}` : "Every page in one list",
+                            icon: "search",
+                            hint: "/",
+                            onSelect: () => settingsSearch.current?.focus(),
+                          },
+                        ],
+                      },
+                    ],
+                    footer: `${shownPages.length} of ${PAGES.length} pages shown`,
+                  })
+                }
               >
                 <span className="row-text">
                   <span className="row-name">
@@ -2865,8 +3343,10 @@ export default function SettingsView({ keys, project, session, source, onKeys, o
           <div>
             <h3>What leaves the machine</h3>
             <p className="fine">
-              The sign-in request, and shelf metadata only when you press Push. Prompts,
-              transcripts, project files and skill bodies are never uploaded.
+              The sign-in request; shelf metadata when you press Push; and a session's prompts
+              and the assistant's replies when you publish it, or after each turn if automatic
+              publishing is on. Tool calls, command output, file changes, project paths and skill
+              bodies stay on this machine.
             </p>
           </div>
         ) : null}

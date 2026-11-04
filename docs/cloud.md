@@ -23,8 +23,9 @@ What it gives you:
 
 What it deliberately does **not** do: no skill bodies, project files, screenshots, tool calls,
 command output or file changes leave the machine, there is no realtime listener, and nothing is
-sent unless you press the button. A session is only published when you press **Publish to phone**
-(or run `rigel cloud publish`); the settings page never uploads a transcript on its own.
+sent unless you press a button or turn on automatic publishing. A session is published when you
+press **Publish to phone**, when you press **Publish all sessions** in Settings → Cloud, or after
+each finished turn once **publish every session automatically** is on (it is off by default).
 
 ## Setup, once
 
@@ -422,6 +423,11 @@ terminal:
 rigel cloud publish <session-id> --project .
 rigel cloud publish <session-id> --json     # the report, for a script
 ```
+
+The window can publish the whole project at once: Settings → Cloud → **Publish all sessions**.
+Beside it, **publish every session automatically** publishes a session after each finished turn,
+so the phone does not wait for a click. Automatic publishing is off by default and uses the same
+reduced shape described above; a failed publish is logged and the next one retries it.
 
 Publishing is an upsert: publishing again after more turns rewrites the header and every turn. A
 turn deleted on the computer is not deleted in Firestore — deletion sync is not built, and the phone

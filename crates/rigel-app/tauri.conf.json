@@ -1,7 +1,7 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "Rigel",
-  "version": "0.1.5",
+  "version": "0.1.6",
   "identifier": "dev.rigel.desktop",
   "build": {
     "frontendDist": "../../ui/dist",
@@ -20,6 +20,21 @@
         "resizable": true,
         "decorations": false,
         "center": true
+      },
+      {
+        "label": "tray",
+        "title": "Rigel",
+        "url": "index.html",
+        "width": 380,
+        "height": 560,
+        "resizable": false,
+        "maximizable": false,
+        "minimizable": false,
+        "decorations": false,
+        "transparent": true,
+        "visible": false,
+        "skipTaskbar": true,
+        "alwaysOnTop": true
       }
     ],
     "security": {
@@ -38,6 +53,9 @@
   },
   "bundle": {
     "active": true,
+    "externalBin": [
+      "binaries/rigel-b"
+    ],
     "targets": [
       "msi",
       "nsis"
@@ -69,6 +87,7 @@
     },
     "resources": {
       "resources/sidecar/": "sidecar/",
+      "resources/rigel-b/LICENSE": "rigel-b/LICENSE",
       "resources/update-pubkey.txt": "update-pubkey.txt"
     }
   }

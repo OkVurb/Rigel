@@ -143,17 +143,7 @@ impl Egress {
     /// Fetch one `http(s)` URL after its origin is approved. The whole operation is bounded, so
     /// a server that trickles bytes cannot hold the turn open indefinitely.
     pub async fn fetch(&self, url: &str) -> Result<Fetched, EgressError> {
-        let start = Url::parse(url.trim())
-            .map_err(|error| EgressError::new("BAD_URL", format!("{url} is not a URL: {error}")))?;
-        match start.scheme() {
-            "http" | "https" => {}
-            other => {
-                return Err(EgressError::new(
-                    "UNSUPPORTED_SCHEME",
-                    format!("{other} is not allowed; fetch_url only uses http and https"),
-                ));
-            }
-        }
+        let start = parse_http_url(url)?;
 
         match tokio::time::timeout(FETCH_TIMEOUT, self.fetch_inner(start)).await {
             Ok(result) => result,
@@ -165,6 +155,16 @@ impl Egress {
                 ),
             )),
         }
+    }
+
+    /// Approve one URL's origin without reading it, for a browser that navigates on its own.
+    /// Obscura follows redirects internally and blocks private-network targets by default; the
+    /// initial origin still gets the same per-origin consent as `fetch_url`.
+    pub async fn approve_origin(&self, url: &str) -> Result<(String, String), EgressError> {
+        let start = parse_http_url(url)?;
+        let origin = start.origin().ascii_serialization();
+        self.authorize(&origin, start.as_str()).await?;
+        Ok((origin, start.to_string()))
     }
 
     async fn fetch_inner(&self, start: Url) -> Result<Fetched, EgressError> {
@@ -343,6 +343,18 @@ impl Egress {
         let origins = always.get_or_insert_with(|| load_always(&self.store));
         origins.insert(origin.to_string());
         save_always(&self.store, origins);
+    }
+}
+
+fn parse_http_url(url: &str) -> Result<Url, EgressError> {
+    let parsed = Url::parse(url.trim())
+        .map_err(|error| EgressError::new("BAD_URL", format!("{url} is not a URL: {error}")))?;
+    match parsed.scheme() {
+        "http" | "https" => Ok(parsed),
+        other => Err(EgressError::new(
+            "UNSUPPORTED_SCHEME",
+            format!("{other} is not allowed; only http and https are supported"),
+        )),
     }
 }
 

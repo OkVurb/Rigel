@@ -24,6 +24,8 @@ rigel-mcp = { path = "../rigel-mcp" }
 reqwest = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+sqlx = { workspace = true }
+sysinfo = { workspace = true }
 tauri = { version = "2", features = ["tray-icon"] }
 tauri-plugin-dialog = "2"
 tokio = { workspace = true }

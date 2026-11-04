@@ -9,6 +9,7 @@
 //! sync methods touch the network.
 
 use std::collections::HashSet;
+use std::fs;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
@@ -65,6 +66,17 @@ pub struct ImportReport {
     pub imported: usize,
     pub skipped: usize,
     pub invalid: usize,
+}
+
+/// What one install wrote. A skill is copied into every requested harness store so the same
+/// index row works for Claude and for the shared `.agents` readers.
+#[derive(Debug, Clone, Serialize)]
+pub struct InstallReport {
+    pub name: String,
+    pub directory: String,
+    pub paths: Vec<PathBuf>,
+    /// True when an existing `SKILL.md` was replaced with a different body.
+    pub replaced: bool,
 }
 
 /// One `rigel skills sweep` — both marketplace walks, their row counts, and what the
@@ -1010,6 +1022,67 @@ impl SkillIndex {
         Ok(Some((text, sha)))
     }
 
+    /// Copy one indexed skill into each harness store. The body is the exact indexed
+    /// `SKILL.md`, never a regenerated summary, so an install cannot change what the review saw.
+    pub async fn install(&self, id: &str, roots: &[PathBuf]) -> Result<InstallReport, SkillsError> {
+        let name: Option<String> = sqlx::query_scalar("SELECT name FROM skills WHERE id = ?")
+            .bind(id)
+            .fetch_optional(self.store.pool())
+            .await?;
+        let Some(name) = name else {
+            return Err(SkillsError::NotIndexed(id.to_string()));
+        };
+        let (body, _) = self
+            .body(id)
+            .await?
+            .ok_or_else(|| SkillsError::NoBody(id.to_string()))?;
+        let directory = skill_dir_name(&name);
+        let mut paths = Vec::with_capacity(roots.len());
+        let mut replaced = false;
+
+        for root in roots {
+            let folder = root.join(&directory);
+            fs::create_dir_all(&folder)?;
+            let path = folder.join("SKILL.md");
+            let existing = fs::read_to_string(&path).ok();
+            if existing.as_deref() == Some(body.as_str()) {
+                paths.push(path);
+                continue;
+            }
+            if existing.is_some() {
+                replaced = true;
+                fs::write(&path, &body)?;
+            } else {
+                let temporary = folder.join(format!(".SKILL.md.{}.tmp", std::process::id()));
+                fs::write(&temporary, &body)?;
+                fs::rename(&temporary, &path)?;
+            }
+            paths.push(path);
+        }
+
+        Ok(InstallReport {
+            name,
+            directory,
+            paths,
+            replaced,
+        })
+    }
+
+    /// Whether this row already has a `SKILL.md` in every supplied store.
+    pub async fn installed(&self, id: &str, roots: &[PathBuf]) -> Result<bool, SkillsError> {
+        let name: Option<String> = sqlx::query_scalar("SELECT name FROM skills WHERE id = ?")
+            .bind(id)
+            .fetch_optional(self.store.pool())
+            .await?;
+        let Some(name) = name else {
+            return Ok(false);
+        };
+        let directory = skill_dir_name(&name);
+        Ok(roots
+            .iter()
+            .all(|root| root.join(&directory).join("SKILL.md").is_file()))
+    }
+
     pub async fn status(&self) -> Result<Vec<SourceStatus>, SkillsError> {
         let rows: Vec<(String, Option<String>)> =
             sqlx::query_as("SELECT id, base_url FROM sources ORDER BY id")
@@ -1203,6 +1276,30 @@ impl SkillIndex {
             skipped,
             invalid,
         })
+    }
+}
+
+/// The directory name a harness sees. Names are user-facing, so this keeps the readable
+/// lowercase form and collapses everything that is not a letter, digit, dash or underscore.
+pub fn skill_dir_name(name: &str) -> String {
+    let mut slug = String::new();
+    let mut separator = false;
+    for character in name.trim().chars() {
+        if character.is_ascii_alphanumeric() {
+            slug.push(character.to_ascii_lowercase());
+            separator = false;
+        } else if !separator && !slug.is_empty() {
+            slug.push('-');
+            separator = true;
+        }
+    }
+    while slug.ends_with('-') {
+        slug.pop();
+    }
+    if slug.is_empty() {
+        "skill".to_string()
+    } else {
+        slug
     }
 }
 
