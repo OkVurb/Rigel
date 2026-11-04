@@ -62,7 +62,15 @@ __pycache__/
 
 # Tauri build output
 crates/rigel-app/gen/
+
+# Vendored Rigel b source stays a local checkout: it is large and carries its own
+# Cargo lock. The release sidecar is built from it, then copied into binaries/.
 vendor/
+
+# Local sidecar build output, room data and one-off captures
+crates/rigel-app/binaries/
+.concord/
+ui/shot-*.png
 
 # Claude Code local settings (machine-specific approvals)
 .claude/settings.local.json
@@ -82,8 +90,8 @@ ACTIVE-WORK.md
 # installed dependencies for the Firebase Functions codebase
 functions/node_modules/
 
-# generated MCP catalogue: rebuild with scripts/fetch-mcp-catalog.mjs
-data/mcp-catalog.json
+# The MCP catalogue is checked in: the app embeds it at compile time and CI has
+# no generation step. Rebuild it with scripts/fetch-mcp-catalog.mjs.
 
 # one-shot reCAPTCHA assessment body from Google's console flow
 request.json
