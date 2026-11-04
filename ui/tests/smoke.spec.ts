@@ -16,7 +16,7 @@ test("every surface renders from the rail", async ({ page }) => {
 
   await page.getByRole("button", { name: "Chat" }).click();
   await expect(page.getByRole("heading", { name: "# general" })).toBeVisible();
-  await expect(page.getByRole("tab", { name: "# review" })).toBeVisible();
+  await expect(page.locator(".bots-channels").getByRole("button", { name: "# review" })).toBeVisible();
   await expect(page.getByText("THE ROOM")).toBeVisible();
 
   await page.getByRole("button", { name: "Diff" }).click();
