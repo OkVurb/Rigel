@@ -63,12 +63,16 @@ __pycache__/
 # Tauri build output
 crates/rigel-app/gen/
 
-# Vendored Rigel b source stays a local checkout: it is large and carries its own
-# Cargo lock. The release sidecar is built from it, then copied into binaries/.
-vendor/
+# The Rigel b fork is vendored source. Keep its compiler cache and local build log
+# out of history; vendor/rigel-b/.gitignore also ignores target/.
+vendor/*
+!vendor/rigel-b/
+!vendor/rigel-b/**
+vendor/rigel-b/target/
+vendor/rigel-b/build.log
 
-# Local sidecar build output, room data and one-off captures
-crates/rigel-app/binaries/
+# Local room data and one-off captures stay machine-local. The built sidecar in
+# crates/rigel-app/binaries is tracked so a clean checkout can bundle the app.
 .concord/
 ui/shot-*.png
 
