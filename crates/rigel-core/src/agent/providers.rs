@@ -172,6 +172,25 @@ pub const PROVIDERS: &[ProviderSpec] = &[
         headers: &[],
     },
     ProviderSpec {
+        id: credentials::META,
+        name: "Meta Model API",
+        endpoint: Endpoint::Fixed {
+            base: "https://api.meta.ai/v1",
+            env: "RIGEL_META_BASE_URL",
+        },
+        // Muse Code's default. The picker reads the live roster where Meta publishes one.
+        default_model: Some("muse-spark-1.3"),
+        usage_request: false,
+        lists_models: true,
+        access_token: false,
+        gateway: false,
+        namespace: &["muse"],
+        hint: "Muse Spark and Muse Wonder · Meta's own endpoint",
+        // Meta publishes keys from the Model API console, not a stable public URL.
+        key_url: None,
+        headers: &[],
+    },
+    ProviderSpec {
         id: credentials::XAI,
         name: "xAI",
         endpoint: Endpoint::Fixed {
@@ -510,6 +529,7 @@ mod tests {
             base_url(spec("openai")).unwrap(),
             "https://api.openai.com/v1"
         );
+        assert_eq!(base_url(spec("meta")).unwrap(), "https://api.meta.ai/v1");
         assert_eq!(base_url(spec("xai")).unwrap(), "https://api.x.ai/v1");
         assert_eq!(
             base_url(spec("groq")).unwrap(),

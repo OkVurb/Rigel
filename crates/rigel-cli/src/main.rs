@@ -150,6 +150,12 @@ enum Command {
         command: harness::ClaudeCommand,
     },
 
+    /// Meta's Muse Code harness: probe it, or run one headless turn through `muse exec --json`.
+    Muse {
+        #[command(subcommand)]
+        command: harness::MuseCommand,
+    },
+
     /// Every harness on this machine, cached in `adapters.json`.
     Harness {
         #[command(subcommand)]
@@ -404,6 +410,8 @@ async fn main() -> ExitCode {
         Command::Codex { command } => harness::run_codex(command).await,
 
         Command::Claude { command } => harness::run_claude(command, &dir).await,
+
+        Command::Muse { command } => harness::run_muse(command).await,
 
         Command::Harness { command } => harness::run_harness(command, &dir).await,
 

@@ -347,6 +347,29 @@ impl Recorded {
         }
     }
 
+    /// Muse reports the answer and the model it chose, but no token counts on stdout. The turn
+    /// closes with its transcript and no `Usage` row rather than an estimate the provider never
+    /// made; the session log holds the numbers Rigel does not read yet.
+    pub async fn finish_muse(
+        &self,
+        result: &Result<crate::MuseTurn, AdapterError>,
+    ) -> Option<rigel_core::Usage> {
+        match result {
+            Ok(turn) => {
+                self.close_turn(
+                    TurnEnd::Answer(turn.text.clone()),
+                    None,
+                    json!({ "session_id": turn.session_id, "model": turn.model }),
+                )
+                .await
+            }
+            Err(error) => {
+                self.close_turn(TurnEnd::Failed(error.to_string()), None, json!({}))
+                    .await
+            }
+        }
+    }
+
     /// Claude reports the CLI's own `total_cost_usd`, so a provider cost wins when present.
     pub async fn finish_claude(
         &self,

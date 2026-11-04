@@ -16,6 +16,8 @@ pub const OPENROUTER: &str = "openrouter";
 /// The key OmniRoute itself checks on `/v1`; not a provider key.
 pub const OMNIROUTE: &str = "omniroute";
 pub const OPENAI: &str = "openai";
+/// Meta Model API: Muse Spark and Muse Wonder, the same key Muse Code reads.
+pub const META: &str = "meta";
 pub const ANTHROPIC: &str = "anthropic";
 pub const CURSOR: &str = "cursor";
 pub const CLINE: &str = "cline";
@@ -41,7 +43,7 @@ pub const APP_CHECK: &str = "firebase-app-check-client";
 /// without also appearing in `rigel keys status` and in the environment scrub for commands.
 pub const PROVIDERS: &[&str] = &[
     OMNIROUTE, OPENROUTER, GEMINI, VERTEX, OPENAI, XAI, GROQ, DEEPSEEK, MISTRAL, TOGETHER,
-    FIREWORKS, ANTHROPIC, CURSOR, CLINE, AGENTMAIL,
+    FIREWORKS, META, ANTHROPIC, CURSOR, CLINE, AGENTMAIL,
 ];
 
 const SERVICE: &str = "rigel";
@@ -195,6 +197,8 @@ pub fn provider_environment_variable(provider: &str) -> Option<&'static str> {
         OPENROUTER => Some("OPENROUTER_API_KEY"),
         OMNIROUTE => Some("OMNIROUTE_API_KEY"),
         OPENAI => Some("OPENAI_API_KEY"),
+        // The same variable Muse Code reads, so one key serves the CLI and a native turn.
+        META => Some("META_API_KEY"),
         ANTHROPIC => Some("ANTHROPIC_API_KEY"),
         CURSOR => Some("CURSOR_API_KEY"),
         CLINE => Some("CLINE_API_KEY"),

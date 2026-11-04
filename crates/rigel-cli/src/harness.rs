@@ -22,8 +22,8 @@ use clap::Subcommand;
 use rigel_adapters::registry::{self, CACHE_FILE};
 use rigel_adapters::{
     Adapter, AdapterError, ApprovalDecision, ApprovalRequest, Approver, ClaudeAdapter,
-    ClaudeConfig, ClaudeEvent, CodexAdapter, CodexConfig, CodexEvent, PermissionMode, Recorded,
-    Transport, write_mcp_config,
+    ClaudeConfig, ClaudeEvent, CodexAdapter, CodexConfig, CodexEvent, MuseAdapter, MuseConfig,
+    MuseEvent, PermissionMode, Recorded, Transport, write_mcp_config,
 };
 use rigel_core::agent::approval::{ApprovalBus, PendingApproval};
 use rigel_core::credentials::KeychainCredentialStore;
@@ -157,6 +157,35 @@ fn auth_label(mode: rigel_adapters::AuthMode) -> &'static str {
 const APPROVAL_TOOL: &str = "mcp__rigel__rigel_approve";
 
 #[derive(Subcommand)]
+pub enum MuseCommand {
+    /// Report the installed binary, its version and how it authenticates.
+    Probe {
+        /// The binary to probe. Defaults to `muse` on `PATH`.
+        #[arg(long)]
+        exe: Option<PathBuf>,
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Run one prompt through Muse Code and print the answer and the items it changed.
+    Run {
+        #[arg(long, value_name = "PATH", default_value = ".")]
+        project: PathBuf,
+        /// Session id. Defaults to the newest open session, starting one if there is none.
+        #[arg(long)]
+        session: Option<String>,
+        #[arg(long)]
+        prompt: String,
+        #[arg(long)]
+        model: Option<String>,
+        #[arg(long)]
+        exe: Option<PathBuf>,
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+#[derive(Subcommand)]
 pub enum ClaudeCommand {
     /// Report the installed binary, its version and how it authenticates.
     Probe {
@@ -211,6 +240,198 @@ pub async fn run_claude(command: ClaudeCommand, dir: &Path) -> ExitCode {
                 data_dir: dir.to_path_buf(),
             })
             .await
+        }
+    }
+}
+
+pub async fn run_muse(command: MuseCommand) -> ExitCode {
+    match command {
+        MuseCommand::Probe { exe, json } => probe_muse(exe, json).await,
+        MuseCommand::Run {
+            project,
+            session,
+            prompt,
+            model,
+            exe,
+            json,
+        } => run_muse_turn(project, session, prompt, model, exe, json).await,
+    }
+}
+
+async fn probe_muse(exe: Option<PathBuf>, as_json: bool) -> ExitCode {
+    let mut config = MuseConfig::new(".");
+    if let Some(exe) = exe {
+        config.exe = exe;
+    }
+    config.inject_credential(&KeychainCredentialStore);
+
+    match MuseAdapter::new(config).probe().await {
+        Ok(info) => {
+            if as_json {
+                println!("{}", json!({ "ok": true, "harness": info }));
+            } else {
+                println!(
+                    "muse {}  {}",
+                    info.version
+                        .clone()
+                        .unwrap_or_else(|| "unknown".to_string()),
+                    info.path
+                        .as_ref()
+                        .map(|path| path.display().to_string())
+                        .unwrap_or_default()
+                );
+                println!("  auth        {:?}", info.auth_mode);
+                println!("  json stream {}", info.capabilities.json_stream);
+                println!("  approvals   {}", info.capabilities.programmatic_approval);
+                println!(
+                    "  provider    {}",
+                    info.provider.unwrap_or_else(|| "meta".to_string())
+                );
+                if let Some(hint) = info.install_hint {
+                    println!("  install     {hint}");
+                }
+            }
+            ExitCode::SUCCESS
+        }
+        Err(error) => {
+            if as_json {
+                println!("{}", json!({ "ok": false, "error": error.to_string() }));
+            }
+            eprintln!("rigel: {error}");
+            ExitCode::from(2)
+        }
+    }
+}
+
+async fn run_muse_turn(
+    project: PathBuf,
+    session: Option<String>,
+    prompt: String,
+    model: Option<String>,
+    exe: Option<PathBuf>,
+    as_json: bool,
+) -> ExitCode {
+    let mut config = MuseConfig::new(project);
+    if let Some(model) = model {
+        config.model = model;
+    }
+    if let Some(exe) = exe {
+        config.exe = exe;
+    }
+
+    let credential_provider = config.credential_provider().to_string();
+    let project = config.cwd.clone();
+    let model_name = config.model.clone();
+    config.inject_credential(&KeychainCredentialStore);
+
+    let recorded =
+        match Recorded::open(&project, session.as_deref(), "muse", &model_name, &prompt).await {
+            Ok(recorded) => recorded,
+            Err(error) => {
+                eprintln!("rigel: could not open the session: {error}");
+                return ExitCode::from(2);
+            }
+        };
+
+    let adapter = MuseAdapter::new(config);
+    let mut items = Vec::new();
+    let mut notices = vec![
+        "muse reports token counts only in its session log; no usage row was written".to_string(),
+    ];
+    let mut streamed = false;
+
+    let outcome = adapter
+        .run_turn(&prompt, |event| match event {
+            MuseEvent::Delta { text } => {
+                if !as_json {
+                    streamed = true;
+                    print!("{text}");
+                    let _ = std::io::stdout().flush();
+                }
+            }
+            MuseEvent::Item(item) => items.push(item),
+            MuseEvent::Notice { message } => {
+                if !notices.contains(&message) {
+                    notices.push(message);
+                }
+            }
+        })
+        .await;
+
+    if streamed && !as_json {
+        println!();
+    }
+
+    recorded.record_items(&items, &[]).await;
+    let _ = recorded.finish_muse(&outcome).await;
+
+    match outcome {
+        Ok(result) => {
+            if as_json {
+                println!(
+                    "{}",
+                    json!({
+                        "ok": true,
+                        "text": result.text,
+                        "model": result.model,
+                        "muse_session": result.session_id,
+                        "usage": null,
+                        "session": recorded.session_id,
+                        "agent": recorded.agent.id,
+                        "turn": recorded.turn.id,
+                        "duration_ms": result.duration.as_millis() as u64,
+                        "notices": notices,
+                        "items": items.iter().map(|item| json!({
+                            "kind": item.kind.as_str(),
+                            "body": item.body,
+                        })).collect::<Vec<_>>(),
+                    })
+                );
+            } else {
+                if !streamed {
+                    println!("{}", result.text);
+                }
+                println!();
+                println!(
+                    "  model     {}  {} ms",
+                    result.model,
+                    result.duration.as_millis()
+                );
+                println!("  session   {}", result.session_id);
+                for item in &items {
+                    println!("  item      {} {}", item.kind.as_str(), item.body);
+                }
+                for notice in &notices {
+                    println!("  notice    {notice}");
+                }
+                println!(
+                    "  turn      {}",
+                    &recorded.turn.id[..8.min(recorded.turn.id.len())]
+                );
+            }
+            ExitCode::SUCCESS
+        }
+        Err(error) => {
+            if as_json {
+                println!(
+                    "{}",
+                    json!({
+                        "ok": false,
+                        "error": error.to_string(),
+                        "provider": credential_provider,
+                        "fix": format!("rigel keys set {credential_provider}"),
+                        "session": recorded.session_id,
+                        "turn": recorded.turn.id,
+                    })
+                );
+            }
+            eprintln!("rigel: {error}");
+            if matches!(error, AdapterError::RequiresApiKey { .. }) {
+                eprintln!(
+                    "fix: store the {credential_provider} key with `rigel keys set {credential_provider}`"
+                );
+            }
+            ExitCode::from(2)
         }
     }
 }

@@ -14,6 +14,7 @@ use serde_json::Value;
 pub mod acp;
 pub mod claude;
 pub mod codex;
+pub mod muse;
 pub mod normalise;
 pub mod registry;
 pub mod turn;
@@ -28,6 +29,7 @@ pub use claude::{
 pub use codex::{
     CodexAdapter, CodexConfig, CodexEvent, CodexUsage, ContextEstimate, Transport, TurnResult,
 };
+pub use muse::{MuseAdapter, MuseConfig, MuseEvent, MuseTurn};
 pub use normalise::NormalItem;
 pub use registry::{AdapterCache, probe_all, probe_cached};
 pub use turn::{Recorded, TurnEnd, resolve_session, write_mcp_config};
@@ -38,6 +40,7 @@ pub enum Harness {
     Native,
     Codex,
     Claude,
+    Muse,
     Cursor,
     Cline,
     Gemini,
@@ -50,6 +53,7 @@ impl Harness {
             Self::Native => "native",
             Self::Codex => "codex",
             Self::Claude => "claude",
+            Self::Muse => "muse",
             Self::Cursor => "cursor",
             Self::Cline => "cline",
             Self::Gemini => "gemini",
@@ -195,6 +199,11 @@ pub fn credential_spec(harness: Harness, base_url: Option<&str>) -> Option<Crede
             provider: rigel_core::credentials::ANTHROPIC,
             env_var: "ANTHROPIC_API_KEY",
         }),
+        // Muse Code's headless child takes the same Meta key as the native `muse` provider.
+        Harness::Muse => Some(CredentialSpec {
+            provider: rigel_core::credentials::META,
+            env_var: "META_API_KEY",
+        }),
         Harness::Cursor => Some(CredentialSpec {
             provider: rigel_core::credentials::CURSOR,
             env_var: "CURSOR_API_KEY",
@@ -267,6 +276,9 @@ mod tests {
             credential_spec(Harness::Claude, None).unwrap().env_var,
             "ANTHROPIC_API_KEY"
         );
+        let muse = credential_spec(Harness::Muse, None).expect("Muse has a key path");
+        assert_eq!(muse.provider, rigel_core::credentials::META);
+        assert_eq!(muse.env_var, "META_API_KEY");
         assert_eq!(
             credential_spec(Harness::Codex, Some("http://[::1]:20128/v1"))
                 .unwrap()

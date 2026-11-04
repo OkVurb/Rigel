@@ -86,6 +86,14 @@ const HARNESS_KEYS = [
     placeholder: "AIza…",
     note: "One key serves the Gemini ACP harness and the native agent's gemini provider.",
   },
+  {
+    id: "meta",
+    harness: "Muse Code",
+    name: "Meta",
+    env: "META_API_KEY",
+    placeholder: "…",
+    note: "Muse Code receives this key at spawn; the native agent's muse provider resolves the same entry.",
+  },
 ] as const;
 
 type HarnessKey = (typeof HARNESS_KEYS)[number];
@@ -94,6 +102,7 @@ const HARNESS_LABELS: Record<HarnessInfo["harness"], string> = {
   native: "Rigel",
   codex: "Codex",
   claude: "Claude Code",
+  muse: "Muse Code",
   cursor: "Cursor",
   cline: "Cline",
   gemini: "Gemini CLI",

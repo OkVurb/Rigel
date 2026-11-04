@@ -187,6 +187,25 @@ const TABLE: &[(&str, Price)] = &[
         },
     ),
     (
+        // Meta Model API standard rate for Muse Spark. Contributor mode is the same model at a
+        // training-data discount; its cached-input rate is not published, so it is priced at
+        // input rather than guessed lower.
+        "muse-spark-1.3",
+        Price {
+            input: 1.25,
+            cached_input: 0.15,
+            output: 4.25,
+        },
+    ),
+    (
+        "muse-spark-1.3-contributor",
+        Price {
+            input: 0.10,
+            cached_input: 0.10,
+            output: 0.20,
+        },
+    ),
+    (
         "deepseek/deepseek-chat",
         Price {
             input: 0.27,

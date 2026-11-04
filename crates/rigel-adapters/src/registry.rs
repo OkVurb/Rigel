@@ -23,6 +23,7 @@ use tokio::process::Command;
 
 use crate::claude::ClaudeConfig;
 use crate::codex::{CodexConfig, auth_mode};
+use crate::muse::{MuseConfig, auth_mode as muse_auth_mode};
 use crate::{AuthMode, Capabilities, Harness, HarnessInfo, credential_spec};
 
 /// The cache file name; the caller supplies the directory.
@@ -31,10 +32,11 @@ pub const CACHE_FILE: &str = "adapters.json";
 const CACHE_VERSION: u32 = 1;
 const PROBE_TIMEOUT: Duration = Duration::from_secs(10);
 
-/// The five external harnesses, in the order Settings lists them.
-pub const HARNESSES: [Harness; 5] = [
+/// The six external harnesses, in the order Settings lists them.
+pub const HARNESSES: [Harness; 6] = [
     Harness::Codex,
     Harness::Claude,
+    Harness::Muse,
     Harness::Cursor,
     Harness::Cline,
     Harness::Gemini,
@@ -45,6 +47,7 @@ pub fn display_name(harness: Harness) -> &'static str {
         Harness::Native => "Rigel",
         Harness::Codex => "Codex",
         Harness::Claude => "Claude Code",
+        Harness::Muse => "Muse Code",
         Harness::Cursor => "Cursor",
         Harness::Cline => "Cline",
         Harness::Gemini => "Gemini CLI",
@@ -56,6 +59,7 @@ pub fn binary_names(harness: Harness) -> &'static [&'static str] {
     match harness {
         Harness::Codex => &["codex"],
         Harness::Claude => &["claude"],
+        Harness::Muse => &["muse"],
         Harness::Cursor => &["agent", "cursor-agent"],
         Harness::Cline => &["cline"],
         Harness::Gemini => &["gemini"],
@@ -68,6 +72,12 @@ pub fn install_hint(harness: Harness) -> String {
     match harness {
         Harness::Codex => "npm install -g @openai/codex".to_string(),
         Harness::Claude => "npm install -g @anthropic-ai/claude-code".to_string(),
+        Harness::Muse if cfg!(windows) => {
+            // The PowerShell one-liner Meta documents for Windows.
+            "powershell -NoProfile -Command \"irm https://dev.meta.ai/install.ps1 | iex\""
+                .to_string()
+        }
+        Harness::Muse => "curl -fsSL https://dev.meta.ai/install.sh | sh".to_string(),
         Harness::Cursor if cfg!(windows) => {
             // PowerShell syntax wrapped so it also runs from cmd or a Git Bash shell.
             "powershell -NoProfile -Command \"irm 'https://cursor.com/install?win32=true' | iex\""
@@ -89,6 +99,15 @@ pub fn vendor_login(harness: Harness) -> Option<PathBuf> {
     match harness {
         Harness::Codex => Some(home.join(".codex").join("auth.json")),
         Harness::Claude => Some(home.join(".claude").join(".credentials.json")),
+        // Muse Code's device-code login. Windows ignores MUSE_AUTH_PATH, so XDG_CONFIG_HOME (or
+        // `~/.config`) is the one location that resolves on every platform.
+        Harness::Muse => Some(
+            std::env::var_os("XDG_CONFIG_HOME")
+                .map(PathBuf::from)
+                .unwrap_or_else(|| home.join(".config"))
+                .join("muse")
+                .join("auth.json"),
+        ),
         // Cursor keeps the CLI's login in its own config directory. A machine without it simply
         // reports `None`; the probe never guesses a subscription from the app's presence.
         Harness::Cursor => Some(home.join(".cursor").join("cli-config.json")),
@@ -129,6 +148,16 @@ pub fn capabilities(harness: Harness, version: Option<&str>) -> Capabilities {
             // Claude's worktrees are host-managed, not a CLI flag.
             worktree: false,
             nested_agents: version.is_some_and(|version| at_least(version, [2, 1, 219])),
+        },
+        Harness::Muse => Capabilities {
+            acp: false,
+            json_stream: true,
+            // `--disable-approval` skips prompts; the published journal has no approval channel
+            // for Rigel to answer, so this is not programmatic approval.
+            programmatic_approval: false,
+            // Muse documents worktrees for subagents, but Rigel does not drive them yet.
+            worktree: false,
+            nested_agents: false,
         },
         Harness::Cursor => Capabilities {
             acp: true,
@@ -280,6 +309,29 @@ pub async fn probe_claude(config: &ClaudeConfig) -> HarnessInfo {
         capabilities: capabilities(Harness::Claude, version.as_deref()),
         provider: credential_spec(Harness::Claude, None).map(|spec| spec.provider.to_string()),
         install_hint: (!installed).then(|| install_hint(Harness::Claude)),
+    }
+}
+
+/// Muse Code's probe lives with its adapter for the same reason as Codex's: the explicit binary
+/// and the injected key are the adapter's own configuration.
+pub async fn probe_muse(config: &MuseConfig) -> HarnessInfo {
+    let exe = resolve_exe(Harness::Muse, &config.exe);
+    let installed = exe.is_file();
+    let version = if installed {
+        version_of(&exe).await
+    } else {
+        None
+    };
+
+    HarnessInfo {
+        harness: Harness::Muse,
+        installed,
+        version: version.clone(),
+        path: installed.then_some(exe),
+        auth_mode: muse_auth_mode(config),
+        capabilities: capabilities(Harness::Muse, version.as_deref()),
+        provider: credential_spec(Harness::Muse, None).map(|spec| spec.provider.to_string()),
+        install_hint: (!installed).then(|| install_hint(Harness::Muse)),
     }
 }
 
@@ -531,6 +583,14 @@ fn now() -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn muse_is_listed_with_its_install_hint() {
+        assert_eq!(display_name(Harness::Muse), "Muse Code");
+        assert_eq!(binary_names(Harness::Muse), &["muse"]);
+        assert!(install_hint(Harness::Muse).contains("dev.meta.ai"));
+        assert!(!capabilities(Harness::Muse, None).programmatic_approval);
+    }
 
     #[test]
     fn version_banners_parse_to_a_number() {

@@ -913,7 +913,7 @@ const PREVIEW_PROVIDERS: ProviderRow[] = [
 
 /** One row of `adapters.json` (P4.1). */
 export interface HarnessInfo {
-  harness: "native" | "codex" | "claude" | "cursor" | "cline" | "gemini";
+  harness: "native" | "codex" | "claude" | "muse" | "cursor" | "cline" | "gemini";
   installed: boolean;
   version: string | null;
   path: string | null;
@@ -950,6 +950,16 @@ const PREVIEW_HARNESSES: HarnessInfo[] = [
     capabilities: { acp: false, json_stream: true, programmatic_approval: true, worktree: false, nested_agents: true },
     provider: "anthropic",
     install_hint: null,
+  },
+  {
+    harness: "muse",
+    installed: false,
+    version: null,
+    path: null,
+    auth_mode: "none",
+    capabilities: { acp: false, json_stream: true, programmatic_approval: false, worktree: false, nested_agents: false },
+    provider: "meta",
+    install_hint: "powershell -NoProfile -Command \"irm https://dev.meta.ai/install.ps1 | iex\"",
   },
   {
     harness: "cursor",
