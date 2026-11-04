@@ -43,7 +43,19 @@ jobs:
         run: cargo clippy --workspace --all-targets -- -D warnings
 
       - name: Tests
-        run: cargo test --workspace
+        shell: bash
+        run: |
+          set -o pipefail
+          cargo test --workspace --no-fail-fast 2>&1 | tee test-output.txt
+
+      # Job logs need authentication; annotations do not. Naming the failing test here is what
+      # makes a red run diagnosable from the public API instead of a bare exit code.
+      - name: Name failing tests
+        if: failure()
+        shell: bash
+        run: |
+          grep -E "^test .* FAILED$" test-output.txt | sed 's|^|::error::|' || true
+          grep -A 6 "^---- .* stdout ----$" test-output.txt | head -120 || true
 
       # The concurrency tests fail on timing, not on logic: they can pass a
       # hundred runs and fail the one after the change that reintroduced the
