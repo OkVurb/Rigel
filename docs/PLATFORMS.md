@@ -37,6 +37,10 @@ own artwork. The four bitmaps under `crates/rigel-app/icons/installer/` are gene
 editing the BMPs. Only the left 164 px of the WiX dialog bitmap are ever drawn — the wizard paints its
 own white background over the rest — so art placed further right will not appear.
 
+Both bundles embed the same UI, including Rigel's amber pointer. `node
+scripts/check-installer-branding.mjs --dist` is the gate: CI and the release workflow fail if either
+target drops the custom artwork or icon, or if the built UI stops mounting the pointer.
+
 ### Signing
 
 Signing happens on the build machine, never in this repository: the certificate and the update key

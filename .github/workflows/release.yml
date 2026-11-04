@@ -101,6 +101,9 @@ jobs:
         working-directory: crates/rigel-app
         run: cargo tauri build
 
+      - name: Verify installer branding and pointer
+        run: node scripts/check-installer-branding.mjs --dist
+
       - name: Sign the update manifest and publish the release
         shell: pwsh
         env:

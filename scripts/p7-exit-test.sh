@@ -104,6 +104,9 @@ print("configured")
 PY
 check "msi + nsis, silent WebView2 bootstrapper, no downgrades" "$?" "0"
 
+if node "$root/scripts/check-installer-branding.mjs" >/dev/null; then brand=0; else brand=1; fi
+check "custom installer artwork and Rigel's pointer are wired" "$brand" "0"
+
 echo "p7: the signing script"
 # The certificate is never here, but its absence must be a clean refusal, and a signature must be
 # checked rather than assumed: those two rules are what `sign-installers.ps1` has to get right.

@@ -22,6 +22,9 @@ jobs:
           npm ci
           npm run build
 
+      - name: Installer branding and pointer
+        run: node scripts/check-installer-branding.mjs --dist
+
       - uses: actions/setup-node@v4
         with:
           node-version: 22
