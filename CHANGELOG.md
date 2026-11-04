@@ -2,6 +2,27 @@
 
 Every release, newest first. The heading is the version its `v*` tag publishes.
 
+## 0.1.7 — 2026-11-03
+
+- test(agentchat): say why a launched wrapper wrote no report
+- feat: finish the cloud, mail and window workflow
+- feat: publish the catalogue, gate the contact form, add an OWASP review skill
+- docs(skill): stop the OWASP review skill tripping the scanner
+- feat: seed from the catalogue, pin raw fetches, and cut 0.1.5
+- docs: what cloud agent runs cost, and who could pay for them
+- feat(cloud): queue a run as a Firestore document
+- feat(cloud): list and inspect queued runs
+- feat(cloud): cancel and requeue a run, without claiming work
+- fix(agent): make Vertex usable from the window, and send the model it shows
+- test(agent): pin how the Vertex project is read off the cloud CLI
+- feat(agent): add Meta's Muse provider and a headless Muse Code adapter
+- chore(data): track the MCP catalogue the app embeds
+- ci(release): gate both Windows bundles on the Rigel branding
+- feat: complete the 0.1.6 window, room, browser and cloud surfaces
+- vendor: add the Rigel b browser fork
+- build: ship the Rigel b sidecar with the app
+- feat: repair settings and harden the 0.1.7 release gate
+
 ## 0.1.6 — 2026-11-03
 
 - feat(chat): rebuild the agents screen as a bots list and message threads
