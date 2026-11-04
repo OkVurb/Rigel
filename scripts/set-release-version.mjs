@@ -38,4 +38,11 @@ if (!/"version":\s*"[^"]+"/.test(ui)) {
 }
 writeFileSync(uiPath, ui.replace(/("version":\s*")[^"]+(")/, `$1${version}$2`), "utf8");
 
+const webPath = "web/index.html";
+const web = readFileSync(webPath, "utf8");
+if (!/data-version="[^"]+"/.test(web)) {
+  throw new Error("web/index.html has no data-version");
+}
+writeFileSync(webPath, web.replace(/(data-version=")[^"]+(")/, `$1${version}$2`), "utf8");
+
 console.log(`set release version ${version}`);
