@@ -40,11 +40,13 @@ vulnerability on Windows. `npm --prefix ui audit --omit=dev` reports 0 vulnerabi
 
 ### Installer gate
 
-- [ ] Build from `crates/rigel-app` with `cargo tauri build`.
-- [ ] MSI and NSIS produced.
-- [ ] `node scripts/check-installer-branding.mjs --dist`
-- [ ] Build twice and compare the unsigned artifact hashes where signing is absent.
-- [ ] Windows Sandbox install/start/doctor/uninstall pass recorded in `docs/qa/p7-acceptance.md`.
+- [x] Build from `crates/rigel-app` with `cargo tauri build` — two clean builds, exit 0 each.
+- [x] MSI and NSIS produced — `Rigel_0.1.7_x64_en-US.msi`, `Rigel_0.1.7_x64-setup.exe`.
+- [x] `node scripts/check-installer-branding.mjs --dist` — 42 checks passed.
+- [x] Build twice and compare — compared; **not byte-identical** (WiX and makensis stamp build
+      metadata). Recorded as a reproducibility gap in `docs/qa/p7-acceptance.md`.
+- [ ] Windows Sandbox install/start/doctor/uninstall pass recorded in `docs/qa/p7-acceptance.md`
+      — not run for this cut; the section above records the unapplied boot requirement.
 - [ ] Windows 10 1809 and SmartScreen recorded as manual gaps.
 - [ ] MSI and NSIS SHA-256 hashes recorded in the release receipt.
 - [ ] `latest.json` Ed25519 signature verifies against the committed public key.

@@ -170,3 +170,21 @@ It is the host's build with WebView2 likely present, so the Windows 10 1809 floo
 WebView2-less first install, SmartScreen and the look of the window on a fresh display still need
 the 1809 image and a person, exactly as the table above says. A green sandbox run narrows P7.9; it
 does not close it.
+
+## 4 Nov 2026, 0.1.7 local build evidence
+
+The 0.1.7 bundles were built twice from `crates/rigel-app` with `CI=true cargo tauri build`.
+
+| Check | Result |
+|---|---|
+| build 1 | MSI and NSIS produced, exit 0 |
+| build 2 | MSI and NSIS produced, exit 0 |
+| branding gate | `check-installer-branding.mjs --dist`, 42 checks passed |
+| MSI build 1 | `c30b430d…a74167`, 98,784,047 bytes |
+| NSIS build 1 | `05b74484…f7f406`, 70,978,450 bytes |
+| MSI build 2 | `c06f498a…5cb038` |
+| NSIS build 2 | `ce879e44…6bb1bb` |
+| byte-identical across builds | **no** — WiX and makensis stamp build metadata, so this is recorded as a reproducibility gap, not a pass |
+
+The Windows Sandbox run, the 1809 image and SmartScreen are still unexecuted for this cut; the
+sections above record why, and the release receipt repeats them as manual gaps.
