@@ -56,6 +56,13 @@ pub enum AgentCommand {
         crash_after_journal: bool,
         #[arg(long, default_value_t = rigel_core::DEFAULT_MAX_STEPS)]
         max_steps: usize,
+        /// Q240: refuse every network origin for this turn, even a previously approved one.
+        #[arg(long)]
+        no_network: bool,
+        /// Q240: replace the project allowlist for this turn. An unlisted origin is refused
+        /// before the per-origin question.
+        #[arg(long = "allow-origin", value_name = "ORIGIN")]
+        allow_origin: Vec<String>,
         #[arg(long)]
         json: bool,
     },

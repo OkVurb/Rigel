@@ -65,7 +65,7 @@ pub fn start(app: tauri::AppHandle, request: ClaudeTurn) -> Result<(), String> {
     }
     // The child is this binary's own `mcp` mode, pointed at the data directory the approval card
     // reads, so a question asked here is a question the window can answer.
-    let mcp_config = write_mcp_config(&data_dir, &root, &session_id, &agent.id)?;
+    let mcp_config = write_mcp_config(&data_dir, &root, &session_id, &agent.id, Some(&turn.id))?;
     let config = config.with_permission_tool(mcp_config, APPROVAL_TOOL);
 
     let cap = service_cap(&service, &session_id).unwrap_or(None);
@@ -221,6 +221,7 @@ pub fn mcp_mode<I: IntoIterator<Item = String>>(args: I) -> Option<i32> {
     let mut session = None;
     let mut agent = None;
     let mut data_dir = None;
+    let mut turn = None;
     let mut iter = args.into_iter();
     while let Some(arg) = iter.next() {
         let mut take = |slot: &mut Option<String>| *slot = iter.next();
@@ -229,6 +230,7 @@ pub fn mcp_mode<I: IntoIterator<Item = String>>(args: I) -> Option<i32> {
             "--session" => take(&mut session),
             "--agent" => take(&mut agent),
             "--data-dir" => take(&mut data_dir),
+            "--turn" => take(&mut turn),
             _ => {}
         }
     }
@@ -243,10 +245,17 @@ pub fn mcp_mode<I: IntoIterator<Item = String>>(args: I) -> Option<i32> {
         session,
         agent,
         data_dir.map(PathBuf::from).unwrap_or_else(super::index_dir),
+        turn,
     ))
 }
 
-fn serve(project: PathBuf, session: String, agent: String, index_dir: PathBuf) -> i32 {
+fn serve(
+    project: PathBuf,
+    session: String,
+    agent: String,
+    index_dir: PathBuf,
+    turn: Option<String>,
+) -> i32 {
     let runtime = match tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
@@ -283,6 +292,10 @@ fn serve(project: PathBuf, session: String, agent: String, index_dir: PathBuf) -
             agent_id: agent,
             index_dir,
             approval_wait: APPROVAL_WAIT,
+            turn_id: turn,
+            tool_lists: std::sync::Arc::new(tokio::sync::Mutex::new(
+                std::collections::HashMap::new(),
+            )),
         };
         let stdin = BufReader::new(tokio::io::stdin());
         match rigel_mcp::serve(ctx, stdin, tokio::io::stdout()).await {

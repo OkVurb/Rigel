@@ -828,6 +828,29 @@ async fn pump_approvals(bus: ApprovalBus, stop: Arc<AtomicBool>, as_json: bool) 
 }
 
 async fn ask_pending(pending: &PendingApproval, as_json: bool) -> Option<ApprovalScope> {
+    // Q242: a project MCP server's real tools travel with the question. A terminal grant is not
+    // a blind grant either, so the same list the window card shows is printed here first.
+    let tools = pending
+        .detail
+        .as_ref()
+        .and_then(|detail| detail.get("tools"))
+        .and_then(serde_json::Value::as_array)
+        .map(|tools| {
+            tools
+                .iter()
+                .filter_map(|tool| tool.get("name").and_then(serde_json::Value::as_str))
+                .collect::<Vec<_>>()
+                .join(", ")
+        })
+        .unwrap_or_default();
+    if !tools.is_empty() {
+        let list = format!("  this server lists: {tools}\n");
+        if as_json {
+            eprint!("{list}");
+        } else {
+            print!("{list}");
+        }
+    }
     let question = format!(
         "
   approval  {}
@@ -912,6 +935,7 @@ async fn run_claude_turn(options: ClaudeRunOptions) -> ExitCode {
         &project,
         &recorded.session_id,
         &recorded.agent.id,
+        Some(&recorded.turn.id),
     ) {
         Ok(path) => path,
         Err(error) => {

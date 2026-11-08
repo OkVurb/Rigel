@@ -1,8 +1,14 @@
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
+use std::sync::Arc;
 
-use rigel_core::{MemoryService, PatchPipeline, SessionService, WriteMode, credentials};
+use async_trait::async_trait;
+use rigel_core::agent::{catalog, providers};
+use rigel_core::{
+    DenyMemory, MemoryApprover, MemoryDecision, MemoryRequest, MemoryService, PatchPipeline,
+    SessionService, WriteMode, credentials,
+};
 use serde_json::json;
 
 use super::{KeyCommand, MemoryCommand, PatchCommand};
@@ -125,6 +131,35 @@ fn patch_failure(error: rigel_core::PatchError, as_json: bool) -> ExitCode {
     ExitCode::from(code)
 }
 
+/// Q251: the terminal is the approval surface for a memory write. The exact file, mode and
+/// content are printed first; only `y`/`yes` allows, and EOF denies.
+struct CliMemoryApprover;
+
+#[async_trait]
+impl MemoryApprover for CliMemoryApprover {
+    async fn approve(&self, request: &MemoryRequest) -> MemoryDecision {
+        eprintln!(
+            "\nThe agent wants to write committed memory:\n  {}\n  mode: {}\n  bytes: {}\n  ---\n{}\n  [y]es to write, anything else refuses:",
+            request.path,
+            request.mode,
+            request.content.len(),
+            request.content
+        );
+        tokio::task::spawn_blocking(|| {
+            let mut line = String::new();
+            match std::io::BufRead::read_line(&mut std::io::stdin().lock(), &mut line) {
+                Ok(0) | Err(_) => MemoryDecision::Deny,
+                Ok(_) => match line.trim().to_ascii_lowercase().as_str() {
+                    "y" | "yes" => MemoryDecision::Allow,
+                    _ => MemoryDecision::Deny,
+                },
+            }
+        })
+        .await
+        .unwrap_or(MemoryDecision::Deny)
+    }
+}
+
 pub async fn run_memory(command: MemoryCommand) -> ExitCode {
     match command {
         MemoryCommand::Read {
@@ -186,6 +221,11 @@ pub async fn run_memory(command: MemoryCommand) -> ExitCode {
                 Err(error) => return crate::fail(error),
             };
             let memory = MemoryService::new(&project, service.pool().clone());
+            let memory = if as_json {
+                memory.with_approval(Arc::new(DenyMemory))
+            } else {
+                memory.with_approval(Arc::new(CliMemoryApprover))
+            };
             match memory.write(&agent, &topic, &content, mode).await {
                 Ok(file) => {
                     if as_json {
@@ -209,7 +249,7 @@ fn memory_failure(error: rigel_core::MemoryError, as_json: bool) -> ExitCode {
     ExitCode::from(error.exit_code())
 }
 
-pub fn run_keys(command: KeyCommand) -> ExitCode {
+pub async fn run_keys(command: KeyCommand) -> ExitCode {
     match command {
         KeyCommand::Status { json: as_json } => {
             // The credential list is the whole list, so a provider that exists in the app
@@ -255,9 +295,32 @@ pub fn run_keys(command: KeyCommand) -> ExitCode {
                 eprintln!("rigel: no key on stdin");
                 return ExitCode::from(1);
             }
+            // Q244: a chat provider key is proved against its roster before the keychain sees
+            // it. A harness credential has no roster here and keeps the old store-and-probe
+            // behaviour.
+            let check = if providers::find(&provider).is_some() {
+                match catalog::validate_key(&provider, value).await {
+                    Ok(check) => Some(check),
+                    Err(error) => {
+                        eprintln!("rigel: {error}");
+                        eprintln!("rigel: the {provider} key was not stored");
+                        return ExitCode::from(2);
+                    }
+                }
+            } else {
+                None
+            };
             match credentials::set(&provider, value) {
                 Ok(()) => {
-                    println!("stored {provider} in the OS keychain (value not printed)");
+                    match check {
+                        Some(check) => println!(
+                            "stored {provider} in the OS keychain (value not printed); {}",
+                            check.note
+                        ),
+                        None => {
+                            println!("stored {provider} in the OS keychain (value not printed)")
+                        }
+                    }
                     ExitCode::SUCCESS
                 }
                 Err(error) => {
@@ -279,7 +342,13 @@ pub fn run_keys(command: KeyCommand) -> ExitCode {
     }
 }
 
-pub async fn run_mcp(dir: &Path, project: PathBuf, session: String, agent: String) -> ExitCode {
+pub async fn run_mcp(
+    dir: &Path,
+    project: PathBuf,
+    session: String,
+    agent: String,
+    turn: Option<String>,
+) -> ExitCode {
     let service = match SessionService::open(&project).await {
         Ok(service) => service,
         Err(error) => return crate::fail(error),
@@ -298,6 +367,8 @@ pub async fn run_mcp(dir: &Path, project: PathBuf, session: String, agent: Strin
         agent_id: agent,
         index_dir: dir.to_path_buf(),
         approval_wait: std::time::Duration::from_secs(600),
+        turn_id: turn,
+        tool_lists: std::sync::Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
     };
     let stdin = tokio::io::BufReader::new(tokio::io::stdin());
     let stdout = tokio::io::stdout();

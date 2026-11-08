@@ -14,6 +14,8 @@
 //! * **The exit code is the summary.** `0` all clear, `1` warnings, `2` failures — so a
 //!   script can gate on it (P4.12).
 
+pub mod bundle;
+
 use std::path::Path;
 use std::process::ExitCode;
 
@@ -22,7 +24,7 @@ use rigel_core::{
     BudgetService, CLAIM_TTL, ClaimService, INDEX_MIGRATIONS, PROJECT_MIGRATIONS, Pin, STALE_AFTER,
     Store, ToolService, credentials, now_ms, skills::BlobStore,
 };
-use serde_json::json;
+use serde_json::{Value, json};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Status {
@@ -78,7 +80,12 @@ impl Check {
     }
 }
 
-pub async fn run(project: &Path, data_dir: &Path, as_json: bool) -> ExitCode {
+pub async fn run(
+    project: &Path,
+    data_dir: &Path,
+    as_json: bool,
+    support_bundle: Option<&Path>,
+) -> ExitCode {
     let mut checks = Vec::new();
 
     /* ---------------- the index database ---------------- */
@@ -195,27 +202,42 @@ pub async fn run(project: &Path, data_dir: &Path, as_json: bool) -> ExitCode {
         0
     };
 
+    let report = json!({
+        "ok": failures == 0,
+        "version": env!("CARGO_PKG_VERSION"),
+        "server": "rigel",
+        "project": project.display().to_string(),
+        "data_dir": data_dir.display().to_string(),
+        "exit_code": exit,
+        "failures": failures,
+        "warnings": warnings,
+        "checks": checks.iter().map(|check| json!({
+            "id": check.id,
+            "status": check.status.as_str(),
+            "detail": check.detail,
+            "hint": check.hint,
+        })).collect::<Vec<_>>(),
+        "harnesses": harnesses,
+    });
+
+    let written = match support_bundle {
+        Some(dest) => match bundle::write(&report, data_dir, project, dest) {
+            Ok(written) => Some(written),
+            Err(error) => {
+                eprintln!("rigel: support bundle: {error}");
+                return ExitCode::from(2);
+            }
+        },
+        None => None,
+    };
+
     if as_json {
-        println!(
-            "{}",
-            json!({
-                "ok": failures == 0,
-                "version": env!("CARGO_PKG_VERSION"),
-                "server": "rigel",
-                "project": project.display().to_string(),
-                "data_dir": data_dir.display().to_string(),
-                "exit_code": exit,
-                "failures": failures,
-                "warnings": warnings,
-                "checks": checks.iter().map(|check| json!({
-                    "id": check.id,
-                    "status": check.status.as_str(),
-                    "detail": check.detail,
-                    "hint": check.hint,
-                })).collect::<Vec<_>>(),
-                "harnesses": harnesses,
-            })
-        );
+        let mut value = report.clone();
+        value["support_bundle"] = written
+            .as_ref()
+            .map(|written| json!(written.path.display().to_string()))
+            .unwrap_or(Value::Null);
+        println!("{}", value);
     } else {
         println!("rigel {}", env!("CARGO_PKG_VERSION"));
         for check in &checks {
@@ -239,6 +261,14 @@ pub async fn run(project: &Path, data_dir: &Path, as_json: bool) -> ExitCode {
             println!("  exit 1");
         } else {
             println!("  exit 0");
+        }
+        if let Some(written) = &written {
+            println!(
+                "\n  support bundle  {} · {} files · {} omitted",
+                written.path.display(),
+                written.included.len(),
+                written.omitted.len()
+            );
         }
     }
 

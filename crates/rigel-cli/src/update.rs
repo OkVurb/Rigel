@@ -220,21 +220,21 @@ pub async fn run(dir: &Path, command: UpdateCommand) -> ExitCode {
                 return failure(error, as_json);
             }
             match verify_artifact(&artifact, &parsed) {
-                Ok(()) => {
+                Ok(sha256) => {
                     if as_json {
                         println!(
                             "{}",
                             json!({
                                 "ok": true,
                                 "artifact": artifact,
-                                "sha256": parsed.sha256,
+                                "sha256": sha256,
                                 "version": parsed.version,
                                 "signed": true,
                             })
                         );
                     } else {
                         println!("{} matches the signed manifest", artifact.display());
-                        println!("  version {} · sha256 {}", parsed.version, parsed.sha256);
+                        println!("  version {} · sha256 {}", parsed.version, sha256);
                     }
                     ExitCode::SUCCESS
                 }

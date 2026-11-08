@@ -4,9 +4,10 @@ use std::sync::Arc;
 
 use rigel_core::{
     AgentEvent, ApprovalScope, BudgetService, Cancels, CommandApprover, CommandDecision,
-    CommandRequest, Coordinator, Deliberator, EventSink, Model, ModelDeliberator, NoDeliberation,
-    OriginApprover, OriginDecision, OriginRequest, PlanApprover, PlanDecision, PlanRequest,
-    ScriptedModel, SessionService, StopAt, StopReason, SubagentPolicy, Tools, credentials,
+    CommandRequest, Coordinator, Deliberator, EventSink, Model, ModelDeliberator, NetworkPolicy,
+    NoDeliberation, OriginApprover, OriginDecision, OriginRequest, PlanApprover, PlanDecision,
+    PlanRequest, ScriptedModel, SessionService, StopAt, StopReason, SubagentPolicy, Tools,
+    credentials,
 };
 use serde_json::json;
 
@@ -316,6 +317,52 @@ fn format_command(request: &CommandRequest) -> String {
             .collect();
         format!("\n  this command is classified destructive{rows}")
     };
+    let blast = match &request.blast_radius {
+        Some(radius) => {
+            let targets: String = radius
+                .targets
+                .iter()
+                .map(|target| {
+                    let count = target
+                        .file_count
+                        .map(|count| format!(" · {count} file(s)"))
+                        .unwrap_or_default();
+                    let bytes = target
+                        .byte_count
+                        .map(|bytes| format!(" · {bytes} byte(s)"))
+                        .unwrap_or_default();
+                    let files = if target.files.is_empty() {
+                        String::new()
+                    } else {
+                        format!("\n      {}", target.files.join(", "))
+                    };
+                    format!(
+                        "\n    {} ({}){count}{bytes}{files}",
+                        target.path, target.kind
+                    )
+                })
+                .collect();
+            let unknown: String = radius
+                .cannot_determine
+                .iter()
+                .map(|row| format!("\n    cannot determine: {row}"))
+                .collect();
+            format!("\n  blast radius:{targets}{unknown}")
+        }
+        None => String::new(),
+    };
+    // Q243: a script named by a loaded skill is shown before the question. The command grant
+    // alone does not answer this; the user sees which skill contributed the path.
+    let skill_scripts = if request.skill_scripts.is_empty() {
+        String::new()
+    } else {
+        let rows: String = request
+            .skill_scripts
+            .iter()
+            .map(|script| format!("\n    {} from {}", script.path, script.skill_id))
+            .collect();
+        format!("\n  skill scripts:{rows}")
+    };
     let deliberation = match &request.deliberation {
         Some(round) if round.available() => {
             let positions: String = round
@@ -336,12 +383,14 @@ fn format_command(request: &CommandRequest) -> String {
         None => String::new(),
     };
     format!(
-        "\nThe agent wants to run a command:\n  {}\n  cwd: {} (inside {})\n  timeout: {}s{}{}\n  [o]nce  [s]ession  [p]roject  [a]lways  [r]eject  (anything else rejects):",
+        "\nThe agent wants to run a command:\n  {}\n  cwd: {} (inside {})\n  timeout: {}s{}{}{}{}\n  [o]nce  [s]ession  [p]roject  [a]lways  [r]eject  (anything else rejects):",
         request.command,
         acp::plain_path(request.cwd.clone()).display(),
         acp::plain_path(request.project_root.clone()).display(),
         request.timeout_secs,
         destructive,
+        blast,
+        skill_scripts,
         deliberation
     )
 }
@@ -760,6 +809,8 @@ pub async fn run_agent(dir: &Path, command: AgentCommand) -> ExitCode {
             approval,
             crash_after_journal,
             max_steps,
+            no_network,
+            allow_origin,
             json: as_json,
         } => {
             let provider = provider_name(provider);
@@ -877,6 +928,13 @@ pub async fn run_agent(dir: &Path, command: AgentCommand) -> ExitCode {
                     effort.clone(),
                 ))
             };
+            // Q240: the project policy is the default; explicit flags are the per-turn override.
+            // An empty allowlist still asks per origin, and the kill switch refuses every origin.
+            let network = if no_network || !allow_origin.is_empty() {
+                NetworkPolicy::new(!no_network, allow_origin)
+            } else {
+                NetworkPolicy::load(&project)
+            };
             let tools = Tools::new(
                 project.clone(),
                 service.clone(),
@@ -884,6 +942,7 @@ pub async fn run_agent(dir: &Path, command: AgentCommand) -> ExitCode {
                 dir.to_path_buf(),
                 stop_at,
             )
+            .with_network_policy(network)
             .with_command_approval(Arc::new(CliApprover { mode: approval }))
             .with_origin_approval(Arc::new(CliApprover { mode: approval }))
             .with_plan_approval(Arc::new(CliApprover { mode: approval }))
@@ -964,6 +1023,9 @@ mod tests {
             cwd: PathBuf::from("/work/demo/crates/core"),
             timeout_secs: 120,
             destructive: Vec::new(),
+            blast_radius: None,
+            dry_run: None,
+            skill_scripts: Vec::new(),
             deliberation: None,
         }
     }
@@ -984,9 +1046,15 @@ mod tests {
         request.command = "rm -rf /etc/secrets".to_string();
         request.destructive =
             rigel_core::classify(&request.command, &request.cwd, &request.project_root);
+        request.blast_radius = Some(rigel_core::agent::blast_radius(
+            &request.command,
+            &request.cwd,
+            &request.project_root,
+        ));
         let prompt = format_command(&request);
         assert!(prompt.contains("DESTRUCTIVE delete-outside-project"));
         assert!(prompt.contains("DESTRUCTIVE recursive-remove"));
+        assert!(prompt.contains("blast radius") && prompt.contains("/etc/secrets"));
         assert!(prompt.contains("rm -rf /etc/secrets"));
     }
 

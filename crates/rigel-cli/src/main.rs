@@ -1,3 +1,4 @@
+#![recursion_limit = "512"]
 //! `rigel` — the CLI half of the app.
 //!
 //! Everything here goes through the same core the window uses, which is what makes the
@@ -20,6 +21,8 @@ mod doctor;
 mod harness;
 mod mail;
 mod phase3;
+mod route;
+mod serve;
 mod tools;
 mod update;
 mod worktree;
@@ -44,6 +47,9 @@ enum Command {
     Doctor {
         #[arg(long, value_name = "PATH", default_value = ".")]
         project: PathBuf,
+        /// Also write a support archive (versions, schema, redacted settings and logs).
+        #[arg(long, value_name = "FILE")]
+        support_bundle: Option<PathBuf>,
         #[arg(long)]
         json: bool,
     },
@@ -94,6 +100,12 @@ enum Command {
     Snapshot {
         #[command(subcommand)]
         command: SnapshotCommand,
+    },
+
+    /// Explain which provider and model a turn would use, and why.
+    Route {
+        #[command(subcommand)]
+        command: route::RouteCommand,
     },
 
     /// Advisory file claims: who holds what, and release one by hand.
@@ -187,6 +199,44 @@ enum Command {
         json: bool,
     },
 
+    /// Serve the coordinator and the project workspace over an authenticated HTTP API.
+    Serve {
+        #[arg(long, value_name = "PATH", default_value = ".")]
+        project: PathBuf,
+        #[arg(long, default_value_t = serve::DEFAULT_PORT)]
+        port: u16,
+        /// Address to bind: loopback, or one interface address such as a Tailscale IP. 0.0.0.0 is refused.
+        #[arg(long, value_name = "ADDR")]
+        host: Option<String>,
+        /// Bind this machine's Tailscale IPv4 address, discovered with `tailscale ip -4`.
+        #[arg(long, conflicts_with = "host")]
+        tailscale: bool,
+        /// Let the API read, write and edit any path this user can, and start a command in any
+        /// directory. Off by default: the workspace stays inside the project.
+        #[arg(long)]
+        full_access: bool,
+        /// The base URL a client should use, when a tunnel forwards to the loopback port.
+        #[arg(long, value_name = "URL")]
+        public_url: Option<String>,
+        /// Register a logon task that runs this command with the same flags, then exit.
+        #[arg(long)]
+        install: bool,
+        /// Remove that logon task, then exit.
+        #[arg(long)]
+        uninstall: bool,
+        /// Hide the console window at startup; the logon entry passes this.
+        #[arg(long)]
+        hide_window: bool,
+        /// Replace the stored token before starting.
+        #[arg(long)]
+        rotate: bool,
+        /// Print the token and exit without serving.
+        #[arg(long)]
+        print_token: bool,
+        #[arg(long)]
+        json: bool,
+    },
+
     /// Run the stdio MCP server an adapter injects into an agent.
     Mcp {
         #[arg(long, value_name = "PATH", default_value = ".")]
@@ -195,6 +245,9 @@ enum Command {
         session: String,
         #[arg(long)]
         agent: String,
+        /// The turn whose transcript receives MCP approval decisions, when one exists.
+        #[arg(long)]
+        turn: Option<String>,
     },
 }
 
@@ -224,6 +277,17 @@ enum SessionCommand {
         project: PathBuf,
         #[arg(long)]
         id: String,
+    },
+
+    /// Permanently delete an archived session and every local row beneath it.
+    Delete {
+        #[arg(long, value_name = "PATH", default_value = ".")]
+        project: PathBuf,
+        #[arg(long)]
+        id: String,
+        /// Repeat the session id here; deletion cannot be undone.
+        #[arg(long, value_name = "ID")]
+        confirm: String,
     },
 
     /// Reconcile a session with the tree and the patch journal after a kill.
@@ -377,8 +441,9 @@ async fn main() -> ExitCode {
     match cli.command {
         Command::Doctor {
             project,
+            support_bundle,
             json: as_json,
-        } => doctor::run(&project, &dir, as_json).await,
+        } => doctor::run(&project, &dir, as_json, support_bundle.as_deref()).await,
 
         Command::Migrate { project } => match Store::open_project(&project).await {
             Ok(store) => {
@@ -391,6 +456,40 @@ async fn main() -> ExitCode {
             }
         },
 
+        Command::Serve {
+            project,
+            port,
+            host,
+            tailscale,
+            full_access,
+            public_url,
+            rotate,
+            print_token,
+            install,
+            uninstall,
+            hide_window,
+            json: as_json,
+        } => {
+            serve::run(serve::ServeOptions {
+                project,
+                data_dir: dir.clone(),
+                host: host.unwrap_or_else(|| serve::DEFAULT_HOST.to_string()),
+                port,
+                tailscale,
+                full_access,
+                public_url,
+                rotate,
+                print_token,
+                install,
+                uninstall,
+                hide_window,
+                as_json,
+            })
+            .await
+        }
+
+        Command::Route { command } => route::run(command),
+
         Command::Session { command } => run_session(command).await,
 
         Command::Skills { command } => run_skills(&dir, command).await,
@@ -401,7 +500,7 @@ async fn main() -> ExitCode {
 
         Command::Memory { command } => phase3::run_memory(command).await,
 
-        Command::Keys { command } => phase3::run_keys(command),
+        Command::Keys { command } => phase3::run_keys(command).await,
 
         Command::Snapshot { command } => phase3::run_snapshot(command, dir),
 
@@ -559,7 +658,8 @@ async fn main() -> ExitCode {
             project,
             session,
             agent,
-        } => phase3::run_mcp(&dir, project, session, agent).await,
+            turn,
+        } => phase3::run_mcp(&dir, project, session, agent, turn).await,
     }
 }
 
@@ -1197,6 +1297,29 @@ async fn run_session(command: SessionCommand) -> ExitCode {
             },
             Err(error) => fail(error),
         },
+
+        SessionCommand::Delete {
+            project,
+            id,
+            confirm,
+        } => {
+            if confirm != id {
+                eprintln!(
+                    "rigel: --confirm must repeat the session id exactly; nothing was deleted"
+                );
+                return ExitCode::from(2);
+            }
+            match SessionService::open(&project).await {
+                Ok(service) => match service.delete_permanently(&id).await {
+                    Ok(()) => {
+                        println!("deleted {id}");
+                        ExitCode::SUCCESS
+                    }
+                    Err(error) => fail(error),
+                },
+                Err(error) => fail(error),
+            }
+        }
 
         SessionCommand::Resume {
             project,

@@ -18,8 +18,8 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use base64::Engine;
@@ -27,27 +27,33 @@ use rigel_core::agent::approval::{
     ApprovalBus, MailApprover, MailDecision, MailRequest, PendingApproval,
 };
 pub use rigel_core::agent::catalog::ModelOption;
+use rigel_core::agent::routing::RouteExplanation;
 use rigel_core::agent::{Cancels, Coordinator, DEFAULT_MAX_STEPS, fixed_context_chars};
-use rigel_core::agent::{catalog, providers, vertex};
+use rigel_core::agent::{capabilities, catalog, custom, health, openrouter, providers, vertex};
 use rigel_core::{
     Agent, AgentEvent, AppliedReview, ApprovalScope, Attention, AttributedHunk, Bookmark,
     BudgetService, ClaimConflict, ClaimService, CommandApprover, CommandDecision, CommandRequest,
-    ConflictWatcher, EventSink, HunkComment, HunkComments, InterruptSink, MemoryFile,
-    MemoryService, MergeReview, MergeReviews, Model, POLL_INTERVAL, Patch, PatchPipeline,
-    PlanApprover, PlanDecision, PlanRequest, Provenance, ResumeOutcome, Scopes, Session,
-    SessionService, SessionTemplate, SessionTemplates, SkillDetail, SkillIndex, SkillsError,
-    SnapshotService, StopAt, Store, SubagentPolicy, SyncPolicy, TeamAgent, Tools, Turn, TurnQuote,
-    TurnTranscript, UnverifiedChange, Usage, WorktreeService, WriteMode, apply_review, credentials,
-    diagnostics, skills::search::SearchHit,
+    ConflictWatcher, EventSink, HunkComment, HunkComments, InterruptSink, MemoryApprover,
+    MemoryDecision, MemoryFile, MemoryRequest, MemoryService, MergeReview, MergeReviews, Model,
+    NetworkPolicy, POLL_INTERVAL, Patch, PatchPipeline, PlanApprover, PlanDecision, PlanRequest,
+    Provenance, RecoveryOffer, ResumeOutcome, Scopes, ScriptedModel, Session, SessionService,
+    SessionTemplate, SessionTemplates, SkillDetail, SkillIndex, SkillsError, SnapshotService,
+    StopAt, Store, SubagentPolicy, SyncPolicy, TeamAgent, Tools, Turn, TurnQuote, TurnTranscript,
+    UnverifiedChange, Usage, WorktreeService, WriteMode, apply_review, credentials, diagnostics,
+    skills::search::SearchHit,
 };
 use serde::{Deserialize, Serialize};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
 use tauri::{Emitter, Manager, State};
 
 mod claude;
+mod concord;
+mod control;
 mod mcp_catalog;
+mod relay;
 mod terminal;
 mod tray_status;
+pub mod webview;
 pub use claude::mcp_mode;
 
 #[derive(Debug, Clone, Serialize)]
@@ -61,17 +67,89 @@ fn default_model() -> String {
     rigel_core::agent::omniroute::DEFAULT_MODEL.to_string()
 }
 
-/// The model a turn will actually ask for. Settings keep one model across a provider switch, so
-/// an id another provider owns is never sent; the provider's own default is the honest fallback,
-/// and a provider with no default answers `""` so the turn says "pick a model" instead of
-/// sending an empty id.
-fn configured_model(settings: &Settings, provider: &str) -> String {
-    match providers::find(provider) {
-        Some(spec) => providers::configured_model(spec, &settings.model),
-        // `settings_set` refuses an unknown provider, so this is a settings file edited by hand;
-        // the saved model is the honest answer there.
-        None => settings.model.trim().to_string(),
+/// Whether a saved model id still exists on the door that would receive it.
+///
+/// The user-visible failure this prevents is a 400 like "model X is not available in the active
+/// live catalog": the id was saved when the roster listed it, and the roster moved. When the
+/// provider publishes a live roster the id is checked against it; a miss re-reads that door once
+/// (a cache goes stale the same way a saved id does) and then refuses with real rows instead of
+/// sending a request that cannot succeed.
+fn guard_live_model(provider: &str, model: &str) -> Result<(), String> {
+    let model = model.trim();
+    let Some(spec) = providers::find(provider) else {
+        return Ok(());
+    };
+    // A gateway routes any id by definition, and a door with no roster has nothing to check.
+    if spec.gateway || !spec.lists_models || model.is_empty() {
+        return Ok(());
     }
+    for force in [false, true] {
+        let Ok(rows) = models_cached(force) else {
+            return Ok(());
+        };
+        let listed: Vec<&str> = rows
+            .iter()
+            .filter(|row| row.provider == spec.id)
+            .map(|row| row.id.as_str())
+            .collect();
+        if listed.is_empty() || listed.contains(&model) {
+            return Ok(());
+        }
+        if !force {
+            continue;
+        }
+        let sample = listed
+            .iter()
+            .take(4)
+            .copied()
+            .collect::<Vec<_>>()
+            .join(", ");
+        return Err(format!(
+            "`{model}` is not in {}'s live catalogue, so no request was sent; it lists {sample} — \
+             pick a row in the picker, or press free mode",
+            spec.name
+        ));
+    }
+    Ok(())
+}
+
+/// Free mode reaches the native fan-out too: when the composer is on the free model Free mode
+/// proved, children run on that same door and the coordinator allows the id, so a swarm does not
+/// quietly spend on a paid nano default behind a free parent.
+fn subagent_policy(settings: &Settings) -> SubagentPolicy {
+    let model = settings.model.trim();
+    if settings.free_mode && !model.is_empty() {
+        return SubagentPolicy {
+            model: model.to_string(),
+            extra_models: vec![model.to_string()],
+            ..SubagentPolicy::default()
+        };
+    }
+    SubagentPolicy::default()
+}
+
+/// The Free-mode agent the Swarm room can launch. `None` when Free mode is off, no model is
+/// saved, or the provider's API is not OpenAI-compatible (Anthropic, Vertex, a custom door).
+fn free_swarm_agent(settings: &Settings) -> Option<rigel_core::agent::agentchat::FreeAgent> {
+    if !settings.free_mode {
+        return None;
+    }
+    let model = settings.model.trim();
+    if model.is_empty() {
+        return None;
+    }
+    let provider = settings.provider.trim().to_lowercase();
+    let door = tauri::async_runtime::block_on(rigel_core::agent::providers::compatible_door(
+        &provider,
+        &credentials::KeychainCredentialStore,
+    ))
+    .ok()
+    .flatten()?;
+    Some(rigel_core::agent::agentchat::FreeAgent {
+        base_url: door.base_url,
+        model: model.to_string(),
+        api_key: door.api_key,
+    })
 }
 
 fn default_provider() -> String {
@@ -109,6 +187,11 @@ fn default_max_steps() -> u16 {
     DEFAULT_MAX_STEPS as u16
 }
 
+/// Who leads a Swarm: Muse splits the prompt and assigns it, or the room gets one broadcast.
+fn default_swarm_lead() -> String {
+    "muse".to_string()
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Settings {
     pub theme: String,
@@ -121,6 +204,10 @@ pub struct Settings {
     pub provider: String,
     #[serde(default = "default_model")]
     pub model: String,
+    /// Free mode: the saved provider and model are the free pair Free mode proved was answering.
+    /// Picking a model by hand clears it, so the composer never claims a free model it is not on.
+    #[serde(default)]
+    pub free_mode: bool,
     /// The Google Cloud project Vertex is billed to, saved by the Providers page. Empty means
     /// "ask the environment, then the Cloud CLI"; a saved value sits between the two.
     #[serde(default)]
@@ -155,6 +242,10 @@ pub struct Settings {
     /// launch.
     #[serde(default = "default_true")]
     pub chat_models_only: bool,
+    /// Who leads a Swarm: `muse` queues the prompt for Muse to split and assign, `broadcast`
+    /// sends the same text to every ticked agent. Old settings files gain `muse`.
+    #[serde(default = "default_swarm_lead")]
+    pub swarm_lead: String,
     /// Refine each composer draft with the cheap model and send the result without the review
     /// card. Off means Send opens the card and nothing is sent until the user confirms it.
     #[serde(default)]
@@ -170,6 +261,23 @@ pub struct Settings {
     /// D159: tighter rows in the transcript, list and diff. Layout only; no content is hidden.
     #[serde(default)]
     pub compact_density: bool,
+    /// Q290: an explicit high-contrast palette, independent of the OS preference.
+    #[serde(default)]
+    pub high_contrast: bool,
+    /// Q283: the local-time window (`HH:MM`) in which desktop notifications stay silent.
+    /// Empty means quiet hours are off.
+    #[serde(default)]
+    pub quiet_hours_start: String,
+    #[serde(default)]
+    pub quiet_hours_end: String,
+    /// Opt-in Gravity sponsored card on Home. Off by default: an ad request is a network call,
+    /// and the user decides whether the paper carries one.
+    #[serde(default)]
+    pub gravity_ads: bool,
+    /// Request test ads: no billing, no metrics, and a sample card even when no ad matches. The
+    /// switch stays on until the publisher account is approved for production.
+    #[serde(default = "default_true")]
+    pub gravity_test_ads: bool,
 }
 
 impl Default for Settings {
@@ -179,6 +287,7 @@ impl Default for Settings {
             default_budget_cents: 500,
             provider: default_provider(),
             model: default_model(),
+            free_mode: false,
             vertex_project: String::new(),
             effort: default_effort(),
             notify_approval: true,
@@ -190,10 +299,16 @@ impl Default for Settings {
             skills_auto_update: true,
             max_steps: default_max_steps(),
             chat_models_only: true,
+            swarm_lead: default_swarm_lead(),
             auto_refine: false,
             cloud_sync_sessions: false,
             ui_scale: default_ui_scale(),
             compact_density: false,
+            high_contrast: false,
+            quiet_hours_start: String::new(),
+            quiet_hours_end: String::new(),
+            gravity_ads: false,
+            gravity_test_ads: true,
         }
     }
 }
@@ -208,6 +323,17 @@ pub struct KeyStatus {
     /// both ask that question, and the adapter table is the only thing that knows the answer —
     /// a key that belongs to a harness alone does not make a native turn possible.
     pub native_ready: bool,
+}
+
+/// Q244: a successful save also says whether the key was checked, so Settings can report a
+/// covered path instead of claiming every provider was tested.
+#[derive(Debug, Clone, Serialize)]
+pub struct KeySetResult {
+    pub status: KeyStatus,
+    /// `None` for a harness credential, which has no provider roster here; the harness checks it
+    /// when it starts. A chat provider always carries a check, possibly `checked: false` when it
+    /// publishes no model list.
+    pub check: Option<catalog::KeyValidation>,
 }
 
 fn current_key_status() -> KeyStatus {
@@ -239,6 +365,53 @@ pub struct ProviderRow {
     pub key_present: bool,
 }
 
+/// Item 15: the launch health pass. The picker reads the same cached rows instead of probing
+/// every door a second time.
+#[tauri::command]
+fn provider_health() -> Result<Vec<health::DoorHealth>, String> {
+    tauri::async_runtime::block_on(async {
+        let store = credentials::KeychainCredentialStore;
+        Ok(health::launch(&store).await)
+    })
+}
+
+/// Roadmap 26: the effective policy for a project, read before a turn and shown by the route
+/// inspector. The file is the policy; this command does not cache a second copy.
+#[tauri::command]
+fn routing_policy(project: String) -> Result<openrouter::RoutingPolicy, String> {
+    Ok(openrouter::RoutingPolicy::load(std::path::Path::new(
+        &project,
+    )))
+}
+
+/// Roadmap 28: the saved custom door, with header values masked.
+#[tauri::command]
+fn custom_provider_get() -> Result<Option<custom::MaskedDoor>, String> {
+    Ok(custom::load()?.map(|door| door.masked()))
+}
+
+/// Roadmap 28: ask a candidate door for its models without saving anything.
+#[tauri::command]
+fn custom_provider_probe(door: custom::CustomDoor) -> Result<Vec<String>, String> {
+    tauri::async_runtime::block_on(custom::probe(&door.base_url, &door.headers))
+}
+
+/// Roadmap 28: validate the probe result and write the whole record to the keychain. No header
+/// value is ever written to settings or returned to the renderer.
+#[tauri::command]
+fn custom_provider_save(door: custom::CustomDoor) -> Result<custom::MaskedDoor, String> {
+    credentials::set(custom::ID, &door.encode()?).map_err(message)?;
+    Ok(door.masked())
+}
+
+/// Item 18: capabilities for the rows the picker is already holding.
+#[tauri::command]
+fn model_capabilities(
+    models: Vec<capabilities::ModelRef>,
+) -> Result<Vec<capabilities::CapabilityRow>, String> {
+    Ok(capabilities::for_models(models))
+}
+
 #[tauri::command]
 fn providers_list() -> Result<Vec<ProviderRow>, String> {
     let store = credentials::KeychainCredentialStore;
@@ -252,15 +425,56 @@ fn providers_list() -> Result<Vec<ProviderRow>, String> {
             access_token: spec.access_token,
             default_model: spec.default_model.map(str::to_string),
             key_url: spec.key_url.map(str::to_string),
-            key_present: credentials::present_in(&store, spec.id),
+            key_present: providers::present(&store, spec),
         })
         .collect())
+}
+
+/// The route decision both the inspector and the turn path read. One function means the two
+/// surfaces cannot drift: the turn uses `resolved`, the inspector prints the same struct.
+fn explain_route(
+    settings: &Settings,
+    requested_provider: Option<&str>,
+    requested_model: Option<&str>,
+) -> Result<RouteExplanation, String> {
+    rigel_core::agent::routing::explain(
+        &settings.provider,
+        &settings.model,
+        requested_provider,
+        requested_model,
+    )
+}
+
+#[tauri::command]
+fn route_explain(
+    provider: Option<String>,
+    model: Option<String>,
+) -> Result<RouteExplanation, String> {
+    explain_route(&load_settings(), provider.as_deref(), model.as_deref())
+}
+
+/// The window-driver bootstrap: which project to open before the first human click. Shipped
+/// builds return `None`; only the E2E runner sets `RIGEL_E2E_PROJECT`.
+#[derive(Debug, Clone, Serialize)]
+pub struct E2eConfig {
+    pub project: String,
+}
+
+#[tauri::command]
+fn e2e_config() -> Option<E2eConfig> {
+    std::env::var("RIGEL_E2E_PROJECT")
+        .ok()
+        .map(|project| project.trim().to_string())
+        .filter(|project| !project.is_empty())
+        .map(|project| E2eConfig { project })
 }
 
 #[derive(Debug, Clone, Serialize)]
 pub struct TurnReply {
     pub turn: Turn,
     pub budget_cents: Option<i64>,
+    /// The exact explanation the inspector reads for the same inputs.
+    pub route: RouteExplanation,
 }
 
 struct AppRuntime {
@@ -673,6 +887,161 @@ fn session_pin(project: String, id: String, pinned: bool) -> Result<Session, Str
     })
 }
 
+/// Q270: the window's skill pins. The body hash is resolved from the local index unless a
+/// template supplied one, so a template can restore the exact body its session read.
+#[tauri::command]
+fn session_skill_pins(
+    project: String,
+    session: String,
+) -> Result<Vec<rigel_core::SkillPinView>, String> {
+    tauri::async_runtime::block_on(async move {
+        let service = SessionService::open(Path::new(&project))
+            .await
+            .map_err(message)?;
+        let index = SkillIndex::open(&index_dir()).await.map_err(message)?;
+        rigel_core::pins::list(&service, &index, &session)
+            .await
+            .map_err(message)
+    })
+}
+
+#[tauri::command]
+fn session_skill_pin(
+    project: String,
+    session: String,
+    skill_id: String,
+    body_sha: Option<String>,
+) -> Result<rigel_core::SkillPinView, String> {
+    tauri::async_runtime::block_on(async move {
+        let service = SessionService::open(Path::new(&project))
+            .await
+            .map_err(message)?;
+        service.get(&session).await.map_err(message)?;
+        let index = SkillIndex::open(&index_dir()).await.map_err(message)?;
+        let sha = match body_sha.filter(|sha| !sha.trim().is_empty()) {
+            Some(sha) => sha,
+            None => index
+                .body(&skill_id)
+                .await
+                .map_err(message)?
+                .map(|(_, sha)| sha)
+                .ok_or_else(|| format!("{skill_id} has no indexed body to pin"))?,
+        };
+        service
+            .pin_skill(&session, &skill_id, &sha, false)
+            .await
+            .map_err(message)?;
+        rigel_core::pins::one(&service, &index, &session, &skill_id)
+            .await
+            .map_err(message)
+    })
+}
+
+#[tauri::command]
+fn session_skill_unpin(project: String, session: String, skill_id: String) -> Result<bool, String> {
+    tauri::async_runtime::block_on(async move {
+        SessionService::open(Path::new(&project))
+            .await
+            .map_err(message)?
+            .unpin_skill(&session, &skill_id)
+            .await
+            .map_err(message)
+    })
+}
+
+/// D141: the full changed-pin review. Bodies stay in the index's blob store; this read only
+/// returns them for the open card, never writes them into the project database.
+#[tauri::command]
+fn session_skill_review(
+    project: String,
+    session: String,
+    skill_id: String,
+) -> Result<rigel_core::SkillPinReview, String> {
+    tauri::async_runtime::block_on(async move {
+        let service = SessionService::open(Path::new(&project))
+            .await
+            .map_err(message)?;
+        let index = SkillIndex::open(&index_dir()).await.map_err(message)?;
+        rigel_core::pins::review(&service, &index, &session, &skill_id)
+            .await
+            .map_err(message)
+    })
+}
+
+#[tauri::command]
+fn session_skill_keep(
+    project: String,
+    session: String,
+    skill_id: String,
+    reason: String,
+) -> Result<rigel_core::SkillPinView, String> {
+    tauri::async_runtime::block_on(async move {
+        let service = SessionService::open(Path::new(&project))
+            .await
+            .map_err(message)?;
+        let index = SkillIndex::open(&index_dir()).await.map_err(message)?;
+        rigel_core::pins::keep(&service, &index, &session, &skill_id, &reason)
+            .await
+            .map_err(message)
+    })
+}
+
+/// D141: one reason for keeping every changed pin. The pinned hashes stay put; the core records
+/// a single `skill_pin` intervention with each pin's pinned and current hash.
+#[tauri::command]
+fn session_skill_keep_all(
+    project: String,
+    session: String,
+    reason: String,
+) -> Result<Vec<rigel_core::SkillPinView>, String> {
+    tauri::async_runtime::block_on(async move {
+        let service = SessionService::open(Path::new(&project))
+            .await
+            .map_err(message)?;
+        let index = SkillIndex::open(&index_dir()).await.map_err(message)?;
+        rigel_core::pins::keep_all(&service, &index, &session, &reason)
+            .await
+            .map_err(message)
+    })
+}
+
+#[tauri::command]
+fn session_skill_update(
+    project: String,
+    session: String,
+    skill_id: String,
+    reason: String,
+) -> Result<rigel_core::SkillPinView, String> {
+    tauri::async_runtime::block_on(async move {
+        let service = SessionService::open(Path::new(&project))
+            .await
+            .map_err(message)?;
+        let index = SkillIndex::open(&index_dir()).await.map_err(message)?;
+        rigel_core::pins::update(&service, &index, &session, &skill_id, &reason)
+            .await
+            .map_err(message)
+    })
+}
+
+/// D141: one reason for every changed pin. The core resolves each current hash and records a
+/// single `skill_pin` intervention with all old/new pairs.
+#[tauri::command]
+fn session_skill_update_all(
+    project: String,
+    session: String,
+    reason: String,
+) -> Result<Vec<rigel_core::SkillPinView>, String> {
+    tauri::async_runtime::block_on(async move {
+        let service = SessionService::open(Path::new(&project))
+            .await
+            .map_err(message)?;
+        let index = SkillIndex::open(&index_dir()).await.map_err(message)?;
+        rigel_core::pins::update_all(&service, &index, &session, &reason)
+            .await
+            .map_err(message)
+    })
+}
+
 #[tauri::command]
 fn session_archive(project: String, id: String, archived: bool) -> Result<Session, String> {
     tauri::async_runtime::block_on(async move {
@@ -680,6 +1049,20 @@ fn session_archive(project: String, id: String, archived: bool) -> Result<Sessio
             .await
             .map_err(message)?
             .set_archived(&id, archived)
+            .await
+            .map_err(message)
+    })
+}
+
+/// Q274: the window's only destructive session action. The core refuses a session that has not
+/// been archived; the renderer asks for the id again before it gets this far.
+#[tauri::command]
+fn session_delete(project: String, id: String) -> Result<(), String> {
+    tauri::async_runtime::block_on(async move {
+        SessionService::open(Path::new(&project))
+            .await
+            .map_err(message)?
+            .delete_permanently(&id)
             .await
             .map_err(message)
     })
@@ -1240,12 +1623,49 @@ fn session_export(project: String, id: String) -> Result<SessionExport, String> 
     })
 }
 
+/// Q268: run the one test command Rigel can recognise for this project. The action is explicit,
+/// local, and outside the agent loop; the core bounds the captured output.
+#[tauri::command]
+async fn tests_run(project: String) -> Result<rigel_core::testrun::TestRun, String> {
+    let root = PathBuf::from(project);
+    if !root.is_dir() {
+        return Err("That project folder is not available.".to_string());
+    }
+    rigel_core::testrun::run(&root).await.map_err(message)
+}
+
 #[tauri::command]
 fn session_resume(project: String, id: String, force: bool) -> Result<ResumeOutcome, String> {
     tauri::async_runtime::block_on(async move {
         let root = PathBuf::from(&project);
         let service = SessionService::open(&root).await.map_err(message)?;
         rigel_core::resume::resume(&service, &root, &id, force)
+            .await
+            .map_err(message)
+    })
+}
+
+/// Roadmap 37: the exact turns a dead process left running.
+#[tauri::command]
+fn session_recovery(project: String, id: String) -> Result<Option<RecoveryOffer>, String> {
+    tauri::async_runtime::block_on(async move {
+        SessionService::open(Path::new(&project))
+            .await
+            .map_err(message)?
+            .recovery_offer(&id)
+            .await
+            .map_err(message)
+    })
+}
+
+/// Roadmap 37: write the tombstone and close the discarded turn in one transaction.
+#[tauri::command]
+fn turn_discard(project: String, turn: String) -> Result<Turn, String> {
+    tauri::async_runtime::block_on(async move {
+        SessionService::open(Path::new(&project))
+            .await
+            .map_err(message)?
+            .discard_turn(&turn, "discarded after crash")
             .await
             .map_err(message)
     })
@@ -1359,12 +1779,14 @@ fn turn_send(
     agent: String,
     prompt: String,
     model: Option<String>,
+    // The provider the renderer picked *with* the model. Without it a save that has not landed
+    // yet (or an agent row written on spawn) would send the model through the previous door.
+    provider: Option<String>,
     effort: Option<String>,
 ) -> Result<TurnReply, String> {
     let root = PathBuf::from(&project);
     let service = tauri::async_runtime::block_on(SessionService::open(&root)).map_err(message)?;
     let settings = load_settings();
-    let provider = settings.provider.trim().to_lowercase();
 
     // A role preset (D94) carries its own model/effort pair. It wins over the composer's
     // defaults, because applying the preset is the explicit choice; a custom role changes
@@ -1382,15 +1804,22 @@ fn turn_send(
     }
     // The provider picks the default model; the effort is applied on the wire, never folded
     // into the id the provider chose.
-    let model_name = wire_model(
-        &preset
-            .map(|preset| preset.model.to_string())
-            .or(model)
-            .or_else(|| agent_row.model.clone())
-            .unwrap_or_else(|| configured_model(&settings, &provider)),
-        &effort,
-        &provider,
-    );
+    // One decision, in the core: the model and its door travel together. A preset owns the model,
+    // so its door is the saved one; otherwise the renderer's pair is the pick. Neither a stale
+    // agent row nor an unlanded save can move the request to another provider, and a model id can
+    // never select Vertex — its namespace is also OpenRouter's spelling of Gemini.
+    let requested_model = preset
+        .map(|preset| preset.model.to_string())
+        .or(model)
+        .or_else(|| agent_row.model.clone());
+    let requested_provider = if preset.is_some() { None } else { provider };
+    let explanation = explain_route(
+        &settings,
+        requested_provider.as_deref(),
+        requested_model.as_deref(),
+    )?;
+    let provider = explanation.resolved.provider.clone();
+    let model_name = wire_model(&explanation.resolved.model, &effort, &provider);
 
     // A Claude turn is not the native loop: the harness runs it and the window's approval card
     // answers its questions. The row is created here so the renderer gets it back at once, and
@@ -1417,24 +1846,40 @@ fn turn_send(
         return Ok(TurnReply {
             turn,
             budget_cents: cap,
+            route: explanation,
         });
     }
 
-    // A provider with no default (its roster is read live by the picker) refuses an empty model
-    // id: the provider's own 400 would say less than this does.
-    if model_name.trim().is_empty() {
-        return Err(format!(
-            "no model chosen for `{provider}`; pick one in the model picker"
-        ));
-    }
+    // E2E: a scripted provider replaces the network door. Everything after this point — the
+    // approvals, tools, patches, transcript and bill — is the production turn loop. The seam is
+    // an environment variable, so a shipped build never takes it unless a test sets it.
+    // Roadmap 26: the project's OpenRouter preferences are read once, here, and travel with the
+    // request. A default policy adds no field, so a project without the file sends what it did.
+    let routing_policy = openrouter::RoutingPolicy::load(&root);
+    let model: Arc<dyn Model> = match std::env::var_os("RIGEL_E2E_SCRIPT") {
+        Some(script) => Arc::new(ScriptedModel::from_path(Path::new(&script)).map_err(message)?),
+        None => {
+            // A provider with no default (its roster is read live by the picker) refuses an empty
+            // model id: the provider's own 400 would say less than this does.
+            if model_name.trim().is_empty() {
+                return Err(format!(
+                    "no model chosen for `{provider}`; pick one in the model picker"
+                ));
+            }
 
-    // One row of the adapter table says where the turn goes: the key, the base URL and the
-    // request profile all come from it. A local router that is down is a process to launch, not
-    // a configuration error, and `build` starts it before it sends anything.
-    let model: Arc<dyn Model> = tauri::async_runtime::block_on(providers::build(
-        &provider,
-        &credentials::KeychainCredentialStore,
-    ))?;
+            // A saved id can outlive its roster. Check it while the launch pass has it cached.
+            guard_live_model(&provider, &model_name)?;
+
+            // One row of the adapter table says where the turn goes: the key, the base URL and
+            // the request profile all come from it. A local router that is down is a process to
+            // launch, not a configuration error, and `build` starts it before it sends anything.
+            tauri::async_runtime::block_on(providers::build_with_policy(
+                &provider,
+                &credentials::KeychainCredentialStore,
+                Some(routing_policy),
+            ))?
+        }
+    };
 
     let cancels = state.cancels.clone();
     let budget = Arc::new(BudgetService::new(
@@ -1489,7 +1934,7 @@ fn turn_send(
         model_name,
         effort: Some(effort),
         max_steps: usize::from(settings.max_steps),
-        subagents: SubagentPolicy::default(),
+        subagents: subagent_policy(&settings),
         depth: 0,
         parent_cancel: None,
         worktree_dir: Some(index_dir()),
@@ -1563,6 +2008,7 @@ fn turn_send(
     Ok(TurnReply {
         turn: returned,
         budget_cents: cap,
+        route: explanation,
     })
 }
 
@@ -1600,6 +2046,15 @@ impl CommandApprover for WindowApprover {
                 "destructive": request.destructive.iter().map(|finding| {
                     serde_json::json!({ "id": finding.id, "summary": finding.summary })
                 }).collect::<Vec<_>>(),
+                // Q239: resolved targets and counts computed from the same classifier. This
+                // is part of the question, not a separate approval path.
+                "blast_radius": request.blast_radius,
+                // Q73: the tool's own preview output (or an explicit no-preview note) is part
+                // of the question, so the card never guesses at the effect.
+                "dry_run": request.dry_run,
+                // Q243: a script contributed by a loaded skill is part of the question, and
+                // its own grant is required even when the command text is already approved.
+                "skill_scripts": request.skill_scripts,
                 "deliberation": request.deliberation.as_ref().map(|round| {
                     serde_json::json!({
                         "note": round.note,
@@ -1609,13 +2064,48 @@ impl CommandApprover for WindowApprover {
                     })
                 }),
             }));
+        // Q36: one silent deadline earns exactly one republish. Both attempts are still
+        // refusals when nobody answers; the retry never turns silence into an approval.
+        match self
+            .bus
+            .ask_with_retry(pending, std::time::Duration::from_secs(600), 1)
+            .await
+        {
+            Ok(scope) => CommandDecision::Allow(scope),
+            Err(_) => CommandDecision::Deny,
+        }
+    }
+}
+
+/// Q251: a committed-memory write is a question on the same card. It is project-local but
+/// permanent, so it is never approved by a command grant; the card shows the exact file and
+/// content, and silence is a refusal.
+struct WindowMemoryApprover {
+    bus: ApprovalBus,
+    project_root: PathBuf,
+}
+
+#[async_trait::async_trait]
+impl MemoryApprover for WindowMemoryApprover {
+    async fn approve(&self, request: &MemoryRequest) -> MemoryDecision {
+        let key = format!("memory:{}:{}", request.agent_id, request.topic);
+        let pending = PendingApproval::now("memory", &key, format!("write {}", request.path))
+            .in_project(&self.project_root)
+            .with_detail(serde_json::json!({
+                "agent_id": request.agent_id,
+                "topic": request.topic,
+                "mode": request.mode,
+                "path": request.path,
+                "content": request.content,
+                "preview": request.preview,
+            }));
         match self
             .bus
             .ask(pending, std::time::Duration::from_secs(600))
             .await
         {
-            Ok(scope) => CommandDecision::Allow(scope),
-            Err(_) => CommandDecision::Deny,
+            Ok(_) => MemoryDecision::Allow,
+            Err(_) => MemoryDecision::Deny,
         }
     }
 }
@@ -1776,6 +2266,73 @@ fn remember_project(root: &Path) {
     if let Ok(mut watched) = WATCHED_ROOT.lock() {
         *watched = Some(root.to_path_buf());
     }
+    persist_current_project(root);
+    persist_app_state(true);
+}
+
+/// Publish the project the window has open so a headless `rigel serve` can follow it. The
+/// server polls this file and reopens its session database when the window switches projects;
+/// a temp file plus rename means a reader never sees half a path. Failure is not fatal to the
+/// window, which still has its project in memory.
+fn persist_current_project(root: &Path) {
+    let path = index_dir().join("current-workspace.json");
+    let Some(parent) = path.parent() else {
+        return;
+    };
+    if std::fs::create_dir_all(parent).is_err() {
+        return;
+    }
+    let body = serde_json::json!({ "project": root.to_string_lossy() });
+    let temp = path.with_extension("json.tmp");
+    if std::fs::write(&temp, body.to_string()).is_ok() {
+        let _ = std::fs::rename(&temp, &path);
+    }
+}
+
+/// The window's liveness file. `updated_at` is refreshed every ten seconds; a stale file is a
+/// crashed window, not an open one. The API reads this to decide whether Muse should wait.
+fn persist_app_state(open: bool) {
+    let path = index_dir().join("app-state.json");
+    let Some(parent) = path.parent() else {
+        return;
+    };
+    if std::fs::create_dir_all(parent).is_err() {
+        return;
+    }
+    let body = serde_json::json!({
+        "open": open,
+        "project": current_project_root().map(|root| root.to_string_lossy().into_owned()),
+        "updated_at": rigel_core::migrate::now_ms(),
+    });
+    let temp = path.with_extension("json.tmp");
+    if std::fs::write(&temp, body.to_string()).is_ok() {
+        let _ = std::fs::rename(&temp, &path);
+    }
+}
+
+/// Restart a room harness this window started when it stays busy without posting a reply.
+/// The API runs the same watcher for the agents it started; each process can only restart its
+/// own wrappers, because the room status carries no pid.
+fn watch_room_agents() {
+    if std::env::var("RIGEL_ROOM_WATCHDOG")
+        .map(|value| value.trim() == "0")
+        .unwrap_or(false)
+    {
+        return;
+    }
+    let stuck_after = std::env::var("RIGEL_ROOM_STUCK_SECS")
+        .ok()
+        .and_then(|value| value.trim().parse::<u64>().ok())
+        .filter(|seconds| *seconds >= 30)
+        .map(Duration::from_secs)
+        .unwrap_or(Duration::from_secs(900));
+    let state = Arc::new(Mutex::new(rigel_core::agent::agentchat::Watchdog::default()));
+    rigel_core::agent::agentchat::spawn_watchdog(
+        state,
+        || current_project_root().map(|path| path.to_string_lossy().into_owned()),
+        stuck_after,
+        Duration::from_secs(30),
+    );
 }
 
 pub(crate) fn current_project_root() -> Option<PathBuf> {
@@ -1786,6 +2343,100 @@ pub(crate) fn current_project_root() -> Option<PathBuf> {
 #[tauri::command]
 fn watch_project(project: String) {
     remember_project(Path::new(&project));
+}
+
+/// Who leads a Swarm. Rigel is the Muse coordinator; a model override asks that same coordinator
+/// to think with a particular model. Broadcast has no boss and is sent by the window directly.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "lowercase")]
+enum SwarmLead {
+    Rigel,
+    Broadcast,
+    Model { provider: String, model: String },
+}
+
+/// Queue one Swarm task for Rigel, the Muse coordinator. The API holds the JSON file until Muse
+/// claims it, so the window does not need to know whether Muse is connected right now. The job
+/// names the project, the room agents the preflight chose, and the big-boss choice; Muse decides
+/// how to split the work.
+#[tauri::command]
+fn swarm_enqueue(
+    project: String,
+    task: String,
+    targets: Vec<String>,
+    lead: Option<SwarmLead>,
+) -> Result<String, String> {
+    let root = PathBuf::from(project.trim());
+    if !root.is_dir() {
+        return Err("Open a project before starting a swarm.".to_string());
+    }
+    let task = task.trim().to_string();
+    if task.is_empty() {
+        return Err("Type the swarm task first.".to_string());
+    }
+    if task.chars().count() > 20_000 {
+        return Err("The swarm task is longer than 20,000 characters.".to_string());
+    }
+    let mut unique: Vec<String> = Vec::new();
+    for target in targets {
+        let target = target.trim().to_string();
+        if target.is_empty() || unique.iter().any(|known| known == &target) {
+            continue;
+        }
+        if target.chars().count() > 40 || target.chars().any(char::is_control) {
+            return Err(format!("{target} is not a valid room agent name"));
+        }
+        unique.push(target);
+    }
+    if unique.is_empty() {
+        return Err("Pick at least one room agent for the swarm.".to_string());
+    }
+
+    let lead = match lead.unwrap_or(SwarmLead::Rigel) {
+        SwarmLead::Broadcast => {
+            return Err(
+                "A broadcast swarm is sent directly to the room, not queued for Rigel.".to_string(),
+            );
+        }
+        SwarmLead::Rigel => SwarmLead::Rigel,
+        SwarmLead::Model { provider, model } => {
+            let provider = provider.trim().to_ascii_lowercase();
+            if providers::find(&provider).is_none() {
+                return Err(providers::unknown_provider(&provider));
+            }
+            let model = model.trim().to_string();
+            if model.is_empty() {
+                return Err("Pick the model Rigel should use as the big boss.".to_string());
+            }
+            if model.chars().count() > 200 {
+                return Err("The big boss model id is longer than 200 characters.".to_string());
+            }
+            SwarmLead::Model { provider, model }
+        }
+    };
+
+    let inbox = index_dir().join("swarm").join("inbox");
+    fs::create_dir_all(&inbox).map_err(message)?;
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_nanos())
+        .unwrap_or(0);
+    let id = format!("swarm-{stamp}-{}", std::process::id());
+    let body = serde_json::json!({
+        "id": id,
+        "project": root.to_string_lossy(),
+        "prompt": task,
+        "targets": unique,
+        "lead": lead,
+        "created_at": rigel_core::migrate::now_ms(),
+    });
+    let path = inbox.join(format!("{id}.json"));
+    let temp = inbox.join(format!("{id}.json.tmp"));
+    fs::write(&temp, body.to_string()).map_err(message)?;
+    fs::rename(&temp, &path).map_err(message)?;
+    // The room bridge forwards every agent's subsequent output. Queueing the job itself remains
+    // local and durable; Muse is woken by the domain request the operator/bridge sends.
+    Ok(id)
 }
 
 #[tauri::command]
@@ -2032,6 +2683,44 @@ fn turn_cancel(state: State<'_, AppRuntime>, turn: String) -> Result<(), String>
     Ok(())
 }
 
+/// Q254: pause at the next step boundary. The same turn row and message list are kept.
+#[tauri::command]
+fn turn_pause(state: State<'_, AppRuntime>, turn: String) -> Result<(), String> {
+    state.cancels.pause_turn(&turn);
+    Ok(())
+}
+
+#[tauri::command]
+fn turn_resume(state: State<'_, AppRuntime>, turn: String) -> Result<(), String> {
+    state.cancels.resume_turn(&turn);
+    Ok(())
+}
+
+/// Q39: queue a user note for the running turn; it lands at the next step boundary.
+#[tauri::command]
+fn turn_steer(state: State<'_, AppRuntime>, turn: String, text: String) -> Result<bool, String> {
+    Ok(state.cancels.steer(&turn, &text))
+}
+
+/* --------------------------------- network -------------------------------- */
+
+/// Q240: the project-local kill switch and origin allowlist. The same file is read by
+/// `Tools::new`, so the window and CLI cannot disagree about the policy.
+#[tauri::command]
+fn network_get(project: String) -> Result<NetworkPolicy, String> {
+    Ok(NetworkPolicy::load(Path::new(&project)))
+}
+
+#[tauri::command]
+fn network_set(project: String, policy: NetworkPolicy) -> Result<NetworkPolicy, String> {
+    let root = Path::new(&project);
+    if !root.is_dir() {
+        return Err("open a project before changing its network policy".to_string());
+    }
+    policy.save(root)?;
+    Ok(policy)
+}
+
 /* --------------------------------- budget -------------------------------- */
 
 /// Price the first step of a turn before it is sent. Reads only: no turn row, no spend.
@@ -2044,6 +2733,7 @@ fn turn_estimate(
     session: String,
     prompt: String,
     model: Option<String>,
+    provider: Option<String>,
     effort: Option<String>,
 ) -> Result<TurnQuote, String> {
     tauri::async_runtime::block_on(async move {
@@ -2051,13 +2741,14 @@ fn turn_estimate(
             .await
             .map_err(message)?;
         let settings = load_settings();
-        let provider = settings.provider.trim().to_lowercase();
+        let route = rigel_core::agent::routing::resolve(
+            &settings.provider,
+            &settings.model,
+            provider.as_deref(),
+            model.as_deref(),
+        )?;
         let effort = effort.unwrap_or_else(|| settings.effort.clone());
-        let model_name = wire_model(
-            &model.unwrap_or_else(|| configured_model(&settings, &provider)),
-            &effort,
-            &provider,
-        );
+        let model_name = wire_model(&route.model, &effort, &route.provider);
         let context_chars = fixed_context_chars(&model_name);
         BudgetService::with_null_interrupt(service.pool().clone())
             .quote_session(&session, &model_name, context_chars, &prompt)
@@ -2211,6 +2902,20 @@ fn plan_set(
     })
 }
 
+/// Roadmap 42: every subagent graph in this session, with its edges and states.
+#[tauri::command]
+fn subagent_graph(
+    project: String,
+    session: String,
+) -> Result<Vec<rigel_core::SubagentGraph>, String> {
+    tauri::async_runtime::block_on(async move {
+        let service = SessionService::open(Path::new(&project))
+            .await
+            .map_err(message)?;
+        service.dag(&session).await.map_err(message)
+    })
+}
+
 /// D92: spend across every session in this project.
 #[tauri::command]
 fn spend_report(project: String) -> Result<rigel_core::spend::SpendReport, String> {
@@ -2333,6 +3038,7 @@ fn hunk_comment_deliver(
         comment.prompt(),
         None,
         None,
+        None,
     )?;
 
     tauri::async_runtime::block_on(comments.deliver(&id, &reply.turn.id)).map_err(message)?;
@@ -2382,7 +3088,12 @@ fn memory_write(
         let service = SessionService::open(Path::new(&project))
             .await
             .map_err(message)?;
-        MemoryService::new(Path::new(&project), service.pool().clone())
+        let root = PathBuf::from(&project);
+        MemoryService::new(&root, service.pool().clone())
+            .with_approval(Arc::new(WindowMemoryApprover {
+                bus: ApprovalBus::new(index_dir()),
+                project_root: root,
+            }))
             .write(&agent, &topic, &content, mode)
             .await
             .map_err(message)
@@ -2396,24 +3107,133 @@ fn key_status() -> Result<KeyStatus, String> {
     Ok(current_key_status())
 }
 
-/// Store a key from the settings form. The renderer sends it once, gets a boolean back, and
-/// clears its field; no command ever returns the secret.
+/// Store a key from the settings form. A chat provider's candidate is checked against its
+/// roster before the keychain is touched, so a rejected key leaves the previous one in place
+/// (Q244). Harness credentials are stored as before and probed by their own program.
 #[tauri::command]
-fn key_set(provider: String, value: String) -> Result<KeyStatus, String> {
+fn key_set(provider: String, value: String) -> Result<KeySetResult, String> {
     let value = value.trim();
     if value.is_empty() {
         return Err("paste a key first".to_string());
     }
+    let check = if providers::find(&provider).is_some() {
+        Some(tauri::async_runtime::block_on(catalog::validate_key(
+            &provider, value,
+        ))?)
+    } else {
+        None
+    };
     credentials::set(&provider, value).map_err(message)?;
     clear_model_cache();
-    Ok(current_key_status())
+    // A harness can become ready the moment its key lands; do not keep the old verdict cached.
+    rigel_core::agent::agentchat::clear_readiness_cache();
+    Ok(KeySetResult {
+        status: current_key_status(),
+        check,
+    })
 }
 
 #[tauri::command]
 fn key_delete(provider: String) -> Result<KeyStatus, String> {
     credentials::delete(&provider).map_err(message)?;
     clear_model_cache();
+    rigel_core::agent::agentchat::clear_readiness_cache();
     Ok(current_key_status())
+}
+
+/* -------------------------------- gravity -------------------------------- */
+
+/// The opt-in Gravity integration, as Settings sees it. The broker URL, never a publisher key.
+#[derive(Debug, Clone, Serialize)]
+pub struct GravityStatus {
+    pub enabled: bool,
+    pub test_ads: bool,
+    pub placement_id: String,
+    pub endpoint: String,
+}
+
+#[tauri::command]
+fn gravity_settings() -> GravityStatus {
+    let settings = load_settings();
+    GravityStatus {
+        enabled: settings.gravity_ads,
+        test_ads: settings.gravity_test_ads,
+        placement_id: rigel_core::gravity::PLACEMENT_ID.to_string(),
+        endpoint: rigel_core::gravity::shared_endpoint(),
+    }
+}
+
+/// One ad request for the Home card. Disabled means **no request at all**: the renderer gets an
+/// empty list and draws no slot. The request goes to the shared Firebase broker, so no publisher
+/// key is stored on this machine.
+#[tauri::command]
+fn gravity_ad(
+    session: String,
+    messages: Vec<rigel_core::gravity::Message>,
+    device: Option<rigel_core::gravity::Device>,
+) -> Result<Vec<rigel_core::gravity::Ad>, String> {
+    let settings = load_settings();
+    if !settings.gravity_ads {
+        return Ok(Vec::new());
+    }
+    let mut request = rigel_core::gravity::AdRequest::new(
+        session,
+        messages,
+        rigel_core::gravity::install_id(&index_dir()),
+    );
+    if let Some(device) = device {
+        request = request.with_device(device);
+    }
+    let answer = tauri::async_runtime::block_on(
+        rigel_core::gravity::SharedGravity::configured().get_ads(&request),
+    )
+    .map_err(message)?;
+    if answer.test && !settings.gravity_test_ads {
+        return Ok(Vec::new());
+    }
+    Ok(answer.ads)
+}
+
+/// Load the impression URL once, from Rust. The webview CSP forbids third-party images and
+/// connections, and the signed tracking URL should not be in the renderer anyway.
+#[tauri::command]
+fn gravity_impression(url: String) -> Result<(), String> {
+    tauri::async_runtime::block_on(rigel_core::gravity::track(&url)).map_err(message)
+}
+
+/// Record the click, then open the advertiser's landing page in the system browser. Returns the
+/// landing URL for the caller's receipt; the window itself never navigates cross-origin.
+#[tauri::command]
+fn gravity_click(url: String) -> Result<String, String> {
+    let landing = tauri::async_runtime::block_on(rigel_core::gravity::click_through(&url))
+        .map_err(message)?;
+    open_in_browser(&landing)?;
+    Ok(landing)
+}
+
+fn open_in_browser(url: &str) -> Result<(), String> {
+    #[cfg(target_os = "windows")]
+    let mut command = {
+        let mut command = std::process::Command::new("cmd");
+        command.args(["/C", "start", "", url]);
+        command
+    };
+    #[cfg(target_os = "macos")]
+    let mut command = {
+        let mut command = std::process::Command::new("open");
+        command.arg(url);
+        command
+    };
+    #[cfg(all(unix, not(target_os = "macos")))]
+    let mut command = {
+        let mut command = std::process::Command::new("xdg-open");
+        command.arg(url);
+        command
+    };
+    command
+        .spawn()
+        .map(|_| ())
+        .map_err(|error| format!("could not open the browser: {error}"))
 }
 
 /* ------------------------------- harnesses -------------------------------- */
@@ -2467,12 +3287,26 @@ fn clear_model_cache() {
 /// window and `rigel models` cannot disagree about what a provider offers.
 #[tauri::command]
 fn models_list() -> Result<Vec<ModelOption>, String> {
+    models_cached(false)
+}
+
+/// Read every roster again, ignoring the cache. The launch pass and Free mode use it so a model
+/// that disappeared (or appeared) upstream is seen the same day rather than after the next restart.
+#[tauri::command]
+fn models_refresh() -> Result<Vec<ModelOption>, String> {
+    models_cached(true)
+}
+
+fn models_cached(force: bool) -> Result<Vec<ModelOption>, String> {
     let provider = load_settings().provider.trim().to_lowercase();
     let cache = MODEL_CACHE.get_or_init(|| std::sync::Mutex::new(None));
-    if let Ok(guard) = cache.lock()
+    if !force
+        && let Ok(guard) = cache.lock()
         && let Some((read_at, cached_for, rows)) = guard.as_ref()
         && cached_for == &provider
-        && read_at.elapsed() < std::time::Duration::from_secs(300)
+        // A minute, not five: free rows churn, and a picker that shows a row the door has
+        // already dropped sends a 400 the user cannot explain.
+        && read_at.elapsed() < std::time::Duration::from_secs(60)
     {
         return Ok(rows.clone());
     }
@@ -2488,9 +3322,14 @@ fn models_list() -> Result<Vec<ModelOption>, String> {
 
 /// Effort is its own setting (D28). OmniRoute happens to encode the same value in the model
 /// id, so when a picked id already carries an effort suffix, keep the two consistent on the
-/// wire rather than sending a request that contradicts itself.
+/// wire rather than sending a request that contradicts itself. A `-tiered` id names the family,
+/// not a tier: it stays intact, and the tier travels as `reasoning_effort`.
 fn wire_model(model: &str, effort: &str, provider: &str) -> String {
     if provider != "omniroute" {
+        return model.to_string();
+    }
+    // Do not invent `...-tiered-low`; the effort field is the tier.
+    if model.ends_with("-tiered") {
         return model.to_string();
     }
     for suffix in ["-minimal", "-low", "-medium", "-high", "-xhigh"] {
@@ -2556,17 +3395,51 @@ fn chat_attachment(url: String) -> Result<String, String> {
 
 /// A user message over the vendor websocket, exactly like the browser does it.
 #[tauri::command]
-fn chat_send(channel: String, text: String) -> Result<(), String> {
-    tauri::async_runtime::block_on(rigel_core::agent::agentchat::send(&text, &channel))
+fn chat_send(channel: String, text: String) -> Result<serde_json::Value, String> {
+    tauri::async_runtime::block_on(async move {
+        rigel_core::agent::agentchat::send(&text, &channel).await?;
+        let Some(project) = current_project_root() else {
+            return Ok(serde_json::json!({
+                "sent": true,
+                "kicked": false,
+                "reason": "no project is open",
+            }));
+        };
+        let kickoff = rigel_core::swarm::kick_off_muse(&index_dir(), &project, &text).await?;
+        Ok(serde_json::json!({
+            "sent": true,
+            "kicked": kickoff.job_id.is_some(),
+            "job_id": kickoff.job_id,
+            "targets": kickoff.targets,
+            "missing": kickoff.missing,
+            "duplicates": kickoff.duplicates,
+        }))
+    })
 }
 
 /// Start the room's agents on a hidden console — they work, nothing opens on screen.
 /// Returns the labels launched; an empty list means every agent was already in the room.
 #[tauri::command]
 fn chat_start_agents(project: Option<String>) -> Result<Vec<String>, String> {
-    tauri::async_runtime::block_on(rigel_core::agent::agentchat::start_agents(
+    let free = free_swarm_agent(&load_settings());
+    tauri::async_runtime::block_on(rigel_core::agent::agentchat::start_agents_with_free(
         project.as_deref(),
+        free.as_ref(),
     ))
+}
+
+/// Swarm, Free mode: put the model Free mode chose in the room as `@rigel-free`. Returns `None`
+/// when Free mode is off or the chosen door cannot be reached over an OpenAI-compatible API.
+#[tauri::command]
+fn chat_start_free(project: Option<String>) -> Result<Option<String>, String> {
+    let Some(free) = free_swarm_agent(&load_settings()) else {
+        return Ok(None);
+    };
+    tauri::async_runtime::block_on(rigel_core::agent::agentchat::start_free_agent(
+        project.as_deref(),
+        &free,
+    ))
+    .map(Some)
 }
 
 /// The harness processes Rigel started and still holds. The roster offers Stop only for these;
@@ -2579,8 +3452,15 @@ fn chat_launched() -> Vec<rigel_core::agent::agentchat::ChatProcess> {
 /// The harnesses the checkout configures, ready or not, so the roster can offer a per-agent start
 /// and say why one cannot start.
 #[tauri::command]
-fn chat_harnesses(project: Option<String>) -> Vec<rigel_core::agent::agentchat::ChatHarness> {
-    rigel_core::agent::agentchat::configured(project.as_deref())
+fn chat_harnesses(
+    project: Option<String>,
+    force: Option<bool>,
+) -> Vec<rigel_core::agent::agentchat::ChatHarness> {
+    if force.unwrap_or(false) {
+        rigel_core::agent::agentchat::configured_fresh(project.as_deref())
+    } else {
+        rigel_core::agent::agentchat::configured(project.as_deref())
+    }
 }
 
 #[tauri::command]
@@ -2599,45 +3479,54 @@ fn chat_stop_agent(name: String) -> Result<String, String> {
 
 /* ------------------------------ prompt refine ----------------------------- */
 
-/// Tighten a composer draft before it is sent, on the cheap subagent model. It returns
-/// questions and a proposed brief and never sends anything: the window shows both as a review
-/// card and the send button stays the user's. This call is outside any session budget, so the
-/// card shows what it cost on its own.
+/// Refinement is a fixed, small job: a cheap Antigravity model on the local router. Keeping it
+/// off the turn's selected door means tidying a draft for the `rigel` agent never spends a relay
+/// round-trip.
+const REFINE_PROVIDER: &str = credentials::OMNIROUTE;
+const REFINE_MODEL: &str = "antigravity/gemini-3.8-flash-tiered";
+
+/// Tighten a composer draft before it is sent, on that fixed cheap, tiered model. It returns questions
+/// and a proposed brief and never sends anything: the window shows both as a review card and the
+/// send button stays the user's. This call is outside any session budget, so the card shows what
+/// it cost on its own.
 #[tauri::command]
 fn prompt_refine(
     project: Option<String>,
     request: rigel_core::agent::RefineRequest,
 ) -> Result<rigel_core::agent::Refinement, String> {
-    let settings = load_settings();
-    let provider = settings.provider.trim().to_lowercase();
-    // Use the model the session already uses, on the same wire shape. The old hard-coded
-    // subagent model was often an OpenAI id on an OmniRoute install with no OpenAI credentials,
-    // so every send opened the review card with a 401 before the user could reach the agent.
-    let model_name = wire_model(
-        &configured_model(&settings, &provider),
-        &settings.effort,
-        &provider,
-    );
-    if model_name.trim().is_empty() {
-        return Err(format!(
-            "no model chosen for `{provider}`; pick one in the model picker"
-        ));
-    }
+    let model_name = REFINE_MODEL.to_string();
+    // The composer's effort is the tier a tiered model runs at; it stays on the wire, not in
+    // the id.
+    let effort = load_settings().effort;
     let model: Arc<dyn Model> = tauri::async_runtime::block_on(providers::build(
-        &provider,
+        REFINE_PROVIDER,
         &credentials::KeychainCredentialStore,
-    ))?;
+    ))
+    .map_err(|error| {
+        format!("the refiner could not start on {REFINE_PROVIDER}/{REFINE_MODEL}: {error}")
+    })?;
 
-    let refiner = rigel_core::agent::PromptRefiner::new(model, model_name);
+    let refiner = rigel_core::agent::PromptRefiner::new(model, model_name).with_effort(effort);
     let root = project.map(PathBuf::from);
-    tauri::async_runtime::block_on(async move {
+    let outcome = tauri::async_runtime::block_on(async move {
         tokio::time::timeout(
             std::time::Duration::from_secs(30),
             refiner.refine(&request, root.as_deref()),
         )
         .await
         .map_err(|_| "the refiner took too long; send the draft as it is".to_string())?
-    })
+    })?;
+    // A retired Antigravity client answers with an upgrade notice instead of JSON. Treat it as
+    // a failed refinement: auto-refine must send the draft the user typed, never that notice.
+    let unavailable = outcome.refined.to_ascii_lowercase();
+    if unavailable.contains("antigravity") && unavailable.contains("no longer supported") {
+        return Err(
+            "the installed Antigravity version is no longer supported; update it at \
+             https://antigravity.google/download"
+                .to_string(),
+        );
+    }
+    Ok(outcome)
 }
 
 /* -------------------------------- settings ------------------------------- */
@@ -2653,10 +3542,21 @@ fn settings_set(mut settings: Settings) -> Result<Settings, String> {
     if providers::find(&settings.provider).is_none() {
         return Err(providers::unknown_provider(&settings.provider));
     }
+    // `Vertex` and ` vertex ` name the same door; the file should say so, because a hand-edited
+    // settings file is otherwise reported as an unknown provider on the next note.
+    settings.provider = settings.provider.trim().to_ascii_lowercase();
+    settings.model = settings.model.trim().to_string();
     if !valid_effort(&settings.effort) {
         return Err(format!(
             "unknown effort `{}`; use low, medium or high",
             settings.effort
+        ));
+    }
+    settings.swarm_lead = settings.swarm_lead.trim().to_ascii_lowercase();
+    if !matches!(settings.swarm_lead.as_str(), "muse" | "broadcast") {
+        return Err(format!(
+            "unknown swarm lead `{}`; use muse or broadcast",
+            settings.swarm_lead
         ));
     }
     // A settings file is editable by hand, so the numbers are clamped here rather than trusted:
@@ -2680,6 +3580,34 @@ fn settings_set(mut settings: Settings) -> Result<Settings, String> {
     // The next turn reads this from the core, not from the file, so a save takes effect at once.
     vertex::set_project_override(Some(&settings.vertex_project));
     Ok(settings)
+}
+
+/// Free mode: test the best-benchmarked tool-capable free models and save the best one that
+/// answers.
+///
+/// The result carries every attempt, so the window can say what it skipped and why (a 429 from a
+/// shared pool reads differently from a 401 on a key). Saving goes through `settings_set`, which
+/// is the same path a manual pick uses, so the composer and the next turn cannot disagree.
+#[tauri::command]
+fn free_mode() -> Result<rigel_core::agent::FreeChoice, String> {
+    let current = load_settings().provider.trim().to_lowercase();
+    let choice = tauri::async_runtime::block_on(async {
+        tokio::time::timeout(
+            std::time::Duration::from_secs(285),
+            rigel_core::agent::freemode::pick(&current, &credentials::KeychainCredentialStore),
+        )
+        .await
+        .map_err(|_| "Free mode reached its five-minute limit; no model was changed".to_string())?
+    })?;
+    let mut settings = load_settings();
+    settings.provider = choice.provider.clone();
+    settings.model = choice.model.clone();
+    settings.free_mode = true;
+    settings_set(settings)?;
+    // The picker must show the same fresh free/paid labels the selection pass just used. Clear the
+    // old minute cache; its next open performs a live read with the persisted winning provider first.
+    clear_model_cache();
+    Ok(choice)
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -3166,7 +4094,9 @@ fn warm_skills() {
             };
             let _ = runtime.block_on(async move {
                 let index = SkillIndex::open(&index_dir()).await?;
-                index.refresh_stale().await
+                // Forced, GitHub repositories included: a shelf that was fresh on the last
+                // launch is still checked against its remote on this one.
+                index.refresh_all().await
             });
         })
         .ok();
@@ -3179,7 +4109,8 @@ fn warm_models() {
     std::thread::Builder::new()
         .name("rigel-models".to_string())
         .spawn(|| {
-            let _ = models_list();
+            // Forced: this pass exists to replace whatever the cache held, not to trust it.
+            let _ = models_refresh();
         })
         .ok();
 }
@@ -3200,6 +4131,9 @@ fn servers_start(project: Option<String>) {
 /// only when the tray was built, so a platform that refuses a tray keeps a working close button
 /// instead of stranding a hidden process with no way back.
 static TRAY_READY: AtomicBool = AtomicBool::new(false);
+/// The window heartbeat keeps `app-state.json` fresh while this process is alive. A crashed
+/// window stops refreshing it, so the API can report the app closed without an exit hook.
+static APP_OPEN: AtomicBool = AtomicBool::new(false);
 /// Set by the tray's Quit item and by an update that needs the executable replaced. A close
 /// request is allowed through once this is true, so shutdown is never trapped by the hide.
 static SHUTTING_DOWN: AtomicBool = AtomicBool::new(false);
@@ -3318,8 +4252,28 @@ pub fn run() {
             if let Err(problem) = install_tray(app.handle()) {
                 eprintln!("rigel: tray icon not installed: {problem}");
             }
+            // The window driver attaches to a single webview, and the tray is a second one; it
+            // would be the target it lands on. A shipped build keeps both windows.
+            if std::env::var_os("RIGEL_E2E_PROJECT").is_some()
+                && let Some(tray) = app.get_webview_window("tray")
+            {
+                let _ = tray.destroy();
+            }
             std::thread::spawn(tray_status::warm);
+            relay::start(index_dir(), current_project_root);
+            // The window is the supervisor the user actually keeps running: it starts the API on
+            // launch and again after a crash, so a reboot no longer leaves Muse with a refusal.
+            control::start(index_dir(), current_project_root);
+            watch_room_agents();
             warm_router();
+            APP_OPEN.store(true, Ordering::SeqCst);
+            persist_app_state(true);
+            std::thread::spawn(|| {
+                while APP_OPEN.load(Ordering::SeqCst) {
+                    persist_app_state(true);
+                    std::thread::sleep(Duration::from_secs(10));
+                }
+            });
             spawn_approval_watcher(app.handle().clone());
             spawn_conflict_watcher(app.handle().clone());
             Ok(())
@@ -3354,7 +4308,16 @@ pub fn run() {
             session_list,
             session_rename,
             session_pin,
+            session_skill_pins,
+            session_skill_pin,
+            session_skill_unpin,
+            session_skill_review,
+            session_skill_keep,
+            session_skill_keep_all,
+            session_skill_update,
+            session_skill_update_all,
             session_archive,
+            session_delete,
             bookmark_list,
             bookmark_toggle,
             patch_provenance,
@@ -3369,8 +4332,11 @@ pub fn run() {
             browser_image,
             search_all,
             session_resume,
+            session_recovery,
+            turn_discard,
             diagnostics_export,
             session_export,
+            tests_run,
             rules_sources,
             pull_request_plan,
             pull_request_create,
@@ -3383,9 +4349,15 @@ pub fn run() {
             agent_stop,
             turn_send,
             turn_cancel,
+            turn_pause,
+            turn_resume,
+            turn_steer,
+            network_get,
+            network_set,
             approval_pending,
             approval_answer,
             watch_project,
+            swarm_enqueue,
             claim_list,
             writable_list,
             writable_diff,
@@ -3411,18 +4383,33 @@ pub fn run() {
             key_status,
             key_set,
             key_delete,
+            gravity_settings,
+            gravity_ad,
+            gravity_impression,
+            gravity_click,
             plan_get,
             plan_set,
+            subagent_graph,
             role_presets,
             role_apply,
             spend_report,
             task_cap_set,
             harness_probe,
             providers_list,
+            routing_policy,
+            custom_provider_get,
+            custom_provider_probe,
+            custom_provider_save,
+            route_explain,
+            e2e_config,
             servers_start,
             omniroute_status,
             omniroute_start,
             models_list,
+            models_refresh,
+            provider_health,
+            model_capabilities,
+            free_mode,
             chat_status,
             chat_start,
             chat_channels,
@@ -3431,10 +4418,13 @@ pub fn run() {
             chat_attachment,
             chat_send,
             chat_start_agents,
+            chat_start_free,
             chat_launched,
             chat_harnesses,
             chat_start_agent,
             chat_stop_agent,
+            concord::concord_inbox,
+            concord::concord_reply,
             terminal::terminal_open,
             terminal::terminal_write,
             terminal::terminal_resize,
@@ -3491,6 +4481,8 @@ pub fn run() {
             // The agents are this app's children; without this, closing the window leaves hidden
             // wrappers holding room slots that the next launch cannot clean up.
             if matches!(event, tauri::RunEvent::Exit) {
+                APP_OPEN.store(false, Ordering::SeqCst);
+                persist_app_state(false);
                 rigel_core::agent::agentchat::stop_all();
                 terminal::close_all();
             }
@@ -3500,6 +4492,57 @@ pub fn run() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_refiner_is_the_cheap_antigravity_model_on_the_local_router() {
+        let spec = providers::find(REFINE_PROVIDER).expect("the local router is a provider");
+        assert!(REFINE_MODEL.starts_with("antigravity/"));
+        assert!(REFINE_MODEL.contains("3.8-flash-tiered"));
+        assert!(providers::is_model(spec, REFINE_MODEL));
+    }
+
+    #[test]
+    fn a_tiered_id_keeps_its_id_and_effort_is_sent_separately() {
+        assert_eq!(
+            wire_model("antigravity/gemini-3.8-flash-tiered", "low", "omniroute"),
+            "antigravity/gemini-3.8-flash-tiered"
+        );
+        assert_eq!(
+            wire_model("antigravity/gemini-3.7-flash-low", "high", "omniroute"),
+            "antigravity/gemini-3.7-flash-high"
+        );
+        assert_eq!(
+            wire_model("antigravity/gemini-3.8-flash-tiered", "high", "openrouter"),
+            "antigravity/gemini-3.8-flash-tiered"
+        );
+    }
+
+    #[test]
+    fn a_swarm_lead_records_who_the_big_boss_is() {
+        assert_eq!(
+            serde_json::to_value(SwarmLead::Rigel).unwrap(),
+            serde_json::json!({ "kind": "rigel" })
+        );
+        assert_eq!(
+            serde_json::to_value(SwarmLead::Model {
+                provider: "meta".to_string(),
+                model: "muse-spark-1.3".to_string(),
+            })
+            .unwrap(),
+            serde_json::json!({
+                "kind": "model",
+                "provider": "meta",
+                "model": "muse-spark-1.3"
+            })
+        );
+        let parsed: SwarmLead = serde_json::from_value(serde_json::json!({
+            "kind": "model",
+            "provider": "meta",
+            "model": "muse-spark-1.3"
+        }))
+        .unwrap();
+        assert!(matches!(parsed, SwarmLead::Model { .. }));
+    }
 
     fn path_string(path: &Path) -> String {
         path.to_string_lossy().into_owned()
@@ -3579,5 +4622,129 @@ mod tests {
         let settings: Settings = toml::from_str(old).expect("an older file should still parse");
         assert!(settings.chat_models_only);
         assert_eq!(settings.default_budget_cents, 500);
+    }
+
+    #[test]
+    fn cloud_publishing_is_off_in_fresh_and_older_settings() {
+        assert!(
+            !Settings::default().cloud_sync_sessions,
+            "publishing a transcript must be opt-in"
+        );
+        let old = "theme = \"dark\"\ndefault_budget_cents = 500\nunattended_default = false\n";
+        let settings: Settings = toml::from_str(old).expect("an older file should still parse");
+        assert!(
+            !settings.cloud_sync_sessions,
+            "a file written before cloud sync existed must not silently turn it on"
+        );
+    }
+
+    #[test]
+    fn a_desktop_template_restores_a_real_pin_at_its_original_body() {
+        use rigel_core::skills::{FetchedSkill, RepoSnapshot, SkillRecord};
+        use rigel_core::{SessionTemplate, SkillIndex, TemplateSkill};
+
+        const ID: &str = "github:acme/skills:pdf/SKILL.md";
+        const OLD: &str = "---\nname: pdf-reader\ndescription: Read scanned PDFs.\n---\n# PDF reader\n\nAsk for the file, then summarise it.\n";
+        const NEW: &str = "---\nname: pdf-reader\ndescription: Read scanned PDFs.\n---\n# PDF reader\n\nAsk for the file, wait for the scan, then summarise it.\n";
+
+        fn snapshot(body: &str) -> RepoSnapshot {
+            RepoSnapshot {
+                source: "github".to_string(),
+                repo: "acme/skills".to_string(),
+                branch: "main".to_string(),
+                stars: 0,
+                license: None,
+                truncated: false,
+                found: 1,
+                http_requests: 0,
+                skills: vec![FetchedSkill {
+                    record: SkillRecord {
+                        id: ID.to_string(),
+                        name: "pdf-reader".to_string(),
+                        description: "Read scanned PDFs.".to_string(),
+                        source: "github".to_string(),
+                        repo: Some("acme/skills".to_string()),
+                        path: Some("pdf/SKILL.md".to_string()),
+                        url: None,
+                        body_sha: None,
+                        grade: None,
+                        grade_scope: None,
+                        license: None,
+                        stars: None,
+                        installs: None,
+                        tokens: None,
+                        capabilities: Vec::new(),
+                        simhash: None,
+                    },
+                    body: body.to_string(),
+                }],
+            }
+        }
+
+        let tmp = tempfile::tempdir().unwrap();
+        let index_root = tmp.path().join("index");
+        let project_path = tmp.path().join("project");
+        fs::create_dir_all(&project_path).unwrap();
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let index = runtime.block_on(SkillIndex::open(&index_root)).unwrap();
+        runtime.block_on(index.ingest(&snapshot(OLD))).unwrap();
+        let (_, old_sha) = runtime.block_on(index.body(ID)).unwrap().unwrap();
+
+        let previous = std::env::var_os("RIGEL_INDEX_DIR");
+        // SAFETY: this test is the only app test that reads `RIGEL_INDEX_DIR`, and it restores
+        // the value before returning. The desktop command wrappers are the subject here.
+        unsafe { std::env::set_var("RIGEL_INDEX_DIR", &index_root) };
+        let project = path_string(&project_path);
+
+        let original = session_start(project.clone(), Some("original".to_string()), None).unwrap();
+        let pinned =
+            session_skill_pin(project.clone(), original.id.clone(), ID.to_string(), None).unwrap();
+        assert_eq!(pinned.body_sha, old_sha);
+
+        let saved = template_save(
+            project.clone(),
+            SessionTemplate {
+                id: String::new(),
+                name: "PDF review".to_string(),
+                model: None,
+                effort: None,
+                max_steps: None,
+                agents: Vec::new(),
+                skills: vec![TemplateSkill {
+                    skill_id: ID.to_string(),
+                    body_sha: old_sha.clone(),
+                }],
+                prompt: "Read the scan.".to_string(),
+                created_at: 0,
+            },
+        )
+        .unwrap();
+
+        // The shelf moves after the template was saved. The start loop in SessionView pins each
+        // template skill by its recorded hash, so the new session must read the old body.
+        runtime.block_on(index.ingest(&snapshot(NEW))).unwrap();
+        let started = session_start(project.clone(), Some(saved.name.clone()), None).unwrap();
+        for skill in &saved.skills {
+            session_skill_pin(
+                project.clone(),
+                started.id.clone(),
+                skill.skill_id.clone(),
+                Some(skill.body_sha.clone()),
+            )
+            .unwrap();
+        }
+
+        let pins = session_skill_pins(project.clone(), started.id.clone()).unwrap();
+        assert_eq!(pins.len(), 1);
+        assert_eq!(pins[0].body_sha, old_sha);
+        assert!(pins[0].changed);
+        let review = session_skill_review(project, started.id, ID.to_string()).unwrap();
+        assert_eq!(review.pinned_body.as_deref(), Some(OLD));
+        assert_eq!(review.current_body.as_deref(), Some(NEW));
+
+        match previous {
+            Some(value) => unsafe { std::env::set_var("RIGEL_INDEX_DIR", value) },
+            None => unsafe { std::env::remove_var("RIGEL_INDEX_DIR") },
+        }
     }
 }
