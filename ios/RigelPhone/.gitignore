@@ -10,3 +10,4 @@ DerivedData/
 # xtool writes the editor's build-server support file on the next build
 /.bsp
 /xtool
+.env

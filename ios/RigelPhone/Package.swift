@@ -42,7 +42,10 @@ if appTargetIncluded {
     targets.insert(
         .target(
             name: "RigelPhone",
-            dependencies: ["RigelRoomKit"]
+            dependencies: [
+                "RigelRoomKit",
+                .product(name: "PostHog", package: "posthog-ios"),
+            ]
         ),
         at: 0
     )
@@ -55,5 +58,8 @@ let package = Package(
         .macOS(.v14),
     ],
     products: products,
+    dependencies: [
+        .package(url: "https://github.com/PostHog/posthog-ios.git", from: "3.59.3"),
+    ],
     targets: targets
 )

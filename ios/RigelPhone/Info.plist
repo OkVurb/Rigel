@@ -22,6 +22,10 @@
 	<string>1</string>
 	<key>LSRequiresIPhoneOS</key>
 	<true/>
+	<key>POSTHOG_PROJECT_TOKEN</key>
+	<string>phc_ofYydyasy2LfAgeEfyrJyywcaTgfMrdsKUxGekvETPxj</string>
+	<key>POSTHOG_HOST</key>
+	<string>https://us.i.posthog.com</string>
 
 	<!-- The room is plain HTTP on the computer's LAN or Tailscale address
 	     (`http://192.168.1.42:8300`), which ATS blocks by default. The
