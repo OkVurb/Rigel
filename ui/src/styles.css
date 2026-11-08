@@ -1,0 +1,62 @@
+
+/* Roadmap 42: the parent turn's subagent graph and its edges. */
+.subagent-graph {
+  margin: 8px 0 12px 76px;
+  padding: 8px 10px;
+  border: 1px solid var(--hairline);
+  border-radius: 5px;
+  background: var(--surface);
+}
+.subagent-graph-head {
+  display: flex;
+  gap: 8px;
+  align-items: baseline;
+  margin-bottom: 6px;
+}
+.subagent-graph-nodes {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 4px;
+}
+.subagent-graph-nodes li {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: baseline;
+  font-size: 12px;
+}
+.subagent-node-id {
+  font-weight: 600;
+}
+.subagent-state {
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--muted);
+}
+.subagent-state.done {
+  color: var(--ok, var(--verified));
+}
+.subagent-state.failed,
+.subagent-state.blocked,
+.subagent-state.cancelled {
+  color: var(--bad, var(--danger));
+}
+.subagent-state.running {
+  color: var(--warn, var(--accent-text));
+}
+.subagent-detail {
+  width: 100%;
+  color: var(--muted);
+}
+.subagent-edges {
+  margin: 6px 0 0;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+.subagent-edge {
+  color: var(--muted);
+}

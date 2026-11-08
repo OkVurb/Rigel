@@ -11,7 +11,9 @@ import type {
   Item,
   Patch,
   PendingApproval,
+  RecoveryOffer,
   Session,
+  SubagentGraph,
   Turn,
   TurnTranscript,
 } from "./api";
@@ -35,6 +37,21 @@ export const previewSession: Session = {
   archived_at: null,
 };
 
+/** A second, archived sample so the delete path is reachable without closing the open session. */
+export const previewArchivedSession: Session = {
+  ...previewSession,
+  id: "7c1e4a3d-0000-4000-8000-000000000001",
+  title: "Retired smoke session",
+  status: "ended",
+  spend_cents: 0,
+  spend_micros: 0,
+  interventions: 0,
+  tasks_done: 0,
+  created_at: ago(1_440),
+  ended_at: ago(1_430),
+  archived_at: ago(60),
+};
+
 export const previewAgents: Agent[] = [
   {
     id: "agent-preview-worker",
@@ -48,6 +65,8 @@ export const previewAgents: Agent[] = [
     spend_micros: 31_400,
     tokens_in: 18_420,
     tokens_out: 1_240,
+    claims_held: 0,
+    claims_stale: 0,
   },
   {
     id: "agent-preview-reader",
@@ -61,6 +80,8 @@ export const previewAgents: Agent[] = [
     spend_micros: 1_200,
     tokens_in: 2_900,
     tokens_out: 180,
+    claims_held: 0,
+    claims_stale: 0,
   },
   // A harness agent the window can send to (P4.6/P4.10): no "observed only" label, and the
   // composer's picker will find it by harness.
@@ -76,6 +97,8 @@ export const previewAgents: Agent[] = [
     spend_micros: 2_400,
     tokens_in: 3_100,
     tokens_out: 240,
+    claims_held: 0,
+    claims_stale: 0,
   },
 ];
 
@@ -231,7 +254,7 @@ const turnReview: Turn = {
   stop_reason: "completed",
 };
 
-export const previewTranscript: TurnTranscript[] = [
+const previewTranscriptBase: TurnTranscript[] = [
   { turn: turnOne, items },
   {
     turn: turnTwo,
@@ -324,6 +347,74 @@ export const previewTranscript: TurnTranscript[] = [
   },
 ];
 
+const degradedTurn: Turn = {
+  id: "turn-preview-degraded",
+  agent_id: "agent-preview-worker",
+  parent_turn_id: null,
+  seq: 3,
+  status: "failed",
+  prompt: "Check the resume path after the last patch.",
+  started_at: ago(1),
+  completed_at: ago(1),
+  usage: null,
+  stop_reason: "model_error",
+};
+
+const degradedItems: Item[] = [
+  {
+    id: "item-preview-degraded-1",
+    turn_id: degradedTurn.id,
+    seq: 1,
+    kind: "error",
+    status: "error",
+    body: {
+      message: "provider returned 503: the selected door is temporarily unavailable",
+      model: "anthropic/claude-sonnet-4.5",
+    },
+    created_at: ago(1),
+  },
+];
+
+const showDegraded =
+  typeof window !== "undefined" &&
+  window.localStorage?.getItem("rigel.preview.degraded") === "1";
+
+export const previewTranscript: TurnTranscript[] = showDegraded
+  ? [...previewTranscriptBase, { turn: degradedTurn, items: degradedItems }]
+  : previewTranscriptBase;
+
+/** Roadmap 42: the first node finished, the dependent is running and the edge is explicit. */
+export const previewSubagentGraph: SubagentGraph[] = [
+  {
+    parent_turn_id: turnOne.id,
+    nodes: [
+      { id: "reader", role: "reader", depends_on: [], state: "done", detail: null },
+      {
+        id: "verifier",
+        role: "verifier",
+        depends_on: ["reader"],
+        state: "running",
+        detail: null,
+      },
+    ],
+  },
+];
+
+/** Roadmap 37's sample crash: a turn that was running when the process ended. */
+export const previewRecovery: RecoveryOffer = {
+  session_id: previewSession.id,
+  turns: [
+    {
+      ...turnOne,
+      id: "turn-preview-crashed",
+      seq: 3,
+      status: "running",
+      completed_at: null,
+      stop_reason: null,
+    },
+  ],
+};
+
 export const previewBudget: BudgetSnapshot = {
   session_id: previewSession.id,
   agent_id: previewAgents[0].id,
@@ -365,8 +456,17 @@ export const previewApprovals: PendingApproval[] = [
       project_root: "/work/rigel",
       timeout_secs: 120,
       destructive: [],
+      dry_run: {
+        command: "git clean -ndx",
+        supported: true,
+        output: "Would remove src/tmp.txt",
+        note: null,
+      },
       deliberation: null,
     },
     requested_at: Date.now(),
+    // The asking surface always records the agent (D154), so the sample does too: Q246's Retry
+    // has someone to ask again.
+    agent_id: "agent-preview-worker",
   },
 ];

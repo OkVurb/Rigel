@@ -19,7 +19,7 @@ import "@xterm/xterm/css/xterm.css";
 
 import { api, isTauri, type Settings, type TerminalOutput } from "./api";
 import { useMenu } from "./menu";
-import { currentTheme, type Theme } from "./theme";
+import { currentTheme, type ResolvedTheme } from "./theme";
 
 /**
  * Two complete ANSI palettes, one per theme (D126). xterm draws its own canvas, so it cannot
@@ -27,7 +27,7 @@ import { currentTheme, type Theme } from "./theme";
  * entry below is at least 4.5:1 on its background, including the dim slots a prompt uses for
  * metadata — otherwise `ls` colours would go soft the moment the window turned light.
  */
-const TERMINAL_THEMES: Record<Theme, ITheme> = {
+const TERMINAL_THEMES: Record<ResolvedTheme, ITheme> = {
   dark: {
     background: "#0b0c0e",
     foreground: "#e6e8eb",
@@ -83,7 +83,7 @@ const FONT_STACK = "JetBrains Mono, Cascadia Mono, SFMono-Regular, Consolas, mon
  * apart. `letterSpacing: 0` and an integral font size keep the cell grid exact — a fractional
  * advance is what makes a terminal look blurry and its last row half-drawn.
  */
-function terminalOptions(settings: Settings | null, theme: Theme) {
+function terminalOptions(settings: Settings | null, theme: ResolvedTheme) {
   return {
     allowProposedApi: true,
     convertEol: false,
@@ -122,11 +122,13 @@ export default function TerminalView({ project }: { project: string | null }) {
   const settingsRef = useRef<Settings | null>(null);
   const [generation, setGeneration] = useState(0);
   const [settings, setSettings] = useState<Settings | null>(null);
-  const [theme, setTheme] = useState<Theme>(() => currentTheme());
+  const [theme, setTheme] = useState<ResolvedTheme>(() => currentTheme());
   const [shell, setShell] = useState<string | null>(null);
   const [cwd, setCwd] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [live, setLive] = useState(false);
+  const [size, setSize] = useState<{ cols: number; rows: number } | null>(null);
+  const [flash, setFlash] = useState<string | null>(null);
 
   // Settings arrive after the first paint; the terminal is created with whatever is known then
   // and re-styled in place, so a slow settings read never restarts a running shell.
@@ -146,6 +148,20 @@ export default function TerminalView({ project }: { project: string | null }) {
     };
   }, []);
 
+  // Settings → Terminal saves through the same API call every other surface uses. Listen for the
+  // saved value so font and scrollback change on the open tab without a reload; the running shell
+  // is deliberately untouched, and the Program field starts working on the next Restart.
+  useEffect(() => {
+    const onSaved = (event: Event) => {
+      const next = (event as CustomEvent<Settings>).detail;
+      if (!next) return;
+      settingsRef.current = next;
+      setSettings(next);
+    };
+    window.addEventListener("rigel://settings", onSaved);
+    return () => window.removeEventListener("rigel://settings", onSaved);
+  }, []);
+
   // Settings → Appearance writes `<html data-theme>`; watch it here rather than threading a prop,
   // because the settings page and the terminal are separate routes under the same document.
   useEffect(() => {
@@ -161,7 +177,14 @@ export default function TerminalView({ project }: { project: string | null }) {
     if (!terminal || !settings) return;
     terminal.options.fontSize = settings.terminal_font_size;
     terminal.options.scrollback = settings.terminal_scrollback;
-    fitRef.current?.fit();
+    const frame = requestAnimationFrame(() => {
+      try {
+        fitRef.current?.fit();
+      } catch {
+        // The pane may be hidden; the resize observer fits it when it comes back.
+      }
+    });
+    return () => cancelAnimationFrame(frame);
   }, [settings]);
 
   // Recolour in place: the PTY and its scrollback survive the switch.
@@ -178,15 +201,46 @@ export default function TerminalView({ project }: { project: string | null }) {
     setShell(null);
     setCwd(null);
 
+    let disposed = false;
     const terminal = new Terminal(terminalOptions(settingsRef.current, currentTheme()));
     const fit = new FitAddon();
     terminal.loadAddon(fit);
     terminal.open(host);
-    fit.fit();
     termRef.current = terminal;
     fitRef.current = fit;
 
-    let disposed = false;
+    // Refit on every layout change — a window resize, the pane handle, focus mode, a tab switch —
+    // and once the webfont lands, because a fallback face has different cell metrics. Two frames
+    // settle a scrollbar that only appears after the first fit; a hidden pane is skipped rather
+    // than fitted to zero.
+    let fitFrame = 0;
+    let fitTimer = 0;
+    const refit = () => {
+      if (disposed || host.clientWidth < 2 || host.clientHeight < 2) return;
+      try {
+        fit.fit();
+        setSize((current) =>
+          current?.cols === terminal.cols && current?.rows === terminal.rows
+            ? current
+            : { cols: terminal.cols, rows: terminal.rows },
+        );
+      } catch {
+        // The fit addon throws while the host has no measurable box; the next resize retries.
+      }
+    };
+    const scheduleFit = () => {
+      cancelAnimationFrame(fitFrame);
+      window.clearTimeout(fitTimer);
+      fitFrame = requestAnimationFrame(() => {
+        fitFrame = requestAnimationFrame(refit);
+      });
+      // rAF pauses while the window is occluded, so a resize behind another window would keep
+      // the old cell grid until the user came back. A timer still settles it.
+      fitTimer = window.setTimeout(refit, 120);
+    };
+    refit();
+    scheduleFit();
+
     let id: string | null = null;
     let release: (() => void) | undefined;
     // PowerShell can print its first prompt before `terminal_open` has returned the id. Keep the
@@ -246,6 +300,9 @@ export default function TerminalView({ project }: { project: string | null }) {
     });
 
     const resized = terminal.onResize(({ cols, rows }) => {
+      setSize((current) =>
+        current?.cols === cols && current?.rows === rows ? current : { cols, rows },
+      );
       if (id) void api.terminal.resize(id, cols, rows).catch(() => {});
     });
 
@@ -298,16 +355,26 @@ export default function TerminalView({ project }: { project: string | null }) {
       }
     })();
 
-    const observer = new ResizeObserver(() => {
-      if (!disposed) fit.fit();
-    });
+    const observer = new ResizeObserver(scheduleFit);
     observer.observe(host);
+    window.addEventListener("resize", scheduleFit);
+    void document.fonts?.ready.then(() => {
+      if (!disposed) scheduleFit();
+    });
+    const refitWhenVisible = () => {
+      if (document.visibilityState === "visible") scheduleFit();
+    };
+    document.addEventListener("visibilitychange", refitWhenVisible);
     const focus = () => terminal.focus();
     host.addEventListener("pointerdown", focus);
 
     return () => {
       disposed = true;
+      cancelAnimationFrame(fitFrame);
+      window.clearTimeout(fitTimer);
       observer.disconnect();
+      window.removeEventListener("resize", scheduleFit);
+      document.removeEventListener("visibilitychange", refitWhenVisible);
       host.removeEventListener("pointerdown", focus);
       input.dispose();
       resized.dispose();
@@ -318,6 +385,23 @@ export default function TerminalView({ project }: { project: string | null }) {
       if (id) void api.terminal.close(id);
     };
   }, [project, generation]);
+
+  useEffect(() => {
+    if (!flash) return;
+    const timer = window.setTimeout(() => setFlash(null), 1600);
+    return () => window.clearTimeout(timer);
+  }, [flash]);
+
+  const copy = (value: string | null, label: string) => {
+    if (!value) return;
+    void navigator.clipboard.writeText(value).then(
+      () => {
+        setError(null);
+        setFlash(`${label} copied`);
+      },
+      () => setError("The clipboard is not readable in this window."),
+    );
+  };
 
   const stateClass = live ? "pill completed" : "pill cancelled";
   const hint = isTauri()
@@ -365,6 +449,50 @@ export default function TerminalView({ project }: { project: string | null }) {
 
         {error ? <p className="terminal-error">{error}</p> : null}
 
+        <div className="terminal-tools">
+          <div className="terminal-tools-head">
+            <span>This shell</span>
+            <code title="Columns × rows">{size ? `${size.cols} × ${size.rows}` : "—"}</code>
+          </div>
+          <div className="terminal-actions">
+            <button className="chip" onClick={() => copy(cwd, "Working directory")} disabled={!cwd}>
+              Copy cwd
+            </button>
+            <button className="chip" onClick={() => copy(shell, "Shell path")} disabled={!shell}>
+              Copy shell
+            </button>
+            <button
+              className="chip"
+              onClick={() => {
+                termRef.current?.clear();
+                termRef.current?.focus();
+                setFlash("Scrollback cleared");
+              }}
+            >
+              Clear
+            </button>
+          </div>
+          {flash ? (
+            <p className="terminal-flash" role="status">
+              {flash}
+            </p>
+          ) : null}
+          <dl className="terminal-keys">
+            <div>
+              <dt>Ctrl C</dt>
+              <dd>interrupt</dd>
+            </div>
+            <div>
+              <dt>Ctrl L</dt>
+              <dd>clear the screen</dd>
+            </div>
+            <div>
+              <dt>Right-click</dt>
+              <dd>copy, paste, select all</dd>
+            </div>
+          </dl>
+        </div>
+
         <p className="fine terminal-hint">{hint}</p>
       </aside>
 
@@ -373,6 +501,12 @@ export default function TerminalView({ project }: { project: string | null }) {
           <div
             className="terminal-host"
             ref={hostRef}
+            data-terminal-theme={theme}
+            data-terminal-background={TERMINAL_THEMES[theme].background}
+            data-terminal-generation={generation}
+            data-terminal-font-size={settings?.terminal_font_size}
+            data-terminal-scrollback={settings?.terminal_scrollback}
+            data-terminal-program={settings?.terminal_shell || "OS default"}
             role="application"
             aria-label="Terminal"
             onContextMenu={(event) => {

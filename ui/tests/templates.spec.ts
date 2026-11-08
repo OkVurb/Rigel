@@ -4,7 +4,7 @@ import { expect, test } from "@playwright/test";
 // one click, and a template can be deleted from the list it appears in.
 test("the create button offers the project's templates", async ({ page }) => {
   await page.goto("/");
-  await page.getByRole("button", { name: "Session" }).click();
+  await page.getByRole("button", { name: "Session", exact: true }).click();
   await page.getByRole("button", { name: "sessions" }).click();
 
   await page.getByRole("button", { name: "+ session" }).click();

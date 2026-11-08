@@ -1,15 +1,26 @@
 import { expect, test } from "@playwright/test";
 
-// P7.3's five surfaces, exercised the way a person reaches them: the rail on the left.
+// P7.3's five surfaces, exercised the way a person reaches them: the rail on the left. Home is
+// the landing surface now, so the walk starts there and opens Shelf from the rail.
 test("every surface renders from the rail", async ({ page }) => {
   await page.goto("/");
+
+  // Home: the paper's masthead, a lead story and the rack of earlier issues.
+  await expect(page.getByRole("heading", { name: "The Rigel Paper" })).toBeVisible();
+  await expect(page.getByRole("navigation", { name: "Editions by day" })).toBeVisible();
+  await expect(page.locator(".paper-headline")).toBeVisible();
+
+  await page
+    .getByRole("navigation", { name: "Primary" })
+    .getByRole("button", { name: "Shelf", exact: true })
+    .click();
 
   // Shelf: the sample rows, the search field and the evidence table's heading.
   await expect(page.getByRole("heading", { name: "Shelf", exact: true }).first()).toBeVisible();
   await expect(page.getByRole("listbox", { name: "Skills" })).toBeVisible();
   await expect(page.getByPlaceholder("Search skills…")).toBeVisible();
 
-  await page.getByRole("button", { name: "Session" }).click();
+  await page.getByRole("button", { name: "Session", exact: true }).click();
   await expect(page.getByRole("region", { name: "Transcript" })).toBeVisible();
   await expect(page.getByText("Browser preview: sample transcript.")).toBeVisible();
   await expect(page.getByRole("button", { name: "Swarm" })).toBeVisible();
@@ -44,6 +55,10 @@ test("every surface renders from the rail", async ({ page }) => {
 
 test("the shelf search filters without leaving the surface", async ({ page }) => {
   await page.goto("/");
+  await page
+    .getByRole("navigation", { name: "Primary" })
+    .getByRole("button", { name: "Shelf", exact: true })
+    .click();
   await expect(page.getByRole("listbox", { name: "Skills" })).toBeVisible();
   await page.keyboard.press("/");
   const search = page.getByPlaceholder("Search skills…");

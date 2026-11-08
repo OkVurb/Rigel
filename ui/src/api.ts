@@ -94,6 +94,11 @@ export interface Settings {
   /** One row of the Rust-side adapter table: `omniroute`, `openrouter`, `gemini`, `vertex`, … */
   provider: string;
   model: string;
+  /**
+   * Free mode: the saved provider/model are the free pair Free mode proved was answering.
+   * Picking a model by hand clears it, so the composer never claims a free model it is not on.
+   */
+  free_mode: boolean;
   /** The GCP project Vertex is billed to, saved by the Providers page. */
   vertex_project: string;
   /** Separate reasoning effort: low, medium or high. */
@@ -120,14 +125,149 @@ export interface Settings {
    * Saved, so the choice survives a restart; defaults to on.
    */
   chat_models_only: boolean;
+  /** Who leads a Swarm: `muse` splits it, `broadcast` sends the same text to every agent. */
+  swarm_lead: string;
   /** Refine each draft with the cheap model and send it without the review card. */
   auto_refine: boolean;
   /** Publish every session after its turns finish; off means the button is the only way. */
   cloud_sync_sessions: boolean;
+  /** Q290: an explicit high-contrast palette, independent of the OS preference. */
+  high_contrast: boolean;
+  /** Q283: local-time window ("HH:MM") in which desktop notifications stay silent. */
+  quiet_hours_start: string;
+  quiet_hours_end: string;
+  /** Opt-in Gravity sponsored card on Home. Off by default; off means no request. */
+  gravity_ads: boolean;
+  /** Test ads: no billing, no metrics, and a sample card when no ad matches. */
+  gravity_test_ads: boolean;
 }
+
+/** One Concord delivery receipt. The timestamps are the source of truth for the page's pills. */
+export interface ConcordReceipt {
+  status?: string;
+  ticks?: string;
+  sent_at?: string | null;
+  delivered_at?: string | null;
+  read_at?: string | null;
+  replied_at?: string | null;
+  expires_at?: string | null;
+  failed_at?: string | null;
+  error_code?: string | null;
+  message_id?: string;
+}
+
+/** A message as Concord returns it inside the API's cache. */
+export interface ConcordMessage {
+  messageId?: string;
+  id?: string;
+  message_id?: string;
+  content?: string;
+  senderAgentId?: string;
+  recipientAgentId?: string;
+  status?: string;
+  createdAt?: string;
+  deliveredAt?: string | null;
+  readAt?: string | null;
+  repliedAt?: string | null;
+  expiresAt?: string | null;
+  failedAt?: string | null;
+  replyToMessageId?: string | null;
+  deliveryMode?: string;
+  errorCode?: string | null;
+  errorDetail?: string | null;
+  taskId?: string | null;
+  receipt?: ConcordReceipt | null;
+}
+
+/** One cached row: the API's monotonic cursor and the message itself. */
+export interface ConcordInboxMessage {
+  seq: number;
+  message: ConcordMessage;
+}
+
+/** The API poller's cache. `error` is the poller's last failure, not a refused request. */
+export interface ConcordInbox {
+  ok: boolean;
+  agent: string;
+  messages: ConcordInboxMessage[];
+  retained: number;
+  oldest: number;
+  revision: number;
+  checked_at: number;
+  updated_at: number;
+  error: string | null;
+}
+
+/** What `/v1/concord/reply` returns after it has built and sent the update_work call. */
+export interface ConcordReply {
+  ok: boolean;
+  tool: string;
+  message_id: string;
+  to_agent_id: string | null;
+  text: string;
+  result: unknown;
+}
+
+/** A sponsored card from Gravity, as the ad engine returns it. Never contains the API key. */
+export interface GravityAd {
+  adText: string;
+  title: string;
+  brandName: string;
+  cta: string;
+  url: string;
+  favicon: string;
+  brandImage: string;
+  /** The tracked link. `url` is the raw landing page and must not be linked. */
+  clickUrl: string;
+  impUrl: string;
+  placement: string;
+  placement_id: string;
+}
+
+export interface GravityMessage {
+  role: string;
+  content: string;
+}
+
+/** Forwarded on the ad request for fraud checks and the Device report. */
+export interface GravityDevice {
+  ua: string;
+  ip: string;
+  os: string;
+}
+
+/** A sample card for `npm run dev`; the real one comes from `gravity_ad`. */
+const PREVIEW_AD: GravityAd = {
+  adText: "Serverless Postgres that scales to zero. Start free in a minute.",
+  title: "Ship a database this afternoon",
+  brandName: "Sample sponsor",
+  cta: "Learn more",
+  url: "https://example.com",
+  favicon: "",
+  brandImage: "",
+  clickUrl: "https://api.trygravity.ai/track/click?p=preview",
+  impUrl: "",
+  placement: "below_response",
+  placement_id: "rigel-sponsor",
+};
 
 /** The browser preview's stand-in for `settings.toml`; `null` until the first save. */
 let previewSettings: Settings | null = null;
+
+/** The browser preview's saved door; the app replaces it with Rust's route_explain. */
+const PREVIEW_ROUTE = { provider: "omniroute", model: "openai/gpt-5.6-sol-medium" };
+/** Roadmap 29: the same three preferences the core resolves, so the preview cannot drift. */
+const PREVIEW_POLICY: RoutingPolicy = {
+  order: ["openai", "anthropic"],
+  allow_fallbacks: false,
+  quantizations: ["fp16"],
+};
+let previewCustomDoor: CustomDoorView | null = null;
+const PREVIEW_ALIASES: Record<string, { provider: string; model: string }> = {
+  fast: { provider: "openrouter", model: "openai/gpt-5-nano" },
+  deep: { provider: "openrouter", model: "anthropic/claude-sonnet-4.5" },
+  cheap: { provider: "openrouter", model: "google/gemini-2.5-flash-lite" },
+};
 
 /**
  * The settings a window starts from before Rust answers — also the shape a first run writes.
@@ -139,6 +279,7 @@ export function defaultSettings(): Settings {
     default_budget_cents: 500,
     provider: "omniroute",
     model: "gpt-5.6-sol-medium",
+    free_mode: false,
     vertex_project: "",
     effort: "medium",
     notify_approval: true,
@@ -150,10 +291,16 @@ export function defaultSettings(): Settings {
     skills_auto_update: true,
     max_steps: 10,
     chat_models_only: true,
+    swarm_lead: "muse",
     auto_refine: false,
     cloud_sync_sessions: false,
     ui_scale: 100,
     compact_density: false,
+    high_contrast: false,
+    quiet_hours_start: "",
+    quiet_hours_end: "",
+    gravity_ads: false,
+    gravity_test_ads: true,
   };
 }
 
@@ -326,12 +473,37 @@ export interface SessionExport {
   markdown: string;
 }
 
-/** D98: a session's plan phase. Approval turns `mode` off and records `approved_at`. */
+/** D98/roadmap 41: a session's plan phase and the tools the approved plan covers. */
 export interface PlanState {
   session_id: string;
   mode: boolean;
+  plan: string | null;
+  tools: string[];
+  proposed_at: number | null;
   approved_at: number | null;
   updated_at: number;
+}
+
+/** Roadmap 42: one node in a parent turn's subagent graph. */
+export type SubagentState =
+  | "pending"
+  | "running"
+  | "done"
+  | "failed"
+  | "blocked"
+  | "cancelled";
+
+export interface SubagentNode {
+  id: string;
+  role: string;
+  depends_on: string[];
+  state: SubagentState;
+  detail?: string | null;
+}
+
+export interface SubagentGraph {
+  parent_turn_id: string;
+  nodes: SubagentNode[];
 }
 
 /** D94: a saved role prompt, model/effort pair and tool allowance. */
@@ -380,6 +552,10 @@ export interface Agent {
   spend_micros: number;
   tokens_in: number;
   tokens_out: number;
+  /** Q267: live claims this agent holds, stale ones included. */
+  claims_held: number;
+  /** Q267: held claims whose heartbeat is older than the stale window. */
+  claims_stale: number;
 }
 
 /// One file-scoped assignment on the session work board.
@@ -400,6 +576,8 @@ export interface Usage {
   /** Micro-dollars. This is the bill; cents are only for display. */
   cost_micros: number;
   provider_micros: number | null;
+  /** The concrete model a router reports having served, when it differs from the requested id. */
+  served_model?: string | null;
   source: "provider" | "estimated";
 }
 
@@ -433,6 +611,68 @@ export interface ModelOption {
   free: boolean;
   /** Whether this row can answer a chat turn; the picker hides the rest behind a toggle. */
   chat?: boolean;
+  /** Whether the roster advertises tool calls; Free mode requires this for agent work. */
+  tools?: boolean;
+  /** A keyless model on this machine (roadmap 27): Ollama or llamafile. */
+  local?: boolean;
+  /** Completion price in micro-dollars per million tokens, when the provider publishes it. */
+  output_micros_per_mtok?: number | null;
+  /** The vendor's `input->output` description, when its roster publishes one. */
+  modality?: string | null;
+}
+
+/** Item 15: one credentialed door, probed once at launch. */
+export interface DoorHealth {
+  provider: string;
+  name: string;
+  state: "ready" | "auth" | "rate_limited" | "unreachable";
+  models: number | null;
+  latency_ms: number | null;
+  detail: string | null;
+}
+
+/** Item 18: what one picker row can do, with the source and date of the facts. */
+export interface ModelCapability {
+  provider: string;
+  model: string;
+  tools: boolean | null;
+  vision: boolean | null;
+  context_tokens: number | null;
+  max_output_tokens: number | null;
+  streaming: boolean | null;
+  output_micros_per_mtok: number | null;
+  source: string;
+  as_of: string;
+}
+
+/** The catalogue row's public facts, sent back for a capability lookup. */
+export interface ModelRef {
+  provider: string;
+  model: string;
+  modality?: string | null;
+  output_micros_per_mtok?: number | null;
+  chat?: boolean | null;
+}
+
+/** One free candidate and what its test message actually returned. */
+export interface FreeAttempt {
+  provider: string;
+  model: string;
+  /** ok, rate_limited, unauthorized, not_found, rejected, no_key, timeout, unreachable, … */
+  status: string;
+  detail?: string | null;
+}
+
+/** The free model Free mode settled on, with the evidence behind the choice. */
+export interface FreeChoice {
+  provider: string;
+  model: string;
+  note: string;
+  /** The checked-in aggregate benchmark retained as supporting evidence. */
+  benchmark: number;
+  /** Antigravity's model id, or the deterministic benchmark fallback. */
+  brain: string;
+  attempts: FreeAttempt[];
 }
 
 export interface TerminalInfo {
@@ -446,6 +686,19 @@ export interface TerminalOutput {
   id: string;
   data: string;
   exit: boolean;
+}
+
+/** Q268: one explicit local test run. `output` is already bounded by Rust. */
+export interface TestRun {
+  command: string;
+  ok: boolean;
+  exit_code: number | null;
+  passed: number;
+  failed: number;
+  output: string;
+  truncated: boolean;
+  timed_out: boolean;
+  duration_ms: number;
 }
 
 export interface Turn {
@@ -476,6 +729,12 @@ export interface Item {
 export interface TurnTranscript {
   turn: Turn;
   items: Item[];
+}
+
+/** Roadmap 37: the turns a dead process left running, named individually. */
+export interface RecoveryOffer {
+  session_id: string;
+  turns: Turn[];
 }
 
 /** A fresh Rigel b render of a URL an external harness visited. */
@@ -566,6 +825,32 @@ export interface TemplateAgent {
   model: string | null;
 }
 
+/** Q270: one skill fixed to a session at a body hash. */
+export interface SkillPin {
+  skill_id: string;
+  body_sha: string;
+  pinned_at: number;
+  /** D141: the hash currently on the shelf, when the row still exists. */
+  current_body_sha: string | null;
+  /** The index moved under this pin; the session still reads `body_sha`. */
+  changed: boolean;
+  pinned_body_available: boolean;
+  current_body_available: boolean;
+}
+
+/** D141: the two bodies behind a changed pin, read only when the review card opens. */
+export interface SkillPinReview {
+  pin: SkillPin;
+  pinned_body: string | null;
+  current_body: string | null;
+}
+
+/** Q270: the version snapshot a session template carries. */
+export interface TemplateSkill {
+  skill_id: string;
+  body_sha: string;
+}
+
 /** D152: the shape of a session before it starts, stored in `.rigel/templates.json`. */
 export interface SessionTemplate {
   id: string;
@@ -574,6 +859,8 @@ export interface SessionTemplate {
   effort: string | null;
   max_steps: number | null;
   agents: TemplateAgent[];
+  /** Pinned skill bodies restored when a session starts from this template. */
+  skills: TemplateSkill[];
   /** Left in the composer by a create; never sent. */
   prompt: string;
   created_at: number;
@@ -653,9 +940,51 @@ export interface ResumeOutcome {
   };
 }
 
+export interface Route {
+  provider: string;
+  model: string;
+}
+
+export type RouteReason = "picker" | "model-only" | "bare-id-repair" | "saved" | "alias";
+
+/** The core resolver's own answer, field for field (`agent/routing.rs`). */
+export interface RouteExplanation {
+  saved: Route;
+  requested: Route | null;
+  resolved: Route;
+  reason: RouteReason;
+  /** One sentence naming what was asked for and what won, when they differ. */
+  mismatch: string | null;
+}
+
+export interface RoutingPolicy {
+  order: string[];
+  allow_fallbacks: boolean;
+  quantizations: string[];
+}
+
+export interface CustomHeader {
+  name: string;
+  value: string;
+}
+
+/** What the renderer may see after a save: no header value ever leaves the keychain. */
+export interface CustomDoorView {
+  name: string;
+  base_url: string;
+  header_names: string[];
+  models: string[];
+}
+
 export interface TurnReply {
   turn: Turn;
   budget_cents: number | null;
+  /** The route the turn actually took; the inspector reads the same struct. */
+  route: RouteExplanation;
+}
+
+export interface E2eConfig {
+  project: string;
 }
 
 /**
@@ -672,6 +1001,11 @@ export interface TurnQuote {
   remaining_micros: number | null;
   over_remaining: boolean;
   reserve_micros: number;
+  /** When the local price table was read, how old it is, and where it came from. */
+  price_fetched_on: string;
+  price_age_days: number;
+  price_source: string;
+  price_stale: boolean;
 }
 
 /**
@@ -696,7 +1030,59 @@ function previewQuote(prompt: string, spendMicros: number, capMicros: number | n
     remaining_micros: remaining,
     over_remaining: remaining !== null && firstStep > remaining,
     reserve_micros: 10_000,
+    // The preview's price copy is deliberately older than the real table so the stale state is
+    // part of what the browser suite can see; the desktop app asks Rust for the real dates.
+    price_fetched_on: "2026-06-01",
+    price_age_days: Math.max(
+      0,
+      Math.floor((Date.now() - Date.parse("2026-06-01T00:00:00Z")) / 86_400_000),
+    ),
+    price_source: "vendor price pages (browser preview copy)",
+    price_stale: true,
   };
+}
+
+/** Item 15: the preview's launch pass — one answering door and one refused key. */
+const PREVIEW_HEALTH: DoorHealth[] = [
+  {
+    provider: "openrouter",
+    name: "OpenRouter",
+    state: "ready",
+    models: 627,
+    latency_ms: 118,
+    detail: null,
+  },
+  {
+    provider: "gemini",
+    name: "Google AI Studio",
+    state: "auth",
+    models: null,
+    latency_ms: 42,
+    detail: "provider returned 401 Unauthorized",
+  },
+];
+
+/** Item 18: the preview's capability rows — one known model and unknown facts for the rest. */
+function previewModelCapabilities(models: ModelRef[]): ModelCapability[] {
+  return models.map((model) => {
+    const known = model.model === "anthropic/claude-sonnet-4.5";
+    return {
+      provider: model.provider,
+      model: model.model,
+      tools: known ? true : null,
+      vision: model.modality
+        ? model.modality.toLowerCase().includes("image")
+        : null,
+      context_tokens: known ? 200_000 : null,
+      max_output_tokens: known ? 64_000 : null,
+      streaming: model.chat === false ? null : true,
+      output_micros_per_mtok: model.output_micros_per_mtok ?? null,
+      source: known
+        ? "provider model pages"
+        : "no published capability row in this build",
+      as_of: "2026-11-05",
+    };
+  });
 }
 
 /** Browser-preview attention: one session group plus a waiting approval. */
@@ -758,6 +1144,40 @@ function previewAttention(): Attention {
 /** Browser-preview templates: one sample, kept in memory for the session. */
 let previewTemplates: SessionTemplate[] | null = null;
 
+const PREVIEW_SESSION_ID = "7c1e4a3d-0000-4000-8000-000000000000";
+const PREVIEW_PDF_ID = "github:anthropics/skills:skills/pdf/SKILL.md";
+
+/** A stable stand-in hash for the browser preview; real pins carry the index's SHA-256. */
+function previewSha(value: string): string {
+  let hash = 0;
+  for (const char of value) hash = (hash * 31 + char.charCodeAt(0)) >>> 0;
+  return hash.toString(16).padStart(8, "0").repeat(8).slice(0, 64);
+}
+
+function previewBodySha(id: string): string {
+  return previewSha(id);
+}
+
+const PREVIEW_PDF_OLD_BODY =
+  "---\nname: pdf-reader\ndescription: Read scanned PDFs and receipts.\nlicense: MIT\n---\n# PDF reader\n\nAsk the agent for the file, then summarise it.\n";
+const PREVIEW_PDF_CURRENT_BODY =
+  "---\nname: pdf-reader\ndescription: Read scanned PDFs and receipts.\nlicense: MIT\n---\n# PDF reader\n\nAsk the agent for the file, wait for the scan, then summarise it.\n";
+
+/** Browser-preview pins: one sample, kept in memory for the session. */
+let previewPins: Record<string, SkillPin[]> = {
+  [PREVIEW_SESSION_ID]: [
+    {
+      skill_id: PREVIEW_PDF_ID,
+      body_sha: previewSha(PREVIEW_PDF_OLD_BODY),
+      pinned_at: Date.now() - 240_000,
+      current_body_sha: previewSha(PREVIEW_PDF_CURRENT_BODY),
+      changed: true,
+      pinned_body_available: true,
+      current_body_available: true,
+    },
+  ],
+};
+
 function previewTemplateList(): SessionTemplate[] {
   previewTemplates ??= [
     {
@@ -767,6 +1187,7 @@ function previewTemplateList(): SessionTemplate[] {
       effort: "medium",
       max_steps: 10,
       agents: [{ harness: "native", role: "writer", model: "anthropic/claude-sonnet-4.5" }],
+      skills: [{ skill_id: PREVIEW_PDF_ID, body_sha: previewSha(PREVIEW_PDF_OLD_BODY) }],
       prompt: "The resume test fails on Windows. Find the cause before patching it.",
       created_at: Date.now() - 600_000,
     },
@@ -821,6 +1242,22 @@ export interface KeyStatus {
   providers: Record<string, boolean>;
   /** Whether any chat provider has a credential — the answer the launch banner asks for. */
   native_ready: boolean;
+}
+
+/** Q244: what a candidate provider key proved before it was stored. */
+export interface KeyValidation {
+  /** Whether the provider answered a request carrying the candidate key. */
+  checked: boolean;
+  /** Models the roster returned; zero when no check was possible. */
+  models: number;
+  /** One sentence for the Settings notice. */
+  note: string;
+}
+
+export interface KeySetResult {
+  status: KeyStatus;
+  /** `null` for a harness credential; a chat provider always carries a result. */
+  check: KeyValidation | null;
 }
 
 /** One chat adapter, from the Rust-side table (`providers_list`). Never a key, only its absence. */
@@ -890,12 +1327,37 @@ export interface SwarmTarget {
   role: string | null;
 }
 
-/** One harness the chat checkout configures; `ready` means its CLI/key is present. */
+/**
+ * Who leads a Swarm. `rigel` is the Muse coordinator; `model` asks that same coordinator to
+ * think with a particular model; `broadcast` has no boss and sends the task to every agent.
+ */
+export type SwarmLead =
+  | { kind: "rigel" }
+  | { kind: "broadcast" }
+  | { kind: "model"; provider: string; model: string };
+
+/**
+ * One harness the chat checkout configures. `ready` is true only after a real prompt probe
+ * succeeds; `status` distinguishes a missing CLI, a missing API key and a CLI that needs login.
+ */
 export interface AgentChatHarness {
   name: string;
   label: string;
   api: boolean;
   ready: boolean;
+  status:
+    | "unknown"
+    | "usable"
+    | "missing"
+    | "missing_key"
+    | "unauthenticated"
+    | "probe_timeout"
+    | "provider_blocked"
+    | "probe_failed";
+  /** The exact CLI line or probe outcome behind the status. */
+  evidence: string;
+  remediation: string | null;
+  credential: string | null;
 }
 
 /** Browser preview only: the shape of a live room, from this project's recorded run. */
@@ -1248,6 +1710,8 @@ export interface PendingApproval {
   title: string;
   detail: Record<string, unknown> | null;
   requested_at: number;
+  /** Q246: when silence refuses the question, in milliseconds since the epoch. */
+  expires_at?: number;
   /** D154: the project and origin the asking surface recorded; absent on older files. */
   project_root?: string;
   session_id?: string;
@@ -1448,6 +1912,51 @@ export const api = {
     return call<ProjectInfo>("project_open", { path });
   },
 
+  /** The window driver's first project. `null` in a shipped build. */
+  async e2eConfig(): Promise<E2eConfig | null> {
+    if (!isTauri()) return null;
+    try {
+      return await call<E2eConfig | null>("e2e_config");
+    } catch {
+      return null;
+    }
+  },
+
+  /** The same resolver the turn uses, so the inspector cannot drift from the door. */
+  async routeExplain(provider?: string | null, model?: string | null): Promise<RouteExplanation> {
+    if (isTauri()) {
+      return call<RouteExplanation>("route_explain", {
+        provider: provider ?? null,
+        model: model ?? null,
+      });
+    }
+    const saved = previewSettings
+      ? { provider: previewSettings.provider, model: previewSettings.model }
+      : PREVIEW_ROUTE;
+    const alias = model
+      ? PREVIEW_ALIASES[model.trim().toLowerCase()]
+      : undefined;
+    const requested =
+      provider || model
+        ? {
+            provider: provider ?? alias?.provider ?? saved.provider,
+            model: model ?? saved.model,
+          }
+        : null;
+    const resolved = alias ?? requested ?? saved;
+    const reason: RouteReason = alias ? "alias" : requested ? "picker" : "saved";
+    return {
+      saved,
+      requested,
+      resolved,
+      reason,
+      mismatch:
+        resolved.provider !== saved.provider || resolved.model !== saved.model
+          ? `asked for ${requested?.provider ?? "nothing"} / ${requested?.model ?? "nothing"}; resolved ${resolved.provider} / ${resolved.model} (${reason}), while Settings holds ${saved.provider} / ${saved.model}`
+          : null,
+    };
+  },
+
   /** The native folder picker. Returns null when the user cancels or in the browser preview. */
   async pickProjectFolder(): Promise<string | null> {
     if (!isTauri()) return null;
@@ -1495,6 +2004,12 @@ export const api = {
     return call<Session>("session_archive", { project, id, archived });
   },
 
+  /** Q274: permanent deletion of an archived session; the core refuses a live one. */
+  async deleteSession(project: string, id: string): Promise<void> {
+    if (!isTauri()) throw new Error("Delete a session in the desktop app.");
+    await call<void>("session_delete", { project, id });
+  },
+
   async listBookmarks(project: string, session: string): Promise<Bookmark[]> {
     if (!isTauri()) return [];
     return call<Bookmark[]>("bookmark_list", { project, session });
@@ -1524,6 +2039,129 @@ export const api = {
         return;
       }
       return call<void>("template_delete", { project, id });
+    },
+  },
+
+  /** Q270: skill pins belong to the session, not the window; a template copies them. */
+  pins: {
+    async list(project: string, session: string): Promise<SkillPin[]> {
+      if (!isTauri()) return previewPins[session] ?? [];
+      return call<SkillPin[]>("session_skill_pins", { project, session });
+    },
+
+    async pin(
+      project: string,
+      session: string,
+      skillId: string,
+      bodySha?: string,
+    ): Promise<SkillPin> {
+      if (!isTauri()) {
+        const list = previewPins[session] ?? [];
+        const existing = list.find((pin) => pin.skill_id === skillId);
+        if (existing) return existing;
+        const pinned: SkillPin = {
+          skill_id: skillId,
+          body_sha: bodySha ?? previewBodySha(skillId),
+          pinned_at: Date.now(),
+          current_body_sha: bodySha ?? previewBodySha(skillId),
+          changed: false,
+          pinned_body_available: true,
+          current_body_available: true,
+        };
+        previewPins = {
+          ...previewPins,
+          [session]: [...list, pinned].sort((a, b) => a.pinned_at - b.pinned_at),
+        };
+        return pinned;
+      }
+      return call<SkillPin>("session_skill_pin", { project, session, skillId, bodySha });
+    },
+
+    async review(project: string, session: string, skillId: string): Promise<SkillPinReview> {
+      if (!isTauri()) {
+        const pin = (previewPins[session] ?? []).find((row) => row.skill_id === skillId);
+        if (!pin) throw new Error(`${skillId} is not pinned to this session`);
+        return {
+          pin,
+          pinned_body: pin.skill_id === PREVIEW_PDF_ID ? PREVIEW_PDF_OLD_BODY : null,
+          current_body: pin.skill_id === PREVIEW_PDF_ID ? PREVIEW_PDF_CURRENT_BODY : null,
+        };
+      }
+      return call<SkillPinReview>("session_skill_review", { project, session, skillId });
+    },
+
+    async keep(
+      project: string,
+      session: string,
+      skillId: string,
+      reason: string,
+    ): Promise<SkillPin> {
+      if (!isTauri()) {
+        const pin = (previewPins[session] ?? []).find((row) => row.skill_id === skillId);
+        if (!pin) throw new Error(`${skillId} is not pinned to this session`);
+        return pin;
+      }
+      return call<SkillPin>("session_skill_keep", { project, session, skillId, reason });
+    },
+
+    async keepAll(project: string, session: string, reason: string): Promise<SkillPin[]> {
+      if (!isTauri()) return previewPins[session] ?? [];
+      return call<SkillPin[]>("session_skill_keep_all", { project, session, reason });
+    },
+
+    async update(
+      project: string,
+      session: string,
+      skillId: string,
+      reason: string,
+    ): Promise<SkillPin> {
+      if (!isTauri()) {
+        const list = previewPins[session] ?? [];
+        const pin = list.find((row) => row.skill_id === skillId);
+        if (!pin) throw new Error(`${skillId} is not pinned to this session`);
+        const next: SkillPin = {
+          ...pin,
+          body_sha: pin.current_body_sha ?? pin.body_sha,
+          changed: false,
+          pinned_body_available: pin.current_body_available,
+          pinned_at: Date.now(),
+        };
+        previewPins = {
+          ...previewPins,
+          [session]: list.map((row) => (row.skill_id === skillId ? next : row)),
+        };
+        return next;
+      }
+      return call<SkillPin>("session_skill_update", { project, session, skillId, reason });
+    },
+
+    async updateAll(project: string, session: string, reason: string): Promise<SkillPin[]> {
+      if (!isTauri()) {
+        const list = previewPins[session] ?? [];
+        const next = list.map((pin) => {
+          if (!pin.changed) return pin;
+          return {
+            ...pin,
+            body_sha: pin.current_body_sha ?? pin.body_sha,
+            changed: false,
+            pinned_body_available: pin.current_body_available,
+            pinned_at: Date.now(),
+          };
+        });
+        previewPins = { ...previewPins, [session]: next };
+        return next;
+      }
+      return call<SkillPin[]>("session_skill_update_all", { project, session, reason });
+    },
+
+    async unpin(project: string, session: string, skillId: string): Promise<boolean> {
+      if (!isTauri()) {
+        const list = previewPins[session] ?? [];
+        const next = list.filter((pin) => pin.skill_id !== skillId);
+        previewPins = { ...previewPins, [session]: next };
+        return next.length !== list.length;
+      }
+      return call<boolean>("session_skill_unpin", { project, session, skillId });
     },
   },
 
@@ -1596,6 +2234,16 @@ export const api = {
     return call<ResumeOutcome>("session_resume", { project, id, force });
   },
 
+  async recoveryOffer(project: string, id: string): Promise<RecoveryOffer | null> {
+    if (!isTauri()) return null;
+    return call<RecoveryOffer | null>("session_recovery", { project, id });
+  },
+
+  async discardTurn(project: string, turn: string): Promise<Turn> {
+    if (!isTauri()) throw new Error("Discarding a turn is available in the desktop app.");
+    return call<Turn>("turn_discard", { project, turn });
+  },
+
   async listAgents(project: string, session: string): Promise<Agent[]> {
     return call<Agent[]>("agent_list", { project, session });
   },
@@ -1630,20 +2278,33 @@ export const api = {
     agent: string,
     prompt: string,
     model?: string,
+    provider?: string,
     effort?: string,
   ): Promise<TurnReply> {
+    // The provider travels with the model: a settings save that has not landed yet must not send
+    // the pick through the previous door (which is how a Gemini pick became a Vertex 401).
     return call<TurnReply>("turn_send", {
       project,
       session,
       agent,
       prompt,
       model: model ?? null,
+      provider: provider ?? null,
       effort: effort ?? null,
     });
   },
 
   async cancelTurn(turn: string): Promise<void> {
     return call<void>("turn_cancel", { turn });
+  },
+
+  /** Q254: stop at the next step boundary; `resumeTurn` continues the same turn. */
+  async pauseTurn(turn: string): Promise<void> {
+    return call<void>("turn_pause", { turn });
+  },
+
+  async resumeTurn(turn: string): Promise<void> {
+    return call<void>("turn_resume", { turn });
   },
 
   /** D98: read the session's plan phase. */
@@ -1654,6 +2315,11 @@ export const api = {
   /** D98: plan on; approving sets `enabled: false` and records the hand-off. */
   async planSet(project: string, session: string, enabled: boolean): Promise<PlanState> {
     return call<PlanState>("plan_set", { project, session, enabled });
+  },
+
+  /** Roadmap 42: the parent turn's subagent graph with its edges and states. */
+  async subagentGraph(project: string, session: string): Promise<SubagentGraph[]> {
+    return call<SubagentGraph[]>("subagent_graph", { project, session });
   },
 
   /** D94: the four built-in role presets. */
@@ -1684,6 +2350,7 @@ export const api = {
     spendMicros: number,
     capMicros: number | null,
     model?: string,
+    provider?: string,
     effort?: string,
   ): Promise<TurnQuote> {
     if (!isTauri()) return previewQuote(prompt, spendMicros, capMicros);
@@ -1692,6 +2359,7 @@ export const api = {
       session,
       prompt,
       model: model ?? null,
+      provider: provider ?? null,
       effort: effort ?? null,
     });
   },
@@ -1813,6 +2481,17 @@ export const api = {
     return call<void>("watch_project", { project });
   },
 
+  /** Queue a Swarm task for Rigel, the Muse coordinator. The API keeps it until Muse claims it. */
+  async swarmEnqueue(
+    project: string,
+    task: string,
+    targets: string[],
+    lead: SwarmLead = { kind: "rigel" },
+  ): Promise<string> {
+    if (!isTauri()) throw new Error("Muse swarm is only available in the desktop app.");
+    return call<string>("swarm_enqueue", { project, task, targets, lead });
+  },
+
   async listPatches(project: string, session: string): Promise<Patch[]> {
     return call<Patch[]>("patch_list", { project, session });
   },
@@ -1854,9 +2533,11 @@ export const api = {
     return call<KeyStatus>("key_status");
   },
 
-  async setKey(provider: string, value: string): Promise<KeyStatus> {
-    if (!isTauri()) return { providers: { [provider]: true }, native_ready: true };
-    return call<KeyStatus>("key_set", { provider, value });
+  async setKey(provider: string, value: string): Promise<KeySetResult> {
+    if (!isTauri()) {
+      return { status: { providers: { [provider]: true }, native_ready: true }, check: null };
+    }
+    return call<KeySetResult>("key_set", { provider, value });
   },
 
   async deleteKey(provider: string): Promise<KeyStatus> {
@@ -1868,6 +2549,50 @@ export const api = {
   async providersList(): Promise<ProviderRow[]> {
     if (!isTauri()) return PREVIEW_PROVIDERS;
     return call<ProviderRow[]>("providers_list");
+  },
+
+  /** Roadmap 26: the project's effective OpenRouter policy, before a turn. */
+  async routingPolicy(project: string): Promise<RoutingPolicy> {
+    if (!isTauri()) return PREVIEW_POLICY;
+    return call<RoutingPolicy>("routing_policy", { project });
+  },
+
+  /** Roadmap 28: the saved custom door, masked; null until one is saved. */
+  async customProviderGet(): Promise<CustomDoorView | null> {
+    if (!isTauri()) return previewCustomDoor;
+    return call<CustomDoorView | null>("custom_provider_get");
+  },
+
+  /** Roadmap 28: probe a candidate door without saving its headers. */
+  async customProviderProbe(baseUrl: string, headers: CustomHeader[]): Promise<string[]> {
+    if (!isTauri()) {
+      if (!/^https?:\/\//i.test(baseUrl.trim())) {
+        throw new Error("the base URL must start with http:// or https://");
+      }
+      return ["llama-3.2-8b", "qwen2.5-coder-7b"];
+    }
+    return call<string[]>("custom_provider_probe", {
+      door: { name: "", base_url: baseUrl, headers, models: [] },
+    });
+  },
+
+  /** Roadmap 28: write the complete record to the keychain and return its masked view. */
+  async customProviderSave(door: {
+    name: string;
+    base_url: string;
+    headers: CustomHeader[];
+    models: string[];
+  }): Promise<CustomDoorView> {
+    if (!isTauri()) {
+      previewCustomDoor = {
+        name: door.name,
+        base_url: door.base_url,
+        header_names: door.headers.map((header) => header.name),
+        models: door.models,
+      };
+      return previewCustomDoor;
+    }
+    return call<CustomDoorView>("custom_provider_save", { door });
   },
 
   async harnesses(): Promise<HarnessInfo[]> {
@@ -1908,14 +2633,100 @@ export const api = {
     return call<Settings>("settings_get");
   },
 
+  /** Whether the opt-in card is on and which broker serves it. Never a publisher key. */
+  async gravitySettings(): Promise<{
+    enabled: boolean;
+    test_ads: boolean;
+    placement_id: string;
+    endpoint: string;
+  }> {
+    if (!isTauri()) {
+      return {
+        enabled: previewSettings?.gravity_ads ?? false,
+        test_ads: previewSettings?.gravity_test_ads ?? true,
+        placement_id: "rigel-sponsor",
+        endpoint: "https://rigel-25128.web.app/api/gravity-ad",
+      };
+    }
+    return call<{
+      enabled: boolean;
+      test_ads: boolean;
+      placement_id: string;
+      endpoint: string;
+    }>("gravity_settings");
+  },
+
+  /** Request one ad from the shared broker. Off means no request at all. */
+  async gravityAd(
+    session: string,
+    messages: GravityMessage[],
+    device: GravityDevice,
+  ): Promise<GravityAd[]> {
+    if (!isTauri()) {
+      return previewSettings?.gravity_ads && (previewSettings.gravity_test_ads ?? true)
+        ? [PREVIEW_AD]
+        : [];
+    }
+    return call<GravityAd[]>("gravity_ad", { session, messages, device });
+  },
+
+  /** Load the impression URL once. Tracking never breaks the page. */
+  async gravityImpression(url: string): Promise<void> {
+    if (!isTauri() || !url) return;
+    try {
+      await call<void>("gravity_impression", { url });
+    } catch {
+      // An impression that cannot be recorded is not an error the reader should see.
+    }
+  },
+
+  /** Record the click and open the landing page. The app never navigates itself. */
+  async gravityClick(url: string): Promise<string> {
+    if (!isTauri()) return url;
+    return call<string>("gravity_click", { url });
+  },
+
   async saveSettings(settings: Settings): Promise<Settings> {
+    // Every surface saves through here, so this is the one place that can tell an already-open
+    // terminal (or another mounted surface) that its copy is stale. The event carries the saved
+    // value, not a request to re-read: the preview has no settings file to read back.
+    const announce = (saved: Settings): Settings => {
+      if (typeof window !== "undefined") {
+        window.dispatchEvent(new CustomEvent("rigel://settings", { detail: saved }));
+      }
+      return saved;
+    };
     if (!isTauri()) {
       // The browser preview has no settings.toml. Keep one in memory for the session so a saved
       // choice reads back the way it will in the window, instead of resetting on the next mount.
       previewSettings = settings;
-      return settings;
+      return announce(settings);
     }
-    return call<Settings>("settings_set", { settings });
+    return announce(await call<Settings>("settings_set", { settings }));
+  },
+
+  /** The API's cached Concord inbox, including the delivery receipt on every message. */
+  async concordInbox(): Promise<ConcordInbox> {
+    if (!isTauri()) {
+      return {
+        ok: true,
+        agent: "muse",
+        messages: [],
+        retained: 0,
+        oldest: 0,
+        revision: 0,
+        checked_at: 0,
+        updated_at: 0,
+        error: "The browser preview has no Concord bridge; open the desktop window.",
+      };
+    }
+    return call<ConcordInbox>("concord_inbox");
+  },
+
+  /** Reply to one cached message; the API wraps update_work and its idempotency key. */
+  async concordReply(messageId: string, content: string): Promise<ConcordReply> {
+    if (!isTauri()) throw new Error("Concord replies go through the desktop app.");
+    return call<ConcordReply>("concord_reply", { message_id: messageId, content });
   },
 
   async updateStatus(): Promise<UpdateStatus> {
@@ -2167,11 +2978,49 @@ export const api = {
         { id: "gpt-5.6-sol-medium", provider: "omniroute", free: false, chat: true },
         { id: "openai/gpt-4.1-mini", provider: "openrouter", free: false, chat: true },
         { id: "baseten/mammoth-1:free", provider: "openrouter", free: true, chat: true },
-        { id: "anthropic/claude-sonnet-4.5", provider: "openrouter", free: false, chat: true },
+        {
+          id: "anthropic/claude-sonnet-4.5",
+          provider: "openrouter",
+          free: false,
+          chat: true,
+          modality: "text+image->text+image",
+          output_micros_per_mtok: 15_000_000,
+        },
+        { id: "llama3.2", provider: "local", free: true, chat: true, local: true },
         { id: "aihorde/AbyssOrangeMix", provider: "omniroute", free: false, chat: false },
       ];
     }
     return call<ModelOption[]>("models_list");
+  },
+
+  /** Item 15: the launch health pass, cached in Rust after the first call. */
+  async providerHealth(): Promise<DoorHealth[]> {
+    if (!isTauri()) return PREVIEW_HEALTH;
+    return call<DoorHealth[]>("provider_health");
+  },
+
+  /** Item 18: one capability row per picker row, unknown facts included as null. */
+  async modelCapabilities(models: ModelRef[]): Promise<ModelCapability[]> {
+    if (!isTauri()) return previewModelCapabilities(models);
+    return call<ModelCapability[]>("model_capabilities", { models });
+  },
+
+  /** Read the rosters again, ignoring the cache: the launch pass and Free mode do the same. */
+  async refreshModels(): Promise<ModelOption[]> {
+    if (!isTauri()) return this.listModels();
+    return call<ModelOption[]>("models_refresh");
+  },
+
+  /**
+   * Free mode: refresh every configured provider, let Antigravity rank the live zero-price
+   * tool-capable chat rows, then switch to the best one that answers a real probe. The provider
+   * and model are persisted through the same path a manual pick uses.
+   */
+  async freeMode(): Promise<FreeChoice> {
+    if (!isTauri()) {
+      throw new Error("Free mode tests real models in the desktop app, not the browser preview.");
+    }
+    return call<FreeChoice>("free_mode");
   },
 
   /** The vendor chat server the Chat tab fronts. Same boundary as the router above. */
@@ -2235,21 +3084,54 @@ export const api = {
       return call<string[]>("chat_start_agents", { project });
     },
 
+    /** Free mode: add the managed free-model agent to a room that is already awake. */
+    async startFree(project: string | null): Promise<string | null> {
+      if (!isTauri()) return null;
+      return call<string | null>("chat_start_free", { project });
+    },
+
     /** The agents Rigel owns. Anything else in the room was started by hand. */
     async launched(): Promise<AgentChatProcess[]> {
       if (!isTauri()) return [];
       return call<AgentChatProcess[]>("chat_launched");
     },
 
-    async harnesses(project: string | null): Promise<AgentChatHarness[]> {
+    async harnesses(project: string | null, force = false): Promise<AgentChatHarness[]> {
       if (!isTauri()) {
         return [
-          { name: "claude", label: "Claude", api: false, ready: true },
-          { name: "codex", label: "Codex", api: false, ready: true },
-          { name: "phi4", label: "Phi4 (local)", api: true, ready: true },
+          {
+            name: "claude",
+            label: "Claude",
+            api: false,
+            ready: true,
+            status: "usable",
+            evidence: "Browser preview fixture",
+            remediation: null,
+            credential: null,
+          },
+          {
+            name: "codex",
+            label: "Codex",
+            api: false,
+            ready: true,
+            status: "usable",
+            evidence: "Browser preview fixture",
+            remediation: null,
+            credential: null,
+          },
+          {
+            name: "phi4",
+            label: "Phi4 (local)",
+            api: true,
+            ready: true,
+            status: "usable",
+            evidence: "Browser preview fixture",
+            remediation: null,
+            credential: null,
+          },
         ];
       }
-      return call<AgentChatHarness[]>("chat_harnesses", { project });
+      return call<AgentChatHarness[]>("chat_harnesses", { project, force });
     },
 
     async startAgent(project: string | null, name: string): Promise<string> {
@@ -2294,6 +3176,14 @@ export const api = {
     async close(id: string): Promise<void> {
       if (!isTauri()) return;
       return call<void>("terminal_close", { id });
+    },
+  },
+
+  /** Q268: run the project's detected test command and return its parsed result. */
+  tests: {
+    async run(project: string): Promise<TestRun> {
+      if (!isTauri()) return previewTestRun();
+      return call<TestRun>("tests_run", { project });
     },
   },
 
@@ -2431,6 +3321,29 @@ function previewRefinement(request: RefineRequest): PromptRefinement {
       provider_micros: null,
       source: "estimated",
     },
+  };
+}
+
+/** Browser preview only: one canned run so the counts and output link are inspectable. */
+function previewTestRun(): TestRun {
+  return {
+    command: "cargo test --workspace",
+    ok: false,
+    exit_code: 101,
+    passed: 418,
+    failed: 1,
+    truncated: false,
+    timed_out: false,
+    duration_ms: 42_700,
+    output: [
+      "running 419 tests",
+      "test result: FAILED. 418 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out",
+      "",
+      "failures:",
+      "    resume::writes_are_durable_before_the_tree_hash",
+      "",
+      "error: test failed, to rerun pass `--test resume`",
+    ].join("\n"),
   };
 }
 

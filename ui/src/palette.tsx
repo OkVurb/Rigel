@@ -11,6 +11,7 @@ import { api, when, type PaletteResults } from "./api";
  * pointer works too, and the active row is scrolled into view rather than the list jumping.
  */
 export type PaletteAction =
+  | "home"
   | "shelf"
   | "attention"
   | "session"
@@ -18,7 +19,8 @@ export type PaletteAction =
   | "diff"
   | "terminal"
   | "account"
-  | "settings";
+  | "settings"
+  | "focus";
 
 interface Action {
   id: PaletteAction;
@@ -27,6 +29,8 @@ interface Action {
 }
 
 const ACTIONS: Action[] = [
+  { id: "home", label: "Home", detail: "The Rigel Paper — what the agents did today" },
+  { id: "focus", label: "Focus mode", detail: "Hide the rail, list and inspector" },
   { id: "shelf", label: "Shelf", detail: "Search the local skill index" },
   { id: "attention", label: "Attention", detail: "What still needs an answer" },
   { id: "session", label: "Session", detail: "Transcript, agents and composer" },
@@ -41,6 +45,10 @@ interface Props {
   open: boolean;
   project: string | null;
   currentSession: string | null;
+  /** The binding that opens this palette, shown in the footer while it is open. */
+  shortcut: string;
+  /** The current binding for focus mode, shown beside its palette action. */
+  focusShortcut: string;
   onClose: () => void;
   onAction: (action: PaletteAction) => void;
   onSkill: (id: string) => void;
@@ -105,6 +113,8 @@ export default function Palette({
   open,
   project,
   currentSession,
+  shortcut,
+  focusShortcut,
   onClose,
   onAction,
   onSkill,
@@ -135,6 +145,19 @@ export default function Palette({
       restoreFocus.current?.focus?.();
     };
   }, [open]);
+
+  // The search box autofocuses a frame after the dialog mounts. Escape must close the palette
+  // even in that gap, so the binding lives on the document rather than only on the input.
+  useEffect(() => {
+    if (!open) return;
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key !== "Escape") return;
+      event.preventDefault();
+      onClose();
+    };
+    document.addEventListener("keydown", onKeyDown);
+    return () => document.removeEventListener("keydown", onKeyDown);
+  }, [open, onClose]);
 
   // One debounced read. A dead project database or a missing skill index leaves the other
   // sections usable: the command answers with empty groups rather than failing the palette.
@@ -172,7 +195,7 @@ export default function Palette({
       key: `action:${action.id}`,
       title: action.label,
       subtitle: action.detail,
-      meta: "action",
+      meta: action.id === "focus" ? focusShortcut : "action",
       action,
     }));
 
@@ -221,7 +244,7 @@ export default function Palette({
       });
     }
     return rows;
-  }, [query, results]);
+  }, [query, results, focusShortcut]);
 
   const run = useCallback(
     (entry: Entry | undefined) => {
@@ -378,6 +401,7 @@ export default function Palette({
           <span>↵ open</span>
           <span>esc close</span>
           <span className="grow" />
+          <span>{shortcut}</span>
           <span>{project ? "this project + local skills" : "local skills"}</span>
         </footer>
       </div>

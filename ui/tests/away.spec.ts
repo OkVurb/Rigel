@@ -4,7 +4,7 @@ import { expect, test } from "@playwright/test";
 // reports the approvals that are waiting now, and dismissing it is enough to keep it away.
 test("a focus after work finished shows the away card once", async ({ page }) => {
   await page.goto("/");
-  await page.getByRole("button", { name: "Session" }).click();
+  await page.getByRole("button", { name: "Session", exact: true }).click();
 
   await page.evaluate(() => window.dispatchEvent(new Event("blur")));
 

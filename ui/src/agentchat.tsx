@@ -44,7 +44,9 @@ function readableOn(color: string | null | undefined): string {
   const green = parseInt(value.slice(2, 4), 16);
   const blue = parseInt(value.slice(4, 6), 16);
   if ([red, green, blue].some((part) => Number.isNaN(part))) return "var(--text)";
-  return (0.299 * red + 0.587 * green + 0.114 * blue) / 255 > 0.62 ? "#0b0c0e" : "#ffffff";
+  return (0.299 * red + 0.587 * green + 0.114 * blue) / 255 > 0.62
+    ? "var(--on-light)"
+    : "var(--on-dark)";
 }
 
 /** `21:18:02` as a clock a person reads. */
@@ -469,6 +471,43 @@ export default function ChatView({
       !presence.some(([name]) => sameAgent(name, harness.name)) &&
       matches(harness.label, harness.name),
   );
+  // Installed is not the same as usable. These rows make a login or missing key visible instead
+  // of leaving a harness that cannot answer out of the roster entirely.
+  const blocked = harnesses.filter(
+    (harness) =>
+      !harness.ready &&
+      !presence.some(([name]) => sameAgent(name, harness.name)) &&
+      matches(harness.label, harness.name, harness.status, harness.evidence),
+  );
+  const statusLabel = (harness: AgentChatHarness): string => {
+    switch (harness.status) {
+      case "missing":
+        return "not installed";
+      case "missing_key":
+        return "key missing";
+      case "unauthenticated":
+        return "sign-in needed";
+      case "provider_blocked":
+        return "provider blocked";
+      case "probe_timeout":
+        return "still starting";
+      case "probe_failed":
+        return "probe failed";
+      case "usable":
+        return "usable";
+      default:
+        return "not checked";
+    }
+  };
+  const explainHarness = (harness: AgentChatHarness): string =>
+    [
+      `${harness.label}: ${statusLabel(harness)}`,
+      harness.evidence,
+      harness.remediation ? `Fix: ${harness.remediation}` : null,
+      harness.credential ? `Accepts: ${harness.credential}` : null,
+    ]
+      .filter(Boolean)
+      .join("\n");
 
   const focused = focus ? agents[focus] ?? null : null;
   const focusedLabel =
@@ -653,7 +692,27 @@ export default function ChatView({
             </button>
           ))}
 
-          {bots.length === 0 && startable.length === 0 ? (
+          {blocked.map((harness) => (
+            <button
+              key={harness.name}
+              className="bots-row blocked"
+              onClick={() => onNotice(explainHarness(harness))}
+              title={explainHarness(harness)}
+            >
+              <span className="bots-avatar ghost" aria-hidden>
+                {initial(harness.label)}
+              </span>
+              <span className="bots-row-text">
+                <span className="bots-row-name">{harness.label}</span>
+                <span className="bots-row-sub">
+                  {statusLabel(harness)}
+                  {harness.remediation ? ` · ${harness.remediation}` : ""}
+                </span>
+              </span>
+            </button>
+          ))}
+
+          {bots.length === 0 && startable.length === 0 && blocked.length === 0 ? (
             <p className="bots-none">
               {needle ? "No bot matches that search." : "No bot is configured yet."}
             </p>

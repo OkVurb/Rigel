@@ -4,7 +4,7 @@ import { expect, test } from "@playwright/test";
 // sample transcript is enough to check the classification and the per-session memory.
 test("the transcript filters, remembers, and draws an outline", async ({ page }) => {
   await page.goto("/");
-  await page.getByRole("button", { name: "Session" }).click();
+  await page.getByRole("button", { name: "Session", exact: true }).click();
 
   const bar = page.getByRole("group", { name: "Transcript filter" });
   const filter = (name: string) => bar.getByRole("button", { name: new RegExp(`^${name}`) });
@@ -25,7 +25,7 @@ test("the transcript filters, remembers, and draws an outline", async ({ page })
   await outline.getByRole("button").first().click();
 
   await page.reload();
-  await page.getByRole("button", { name: "Session" }).click();
+  await page.getByRole("button", { name: "Session", exact: true }).click();
   await expect(
     page
       .getByRole("group", { name: "Transcript filter" })

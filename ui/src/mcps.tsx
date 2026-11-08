@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 
 import { api, isTauri, type McpServer } from "./api";
 
@@ -117,6 +117,9 @@ export default function McpShelf({ project, kind, onKind }: Props) {
   const [total, setTotal] = useState<number | null>(null);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
+  const [loadingMore, setLoadingMore] = useState(false);
+  const loadingMoreRef = useRef(false);
+  const queryVersionRef = useRef(0);
   const [error, setError] = useState<string | null>(null);
   const [installed, setInstalled] = useState(false);
   const [busy, setBusy] = useState(false);
@@ -126,7 +129,12 @@ export default function McpShelf({ project, kind, onKind }: Props) {
 
   useEffect(() => {
     let live = true;
+    queryVersionRef.current += 1;
     setLoading(true);
+    setLoadingMore(false);
+    loadingMoreRef.current = false;
+    setRows([]);
+    setTotal(null);
     setError(null);
     const timer = window.setTimeout(() => {
       if (!isTauri()) {
@@ -167,6 +175,38 @@ export default function McpShelf({ project, kind, onKind }: Props) {
       window.clearTimeout(timer);
     };
   }, [query]);
+
+  const loadMore = useCallback(async () => {
+    if (
+      !isTauri() ||
+      loadingMoreRef.current ||
+      loading ||
+      error ||
+      total === null ||
+      rows.length >= total
+    ) {
+      return;
+    }
+    const offset = rows.length;
+    const version = queryVersionRef.current;
+    loadingMoreRef.current = true;
+    setLoadingMore(true);
+    try {
+      const next = await api.mcpCatalog.search(query, PAGE, offset);
+      if (queryVersionRef.current === version) {
+        setRows((current) => (current.length === offset ? [...current, ...next] : current));
+      }
+    } catch (problem) {
+      if (queryVersionRef.current === version) {
+        setError(problem instanceof Error ? problem.message : String(problem));
+      }
+    } finally {
+      if (queryVersionRef.current === version) {
+        loadingMoreRef.current = false;
+        setLoadingMore(false);
+      }
+    }
+  }, [error, loading, query, rows.length, total]);
 
   const selected = rows.find((server) => server.id === selectedId) ?? null;
 
@@ -247,7 +287,17 @@ export default function McpShelf({ project, kind, onKind }: Props) {
           </p>
         ) : null}
 
-        <div className="rows" role="listbox" aria-label="MCP servers">
+        <div
+          className="rows"
+          role="listbox"
+          aria-label="MCP servers"
+          onScroll={(event) => {
+            const pane = event.currentTarget;
+            if (pane.scrollHeight - pane.scrollTop - pane.clientHeight < 400) {
+              void loadMore();
+            }
+          }}
+        >
           {rows.map((server) => (
             <button
               key={server.id}
@@ -280,11 +330,14 @@ export default function McpShelf({ project, kind, onKind }: Props) {
                   : "The catalogue is empty."}
             </p>
           ) : null}
-          {!loading && total !== null && rows.length < total ? (
-            <p className="empty subtle">
-              Showing {rows.length.toLocaleString()} of {total.toLocaleString()}; refine the search
-              to narrow it.
-            </p>
+          {loadingMore ? <p className="empty subtle">Loading more…</p> : null}
+          {!loading && !loadingMore && error === null && total !== null && rows.length < total ? (
+            <button className="load-more" type="button" onClick={() => void loadMore()}>
+              Load more · {rows.length.toLocaleString()} of {total.toLocaleString()}
+            </button>
+          ) : null}
+          {!loading && total !== null && total > PAGE && rows.length >= total ? (
+            <p className="empty subtle">All {total.toLocaleString()} MCPs shown.</p>
           ) : null}
         </div>
       </aside>

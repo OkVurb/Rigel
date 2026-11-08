@@ -6,7 +6,7 @@ test("composer history recalls a sent prompt and a snippet fills its placeholder
   page,
 }) => {
   await page.goto("/");
-  await page.getByRole("button", { name: "Session" }).click();
+  await page.getByRole("button", { name: "Session", exact: true }).click();
 
   const composer = page.getByPlaceholder(/Ask the agent/);
   await composer.fill("First prompt for history");
@@ -32,7 +32,7 @@ test("composer history recalls a sent prompt and a snippet fills its placeholder
 // and never takes Send away.
 test("the cost preflight shows a range and leaves Send enabled", async ({ page }) => {
   await page.goto("/");
-  await page.getByRole("button", { name: "Session" }).click();
+  await page.getByRole("button", { name: "Session", exact: true }).click();
 
   const composer = page.getByPlaceholder(/Ask the agent/);
   await composer.fill("Add the same retry to the upload path");
@@ -43,5 +43,14 @@ test("the cost preflight shows a range and leaves Send enabled", async ({ page }
   await expect(preflight).toContainText("from 3 turns");
 
   await expect(page.getByRole("button", { name: "Send", exact: true })).toBeEnabled();
-  await expect(page.locator(".composer-quote")).toBeVisible();
+  const quote = page.locator(".composer-quote");
+  await expect(quote).toBeVisible();
+
+  // Item 19: a price table past its freshness margin is visibly stale where the cost is shown,
+  // naming how old it is and where it came from rather than silently presenting it as current.
+  const stale = quote.locator(".price-stale");
+  await expect(stale).toBeVisible();
+  await expect(stale).toContainText("stale prices:");
+  await expect(stale).toContainText(/\d+ days old/);
+  await expect(stale).toContainText("vendor price pages");
 });

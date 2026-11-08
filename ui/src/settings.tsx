@@ -4,7 +4,8 @@
  * The window's settings are not one form: chat providers and harness keys have nothing to do
  * with the terminal's font, and the project's safety caps live in a different database from the
  * app's own preferences. So the nav is a page list — Agent, Providers, Harnesses, Safety,
- * Spending, Terminal, Skill shelf, Project rules, Notifications, Updates, Diagnostics — and each
+ * Spending, Terminal, Appearance, Keyboard, Skill shelf, Project rules, Notifications, Updates,
+ * Diagnostics — and each
  * page loads only what it shows, saves one field at a time, and states where that field lives
  * (settings.toml in the app data folder, the OS keychain, or the project database).
  *
@@ -20,6 +21,7 @@ import {
   type CloudPullReport,
   type CloudPublishAllReport,
   type CloudPushReport,
+  type AgentChatHarness,
   type CloudStatus,
   type HarnessInfo,
   type IngestReport,
@@ -40,10 +42,27 @@ import {
   type UpdateStatus,
 } from "./api";
 import { UI_SCALES, applyDisplay } from "./display";
+import ConcordPage from "./concord";
 import { ModelControls } from "./modelpicker";
+import { RouteInspector } from "./route-inspector";
+import { CustomProvider } from "./settings/custom-provider";
 import { ensurePermission } from "./notify";
-import { applyTheme, type Theme } from "./theme";
+import { applyContrast, applyTheme, type Theme } from "./theme";
 import { useMenu } from "./menu";
+import {
+  DEFAULT_SHORTCUTS,
+  SHORTCUTS,
+  eventToShortcut,
+  formatShortcut,
+  loadShortcuts,
+  matchesShortcut,
+  resetShortcuts,
+  sameBinding,
+  setShortcut,
+  shortcutConflict,
+  type ShortcutId,
+  type ShortcutMap,
+} from "./shortcuts";
 
 interface Props {
   keys: KeyStatus | null;
@@ -98,6 +117,14 @@ const HARNESS_KEYS = [
     placeholder: "…",
     note: "Muse Code receives this key at spawn; the native agent's muse provider resolves the same entry.",
   },
+  {
+    id: "minimax",
+    harness: "MiniMax",
+    name: "MiniMax",
+    env: "MINIMAX_API_KEY",
+    placeholder: "sk-…",
+    note: "The MiniMax room API agent receives this key at spawn; Rigel never writes it to a config file.",
+  },
 ] as const;
 
 type HarnessKey = (typeof HARNESS_KEYS)[number];
@@ -112,6 +139,139 @@ const HARNESS_LABELS: Record<HarnessInfo["harness"], string> = {
   gemini: "Gemini CLI",
 };
 
+/** The room harnesses that need a person's account or a key before they can answer. */
+const ROOM_SETUP = [
+  {
+    name: "kimi",
+    title: "Kimi Code",
+    summary:
+      "Kimi Code uses its own subscription login; Rigel never reuses a vendor login for another harness.",
+    steps: [
+      "Open a terminal in the project and run `kimi`.",
+      "At the Kimi prompt, type `/login` and finish signing in.",
+      "If the subscription is refused, upgrade the Kimi Code plan, then check again.",
+    ],
+    command: "kimi",
+  },
+  {
+    name: "kilo",
+    title: "Kilo",
+    summary: "Kilo needs a provider credential for the model it is configured to use.",
+    steps: [
+      "Run `kilo auth login`.",
+      "Choose the provider that serves Kilo's configured model.",
+      "Return here and check again; the readiness probe is bounded and will not hang.",
+    ],
+    command: "kilo auth login",
+  },
+  {
+    name: "codebuddy",
+    title: "CodeBuddy",
+    summary: "CodeBuddy uses an account login in its own terminal.",
+    steps: [
+      "Run `codebuddy` in a terminal.",
+      "At its prompt, type `/login` and complete the account sign-in.",
+      "Return here and check again.",
+    ],
+    command: "codebuddy",
+  },
+  {
+    name: "minimax",
+    title: "MiniMax",
+    summary:
+      "MiniMax's room entry is an API agent, so it needs a key rather than an interactive login.",
+    steps: [
+      "Create or copy a MiniMax API key.",
+      "Paste it into the MiniMax field under Keys a harness receives below.",
+      "Rigel injects `MINIMAX_API_KEY` only into the MiniMax room process.",
+    ],
+  },
+] as const;
+
+type RoomSetup = (typeof ROOM_SETUP)[number];
+
+function roomStatusLabel(info: AgentChatHarness | null): string {
+  if (!info) return "not configured";
+  switch (info.status) {
+    case "usable":
+      return "ready";
+    case "missing":
+      return "not installed";
+    case "missing_key":
+      return "key missing";
+    case "unauthenticated":
+      return "sign-in needed";
+    case "provider_blocked":
+      return "provider blocked";
+    case "probe_timeout":
+      return "still starting";
+    case "probe_failed":
+      return "check failed";
+    default:
+      return "not checked";
+  }
+}
+
+function roomStatusTone(info: AgentChatHarness | null): string {
+  if (!info) return "cancelled";
+  return info.ready ? "completed" : info.status === "probe_timeout" ? "incomplete" : "failed";
+}
+
+function RoomHarnessCard({
+  item,
+  info,
+  busy,
+  onCheck,
+  onCopy,
+}: {
+  item: RoomSetup;
+  info: AgentChatHarness | null;
+  busy: boolean;
+  onCheck: () => void;
+  onCopy: (text: string, label: string) => void;
+}) {
+  const command = "command" in item ? item.command : null;
+  return (
+    <div className="harness-row room-setup-card">
+      <div className="harness-row-head">
+        <strong>{item.title}</strong>
+        <span className={`pill ${roomStatusTone(info)}`}>{roomStatusLabel(info)}</span>
+      </div>
+      <p className="fine">{info?.evidence || item.summary}</p>
+      <ol className="room-setup-steps">
+        {item.steps.map((step) => (
+          <li key={step}>{step}</li>
+        ))}
+      </ol>
+      {command ? (
+        <div className="room-setup-command">
+          <code>{command}</code>
+          <button
+            className="chip"
+            type="button"
+            onClick={() => onCopy(command, `${item.title} command`)}
+          >
+            Copy command
+          </button>
+        </div>
+      ) : (
+        <p className="fine">
+          The key field is in <strong>Keys a harness receives</strong> below.
+        </p>
+      )}
+      {info?.remediation && !info.ready ? (
+        <p className="fine">Rigel says: {info.remediation}</p>
+      ) : null}
+      <div className="settings-actions">
+        <button className="chip" type="button" onClick={onCheck} disabled={busy}>
+          {busy ? "Checking…" : "Check again"}
+        </button>
+        {!info ? <span className="fine">Not in the room&apos;s config.</span> : null}
+      </div>
+    </div>
+  );
+}
+
 const PAGES = [
   { id: "agent", label: "Agent", blurb: "Model, reasoning effort, the step budget and the composer" },
   { id: "providers", label: "Providers", blurb: "Chat adapters, their keys and the local router" },
@@ -120,9 +280,12 @@ const PAGES = [
   { id: "spending", label: "Spending", blurb: "Recorded turns, grouped by day and session" },
   { id: "terminal", label: "Terminal", blurb: "Font, scrollback and the shell a tab opens" },
   { id: "appearance", label: "Appearance", blurb: "Dark or light, with the same amber accent" },
+  { id: "sponsors", label: "Sponsors", blurb: "Optional Gravity ads on the paper and in Session, and the publisher key" },
+  { id: "shortcuts", label: "Keyboard", blurb: "Rebindable shortcuts for the palette, focus mode and search" },
   { id: "shelf", label: "Skill shelf", blurb: "Sources, freshness and indexing a repository" },
   { id: "cloud", label: "Cloud", blurb: "Your Firebase project, the account and the shelf mirror" },
   { id: "mail", label: "Email", blurb: "The AgentMail inbox the agent reads and sends from" },
+  { id: "concord", label: "Concord", blurb: "Muse's inbox, delivery receipts and replies" },
   { id: "rules", label: "Project rules", blurb: "AGENTS.md, CLAUDE.md and memory export" },
   { id: "notifications", label: "Notifications", blurb: "Desktop events while the window is hidden" },
   { id: "updates", label: "Updates", blurb: "The signed self-update" },
@@ -138,14 +301,17 @@ export type SettingsPage = PageId;
 const SETTINGS_KEYWORDS: Record<PageId, string> = {
   agent: "model provider effort reasoning steps budget chat picker composer auto refine",
   providers: "api key vertex google cloud omniroute openrouter anthropic openai gemini keys",
-  harnesses: "claude codex cursor cline gemini cli installed path",
+  harnesses:
+    "claude codex cursor cline gemini cli installed path kimi kilo codebuddy minimax room sign in login key",
   safety: "writable agents daily cap budget permissions",
   spending: "cost usage tokens spend money",
   terminal: "font size scrollback shell powershell bash",
   appearance: "theme dark light scale density compact display",
-  shelf: "skills sources refresh index repository stale",
+  shortcuts: "keyboard keys bindings rebind shortcut palette focus search",    shelf: "skills sources refresh index repository stale roblox",
+  sponsors: "gravity ads sponsored advertising publisher key home card opt in",
   cloud: "firebase firestore account sign in login sessions publishing push pull shelf mirror",
   mail: "email agentmail inbox key send",
+  concord: "concord inbox messages receipts replies muse agent work",
   rules: "agents.md claude.md memory project rules export",
   notifications: "desktop permission approval turn done failed",
   updates: "version github signed installer auto update",
@@ -215,7 +381,7 @@ function HarnessKeyRow({
     setBusy(true);
     setError(null);
     try {
-      onKeys(await api.setKey(item.id, key));
+      onKeys((await api.setKey(item.id, key)).status);
       setValue("");
       setConfirmRemove(false);
       onNotice(`${item.name} key stored for ${item.harness}.`);
@@ -400,6 +566,16 @@ export default function SettingsView({
   onNotice,
 }: Props) {
   const [page, setPage] = useState<PageId>(initialPage);
+
+  // Q294: a settings page has an address. Opening `#settings/safety` from a note or a second
+  // window lands on that page, and the address follows the sidebar so it can be copied.
+  useEffect(() => {
+    const target = /^#settings\/([a-z]+)$/.exec(window.location.hash)?.[1];
+    if (target && PAGES.some((row) => row.id === target)) setPage(target as PageId);
+  }, []);
+  useEffect(() => {
+    window.history.replaceState(null, "", `#settings/${page}`);
+  }, [page]);
   const contextMenu = useMenu();
   const copyText = async (text: string, label: string) => {
     if (!text) return;
@@ -411,6 +587,9 @@ export default function SettingsView({
     }
   };
   const [filter, setFilter] = useState("");
+  const [shortcuts, setShortcuts] = useState<ShortcutMap>(() => loadShortcuts());
+  const [capturing, setCapturing] = useState<ShortcutId | null>(null);
+  const [shortcutError, setShortcutError] = useState<string | null>(null);
   const settingsSearch = useRef<HTMLInputElement | null>(null);
   const [value, setValue] = useState("");
   const [busy, setBusy] = useState(false);
@@ -422,6 +601,10 @@ export default function SettingsView({
   const [server, setServer] = useState<OmnirouteStatus | null>(null);
   const [serverBusy, setServerBusy] = useState(false);
   const [harnesses, setHarnesses] = useState<HarnessInfo[] | null>(null);
+  // The room's own readiness rows. These include CLIs the adapter probe does not know about,
+  // and their evidence is the exact login or key error the CLI printed.
+  const [roomHarnesses, setRoomHarnesses] = useState<AgentChatHarness[] | null>(null);
+  const [roomProbing, setRoomProbing] = useState(false);
   // The chat adapters come from Rust: one table, so a new provider appears here, in the CLI's
   // `keys status` and in the turn path at once.
   const [providers, setProviders] = useState<ProviderRow[]>([]);
@@ -484,6 +667,16 @@ export default function SettingsView({
   const credentialWord = token ? "token" : "key";
   const heldKeys = providers.filter((row) => keys?.providers[row.id]).length;
   const installed = harnesses?.filter((info) => info.installed).length ?? 0;
+  const readyRoom =
+    roomHarnesses?.filter(
+      (row) => row.ready && ROOM_SETUP.some((guide) => guide.name === row.name),
+    ).length ?? 0;
+  // Anything else the room configures but the last probe could not use. It still gets a card, so a
+  // blocked harness is never a silent omission from this page.
+  const otherBlocked =
+    roomHarnesses?.filter(
+      (row) => !row.ready && !ROOM_SETUP.some((guide) => guide.name === row.name),
+    ) ?? [];
   const staleSources = sources?.filter((row) => row.state !== "ok").length ?? null;
 
   useEffect(() => {
@@ -601,12 +794,44 @@ export default function SettingsView({
     }
   };
 
-  // A stored or deleted key changes the auth line immediately; the probe only needs to
-  // re-classify, not re-run the binaries.
+  const refreshRoomHarnesses = async (force = false) => {
+    if (!project) {
+      setRoomHarnesses(null);
+      return;
+    }
+    setRoomProbing(true);
+    try {
+      setRoomHarnesses(await api.agentChat.harnesses(project, force));
+    } catch {
+      setRoomHarnesses(null);
+    } finally {
+      setRoomProbing(false);
+    }
+  };
+
+  // A stored or deleted key changes the auth line immediately; the room's readiness verdict
+  // must not stay cached behind it, or a just-saved MiniMax key would still say "key missing".
   const applyKeys = (status: KeyStatus) => {
     onKeys(status);
     void refreshHarnesses();
+    void refreshRoomHarnesses(true);
   };
+
+  // The room is probed only when its page is open. The answer is cached in Rust for a minute;
+  // Check again forces a fresh, bounded pass after an external sign-in.
+  useEffect(() => {
+    if (page !== "harnesses" || !project) return;
+    let live = true;
+    setRoomProbing(true);
+    api.agentChat
+      .harnesses(project)
+      .then((next) => live && setRoomHarnesses(next))
+      .catch(() => live && setRoomHarnesses(null))
+      .finally(() => live && setRoomProbing(false));
+    return () => {
+      live = false;
+    };
+  }, [page, project]);
 
   /** Save one or more app preferences, keeping a single copy of the settings object. */
   const patch = async (fields: Partial<Settings>, notice?: string) => {
@@ -628,7 +853,19 @@ export default function SettingsView({
     applyTheme(next);
     await patch(
       { theme: next },
-      next === "light" ? "Light theme — same amber, measured contrast." : "Dark theme.",
+      next === "light"
+        ? "Light theme — same amber, measured contrast."
+        : next === "system"
+          ? "Theme now follows the system setting."
+          : "Dark theme.",
+    );
+  };
+
+  const saveContrast = async (high: boolean) => {
+    applyContrast(high);
+    await patch(
+      { high_contrast: high },
+      high ? "High-contrast palette on." : "Standard contrast.",
     );
   };
 
@@ -797,9 +1034,10 @@ export default function SettingsView({
     }
   };
 
-  const indexRepo = async () => {
-    const repo = repoInput.trim();
+  const indexRepo = async (target?: string) => {
+    const repo = (target ?? repoInput).trim();
     if (!repo || !source.indexRepo) return;
+    setRepoInput(repo);
     setIndexing(true);
     setShelfError(null);
     try {
@@ -860,12 +1098,15 @@ export default function SettingsView({
     setBusy(true);
     setError(null);
     try {
-      const status = await api.setKey(provider, key);
-      onKeys(status);
+      const result = await api.setKey(provider, key);
+      onKeys(result.status);
       setValue("");
       setConfirmRemove(false);
+      const stored = `${providerInfo?.name ?? provider} ${credentialWord} stored in the OS keychain.`;
       onNotice(
-        `${providerInfo?.name ?? provider} ${credentialWord} stored in the OS keychain. This window will not read it back.`,
+        result.check
+          ? `${stored} ${result.check.note}`
+          : `${stored} This window will not read it back.`,
       );
     } catch (problem) {
       setError(problem instanceof Error ? problem.message : String(problem));
@@ -1154,19 +1395,60 @@ export default function SettingsView({
     }
   };
 
-  // Slash focuses the filter without stealing keys from a field that is already being typed in.
+  // The saved search shortcut focuses this page's filter; a plain-key binding stays out of fields.
   useEffect(() => {
     const focusSearch = (event: KeyboardEvent) => {
-      if (event.key !== "/" || event.metaKey || event.ctrlKey || event.altKey) return;
+      if (!matchesShortcut(event, shortcuts.search)) return;
       const target = event.target as HTMLElement | null;
-      const tag = target?.tagName;
-      if (tag === "INPUT" || tag === "TEXTAREA" || target?.isContentEditable) return;
+      const typing =
+        target?.tagName === "INPUT" ||
+        target?.tagName === "TEXTAREA" ||
+        target?.tagName === "SELECT" ||
+        target?.isContentEditable === true;
+      if (!shortcuts.search.mod && !shortcuts.search.alt && typing) return;
       event.preventDefault();
       settingsSearch.current?.focus();
     };
     window.addEventListener("keydown", focusSearch);
     return () => window.removeEventListener("keydown", focusSearch);
-  }, []);
+  }, [shortcuts.search]);
+
+  // Q278: capture lives on the window in the capture phase, so the shortcut being replaced cannot
+  // fire while it is being recorded. Escape cancels; a duplicate is refused rather than silently
+  // shadowing another action.
+  useEffect(() => {
+    if (!capturing) return;
+    const onKey = (event: KeyboardEvent) => {
+      event.preventDefault();
+      event.stopPropagation();
+      if (event.key === "Escape") {
+        setCapturing(null);
+        setShortcutError(null);
+        return;
+      }
+      const next = eventToShortcut(event);
+      if (!next) return;
+      const conflict = shortcutConflict(capturing, next, shortcuts);
+      if (conflict) {
+        setShortcutError(`${formatShortcut(next)} is already used by ${conflict}.`);
+        return;
+      }
+      const label = SHORTCUTS.find((item) => item.id === capturing)?.label ?? "Shortcut";
+      setShortcuts(setShortcut(capturing, next));
+      setCapturing(null);
+      setShortcutError(null);
+      onNotice(`${label} is now ${formatShortcut(next)}.`);
+    };
+    window.addEventListener("keydown", onKey, true);
+    return () => window.removeEventListener("keydown", onKey, true);
+  }, [capturing, onNotice, shortcuts]);
+
+  useEffect(() => {
+    if (page !== "shortcuts") {
+      setCapturing(null);
+      setShortcutError(null);
+    }
+  }, [page]);
 
   /** The right-hand column of one nav row: a short fact and, when it is a state, a dot. */
   const navMeta = (id: PageId): { text: string; dot: "idle" | "failed" | null } => {
@@ -1196,7 +1478,12 @@ export default function SettingsView({
           dot: null,
         };
       case "appearance":
-        return { text: settings?.theme === "light" ? "light" : "dark", dot: null };
+        return { text: settings?.theme ?? "dark", dot: null };
+      case "shortcuts":
+        return {
+          text: `${SHORTCUTS.filter((item) => !sameBinding(shortcuts[item.id], DEFAULT_SHORTCUTS[item.id])).length} custom`,
+          dot: null,
+        };
       case "shelf":
         return {
           text: staleSources === null ? "…" : staleSources ? `${staleSources} stale` : "fresh",
@@ -1212,6 +1499,11 @@ export default function SettingsView({
         ].filter(Boolean).length;
         return { text: `${on}/3`, dot: on > 0 ? "idle" : "failed" };
       }
+      case "sponsors":
+        return {
+          text: settings?.gravity_ads ? "on" : "off",
+          dot: settings?.gravity_ads ? "idle" : null,
+        };
       case "cloud":
         return {
           text: cloud
@@ -1234,6 +1526,8 @@ export default function SettingsView({
             : "…",
           dot: mail ? (mail.configured && mail.key_present ? "idle" : "failed") : null,
         };
+      case "concord":
+        return { text: "inbox", dot: null };
       case "updates":
         return {
           text: updateStatus ? (updateStatus.enabled ? `v${updateStatus.current}` : "off") : "…",
@@ -1247,7 +1541,8 @@ export default function SettingsView({
   };
 
   const active = PAGES.find((item) => item.id === page) ?? PAGES[0];
-  const theme: Theme = settings?.theme === "light" ? "light" : "dark";
+  const theme: Theme =
+    settings?.theme === "light" || settings?.theme === "system" ? settings.theme : "dark";
   const settingsQuery = filter.trim().toLowerCase();
   const shownPages = settingsQuery
     ? PAGES.filter((item) =>
@@ -1263,12 +1558,14 @@ export default function SettingsView({
         <h3>Model and effort</h3>
         <ModelControls
           model={settings?.model ?? "gpt-5.6-sol-medium"}
+          provider={settings?.provider}
           effort={settings?.effort ?? "medium"}
           chatOnly={settings?.chat_models_only ?? true}
           disabled={!settings}
           onModel={(model, next) =>
             void patch(
-              { model, provider: next },
+              // A hand-picked pair is not the free pair Free mode proved.
+              { model, provider: next, free_mode: false },
               `Default model: ${model} · ${settings?.effort ?? "medium"} effort.`,
             )
           }
@@ -1283,6 +1580,11 @@ export default function SettingsView({
                 : "The picker shows every row, chat or not.",
             )
           }
+        />
+        <RouteInspector
+          project={project ?? ""}
+          provider={provider}
+          model={settings?.model ?? ""}
         />
         <p className="fine">
           Saved as the default for native turns. The catalogue merges every provider that holds a
@@ -1336,8 +1638,9 @@ export default function SettingsView({
           refine each draft before sending
         </label>
         <p className="fine">
-          The composer&apos;s own switch writes this same setting. Refinement uses the cheap model;
-          a refiner failure still sends the draft you typed.
+          The composer&apos;s own switch writes this same setting. Refinement uses Antigravity&apos;s
+          Gemini 3.8 Flash tiered model on the local router; its tier follows your effort level,
+          and a refiner failure still sends the draft you typed.
         </p>
       </section>
     </>
@@ -1386,6 +1689,8 @@ export default function SettingsView({
           })}
         </div>
       </section>
+
+      <CustomProvider onNotice={onNotice} />
 
       {provider === "omniroute" ? (
         <section className="settings-section">
@@ -1513,7 +1818,9 @@ export default function SettingsView({
           ) : null}
         </div>
         <p className="fine">
-          Stored as <code>rigel/{provider}</code> in the OS keychain. Headless runs can set{" "}
+          Saving a chat provider key checks it with the provider before writing it; a rejected key
+          leaves the previous one in place. Stored as <code>rigel/{provider}</code> in the OS
+          keychain. Headless runs can set{" "}
           <code>{providerInfo?.env ?? "its environment variable"}</code> instead; Rigel never
           writes a credential to a config file.
           {providerInfo?.key_url ? (
@@ -1553,6 +1860,96 @@ export default function SettingsView({
           <p className="fine">The probe is unavailable in this window.</p>
         )}
       </section>
+
+      <section className="settings-section">
+        <div className="settings-head">
+          <h3>Room sign-in and keys</h3>
+          <span
+            className={`pill ${
+              roomProbing ? "cancelled" : readyRoom === ROOM_SETUP.length ? "completed" : "failed"
+            }`}
+          >
+            {roomProbing
+              ? "checking"
+              : roomHarnesses
+                ? `${readyRoom}/${ROOM_SETUP.length} ready`
+                : "not checked"}
+          </span>
+        </div>
+        <p className="fine">
+          These four are configured in the room's own harness table. A ready row has answered a
+          real headless prompt; a blocked row names the account or key it still needs. Sign in from
+          a terminal, then return here and press Check again — Rigel re-runs the bounded probe
+          immediately instead of waiting for its cache.
+        </p>
+        <div className="harness-list">
+          {ROOM_SETUP.map((item) => (
+            <RoomHarnessCard
+              key={item.name}
+              item={item}
+              info={roomHarnesses?.find((row) => row.name === item.name) ?? null}
+              busy={roomProbing}
+              onCheck={() => void refreshRoomHarnesses(true)}
+              onCopy={(text, label) => void copyText(text, label)}
+            />
+          ))}
+        </div>
+        {!project ? (
+          <p className="fine">Open a project to read its room's configured harnesses.</p>
+        ) : null}
+      </section>
+
+      {otherBlocked.length > 0 ? (
+        <section className="settings-section">
+          <div className="settings-head">
+            <h3>Other blocked harnesses</h3>
+            <span className="pill failed">{otherBlocked.length}</span>
+          </div>
+          <p className="fine">
+            These are configured in the room too, and its last probe did not report them ready. A
+            sign-in or key problem is fixed in a terminal; a probe timeout is not a credential
+            problem and can be retried here.
+          </p>
+          <div className="harness-list">
+            {otherBlocked.map((row) => (
+              <div className="harness-row room-setup-card" key={row.name}>
+                <div className="harness-row-head">
+                  <strong>
+                    {HARNESS_LABELS[row.name as keyof typeof HARNESS_LABELS] ?? row.name}
+                  </strong>
+                  <span className={`pill ${roomStatusTone(row)}`}>{roomStatusLabel(row)}</span>
+                </div>
+                <p className="fine">{row.evidence}</p>
+                {row.remediation ? (
+                  <p className="fine">Rigel says: {row.remediation}</p>
+                ) : row.status === "probe_failed" ? (
+                  <p className="fine">
+                    This is not a missing login or key: the CLI started and exited without a
+                    usable answer. Press Check again. If it keeps failing, run that harness once
+                    in a terminal to see its own error; Rigel cannot sign in or repair it from
+                    here.
+                  </p>
+                ) : (
+                  <p className="fine">
+                    Rigel has no in-app fix for this harness yet. Sign in or install it in a
+                    terminal, then press Check again.
+                  </p>
+                )}
+                <div className="settings-actions">
+                  <button
+                    className="chip"
+                    type="button"
+                    onClick={() => void refreshRoomHarnesses(true)}
+                    disabled={roomProbing}
+                  >
+                    {roomProbing ? "Checking…" : "Check again"}
+                  </button>
+                </div>
+              </div>
+            ))}
+          </div>
+        </section>
+      ) : null}
 
       <section className="settings-section">
         <div className="settings-head">
@@ -1881,6 +2278,19 @@ export default function SettingsView({
             </span>
           </label>
         </div>
+        <div className="settings-actions">
+          <button
+            className="chip"
+            onClick={() => void indexRepo("EL4CTEO/roblox-skills")}
+            disabled={indexing || !source.indexRepo}
+          >
+            Index Roblox skills
+          </button>
+          <span className="fine">
+            23 MIT-licensed skills for Luau, data stores, networking, UI, security and
+            performance.
+          </span>
+        </div>
         {indexReport ? (
           <p className="fine mono">
             {indexReport.source} · {indexReport.repo ?? "—"}@{indexReport.branch ?? "—"} ·{" "}
@@ -1973,6 +2383,51 @@ export default function SettingsView({
           {label}
         </label>
       ))}
+
+      <div className="settings-head" style={{ marginTop: 18 }}>
+        <h3>Quiet hours</h3>
+        <span className="pill cancelled">local time</span>
+      </div>
+      <p className="fine">
+        Inside this window every desktop notification stays silent; the transcript still records
+        the event. Leave both blank to turn quiet hours off.
+      </p>
+      <div className="settings-actions">
+        <label className="settings-field">
+          <span>From</span>
+          <input
+            type="time"
+            value={settings?.quiet_hours_start ?? ""}
+            disabled={!settings}
+            onChange={(event) =>
+              void patch({ quiet_hours_start: event.target.value }, "Quiet hours saved.")
+            }
+          />
+        </label>
+        <label className="settings-field">
+          <span>To</span>
+          <input
+            type="time"
+            value={settings?.quiet_hours_end ?? ""}
+            disabled={!settings}
+            onChange={(event) =>
+              void patch({ quiet_hours_end: event.target.value }, "Quiet hours saved.")
+            }
+          />
+        </label>
+        <button
+          className="chip"
+          disabled={!settings}
+          onClick={() =>
+            void patch(
+              { quiet_hours_start: "", quiet_hours_end: "" },
+              "Quiet hours off.",
+            )
+          }
+        >
+          Clear
+        </button>
+      </div>
     </section>
   );
 
@@ -2090,7 +2545,7 @@ export default function SettingsView({
           <span className="pill cancelled">{theme}</span>
         </div>
         <div className="theme-grid" role="group" aria-label="Theme">
-          {(["dark", "light"] as const).map((option) => (
+          {(["dark", "light", "system"] as const).map((option) => (
             <button
               key={option}
               type="button"
@@ -2105,16 +2560,37 @@ export default function SettingsView({
                 <i />
               </span>
               <span className="theme-option-body">
-                {option === "dark" ? "Dark" : "Light"}
+                {option === "dark" ? "Dark" : option === "light" ? "Light" : "System"}
                 {theme === option ? <span className="pill ok">current</span> : null}
               </span>
             </button>
           ))}
         </div>
         <p className="fine">
-          Dark is the default. Both themes keep the single amber accent: light uses a darker
+          Dark is the default. System follows the OS light/dark preference and keeps following it
+          while the window is open. Both themes keep the single amber accent: light uses a darker
           shade of the same hue for text and icons, so every label still clears AA on white. The
           terminal palette switches with the window without restarting the shell.
+        </p>
+      </section>
+
+      <section className="settings-section">
+        <div className="settings-head">
+          <h3>Contrast</h3>
+          <span className="pill cancelled">{settings?.high_contrast ? "high" : "standard"}</span>
+        </div>
+        <label className="toggle">
+          <input
+            type="checkbox"
+            checked={settings?.high_contrast ?? false}
+            disabled={!settings}
+            onChange={(event) => void saveContrast(event.target.checked)}
+          />
+          High contrast
+        </label>
+        <p className="fine">
+          Darkens or brightens text and hairlines without moving the amber accent or the layout.
+          The OS high-contrast preference is still honoured when this is off.
         </p>
       </section>
 
@@ -2927,6 +3403,11 @@ export default function SettingsView({
           page: "notifications",
         },
         {
+          label: "Sponsored cards",
+          value: settings.gravity_ads ? (settings.gravity_test_ads ? "test ads" : "live") : "off",
+          page: "sponsors",
+        },
+        {
           label: "Terminal",
           value:
             settings.terminal_font_size +
@@ -3029,6 +3510,153 @@ export default function SettingsView({
     </>
   );
 
+  const resetOne = (id: ShortcutId) => {
+    setShortcuts(setShortcut(id, DEFAULT_SHORTCUTS[id]));
+    setCapturing(null);
+    setShortcutError(null);
+  };
+
+  const shortcutsPage = (
+    <section className="settings-section">
+      <div className="settings-head">
+        <h3>Keyboard shortcuts</h3>
+        <span className="grow" />
+        <button
+          className="chip"
+          type="button"
+          onClick={() => {
+            setShortcuts(resetShortcuts());
+            setCapturing(null);
+            setShortcutError(null);
+            onNotice("Keyboard shortcuts reset.");
+          }}
+        >
+          Reset all
+        </button>
+      </div>
+      <p className="fine">
+        These apply across the window. Choose <strong>Change</strong>, then press the combination
+        you want. Escape cancels, and a combination already in use is refused rather than shadowing
+        the other action.
+      </p>
+      <div className="shortcut-list">
+        {SHORTCUTS.map((item) => {
+          const binding = shortcuts[item.id];
+          const recording = capturing === item.id;
+          return (
+            <div className={`shortcut-row${recording ? " recording" : ""}`} key={item.id}>
+              <div className="shortcut-copy">
+                <strong>{item.label}</strong>
+                <span className="fine">{item.detail}</span>
+              </div>
+              <div className="shortcut-keys">
+                {recording ? (
+                  <kbd className="shortcut-recording">Press keys…</kbd>
+                ) : (
+                  <kbd>{formatShortcut(binding)}</kbd>
+                )}
+                <button
+                  className="chip"
+                  type="button"
+                  onClick={() => {
+                    setShortcutError(null);
+                    setCapturing(recording ? null : item.id);
+                  }}
+                >
+                  {recording ? "Cancel" : "Change"}
+                </button>
+                <button
+                  className="chip"
+                  type="button"
+                  disabled={sameBinding(binding, DEFAULT_SHORTCUTS[item.id])}
+                  onClick={() => resetOne(item.id)}
+                >
+                  Reset
+                </button>
+              </div>
+            </div>
+          );
+        })}
+      </div>
+      {shortcutError ? (
+        <p className="notice" role="status">
+          {shortcutError}
+        </p>
+      ) : null}
+      <p className="fine">
+        Saved on this machine. Shortcuts survive a restart and apply on every surface; the palette
+        still stays out of a terminal, where the shell owns the keyboard.
+      </p>
+    </section>
+  );
+
+  const sponsorsPage = (
+    <section className="settings-section">
+      <div className="settings-head">
+        <h3>Sponsored cards</h3>
+        <span className={`pill ${settings?.gravity_ads ? "ok" : "cancelled"}`}>
+          {settings?.gravity_ads ? "on" : "off"}
+        </span>
+      </div>
+      <p className="fine">
+        Gravity matches one text ad to the day's edition or the open session and pays the publisher
+        for impressions and clicks. On Home the card is a small classified strip at the foot of the
+        paper; in Session it sits above the composer. Both are labelled <strong>Advertisement</strong>,
+        and both are off until you turn them on. While they are off, Rigel makes no ad request at
+        all. The constellation companion above the Session composer is local, not an ad, and stays
+        when the switch is off. Click it to choose among all six constellations; the choice stays on
+        this machine. The shared Firebase broker holds the publisher key; this machine never does.
+      </p>
+      <label className="toggle">
+        <input
+          type="checkbox"
+          checked={settings?.gravity_ads ?? false}
+          disabled={!settings}
+          onChange={(event) =>
+            void patch(
+              { gravity_ads: event.target.checked },
+              event.target.checked
+                ? "Sponsored cards on: Home and Session request one ad at a time."
+                : "Sponsored cards off; no ad requests are made.",
+            )
+          }
+        />
+        Show sponsored cards in Rigel
+      </label>
+      <label className="toggle">
+        <input
+          type="checkbox"
+          checked={settings?.gravity_test_ads ?? true}
+          disabled={!settings || !settings.gravity_ads}
+          onChange={(event) =>
+            void patch(
+              { gravity_test_ads: event.target.checked },
+              event.target.checked
+                ? "Test ads shown while Gravity reviews the site; no billing."
+                : "Test ads hidden; live ads still appear after approval.",
+            )
+          }
+        />
+        Show test ads while Gravity reviews the site
+      </label>
+      <div className="settings-head" style={{ marginTop: 18 }}>
+        <h3>Shared endpoint</h3>
+        <span className="pill completed">Firebase</span>
+      </div>
+      <p className="fine">
+        Both the website and this window ask <code>https://rigel-25128.web.app/api/gravity-ad</code>.
+        The publisher key lives in Firebase Secret Manager, and the response names the one
+        <code>rigel-sponsor</code> slot. There is nothing to paste here.
+      </p>
+      <p className="fine">
+        On Home, an ad request carries the edition's headline and the two most recent messages. In
+        Session it carries a generic request, never the transcript. Both carry the client user agent
+        and this installation's anonymous id, but never a file or a path. Impressions and clicks are
+        recorded by Rust because the window's CSP forbids third-party images and connections.
+      </p>
+    </section>
+  );
+
   const body = (() => {
     switch (page) {
       case "agent":
@@ -3045,16 +3673,22 @@ export default function SettingsView({
         return terminalPage;
       case "appearance":
         return appearancePage;
+      case "shortcuts":
+        return shortcutsPage;
       case "shelf":
         return shelfPage;
       case "cloud":
         return cloudPage;
       case "mail":
         return mailPage;
+      case "concord":
+        return <ConcordPage onNotice={onNotice} />;
       case "rules":
         return rulesPage;
       case "notifications":
         return notificationsPage;
+      case "sponsors":
+        return sponsorsPage;
       case "updates":
         return updatesPage;
       case "advanced":
@@ -3111,7 +3745,7 @@ export default function SettingsView({
                 ×
               </button>
             ) : (
-              <kbd>/</kbd>
+              <kbd>{formatShortcut(shortcuts.search)}</kbd>
             )}
           </label>
         </div>
@@ -3153,7 +3787,7 @@ export default function SettingsView({
                             label: "Search settings",
                             detail: filter ? `Filter: ${filter}` : "Every page in one list",
                             icon: "search",
-                            hint: "/",
+                            hint: formatShortcut(shortcuts.search),
                             onSelect: () => settingsSearch.current?.focus(),
                           },
                         ],

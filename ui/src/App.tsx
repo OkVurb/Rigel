@@ -20,6 +20,7 @@ import {
   type SkillRow,
   type SkillSource,
   type SourceStatus,
+  type SwarmLead,
   type SwarmTarget,
   type UpdateCheck,
   type UpdateStatus,
@@ -30,14 +31,22 @@ import { RigelMark } from "./mark";
 import { useMenu } from "./menu";
 import { PreviewSkillSource } from "./mock";
 import DiffView from "./diff";
+import HomeView from "./home";
 import AccountView from "./account";
 import McpShelf, { ShelfTabs, type ShelfKind } from "./mcps";
 import Palette, { type PaletteAction } from "./palette";
 import SessionView from "./session";
 import SettingsView, { type SettingsPage } from "./settings";
 import { applyDisplay } from "./display";
-import { applyTheme } from "./theme";
+import { applyContrast, applyTheme, themePreference } from "./theme";
 import Titlebar from "./titlebar";
+import {
+  formatShortcut,
+  loadShortcuts,
+  matchesShortcut,
+  SHORTCUTS_EVENT,
+  type ShortcutMap,
+} from "./shortcuts";
 
 // xterm and its CSS are only needed once the terminal is opened; keep them out of the first paint.
 const TerminalView = lazy(() => import("./terminal"));
@@ -52,6 +61,7 @@ function nativeKeyLabel(keys: KeyStatus, providers: ProviderRow[]): string {
 }
 
 const ICONS = {
+  home: "M3 9.7 10 3.5l7 6.2V16a1 1 0 0 1-1 1h-3.6v-5H7.6v5H4a1 1 0 0 1-1-1Z",
   attention: "M10 2.5a5 5 0 0 1 5 5c0 3 1 4.5 2 5.5H3c1-1 2-2.5 2-5.5a5 5 0 0 1 5-5ZM8 16h4M9 18h2",
   shelf: "M10 2.5 17 6.5v7l-7 4-7-4v-7l7-4ZM3 6.5l7 4 7-4M10 10.5v7",
   session: "M3 4.5h14M3 9.5h14M3 14.5h9",
@@ -64,6 +74,7 @@ const ICONS = {
 } as const;
 
 type View =
+  | "home"
   | "shelf"
   | "attention"
   | "session"
@@ -77,6 +88,7 @@ type View =
 type Focus = { sessionId: string; turnId?: string; patchId?: string; hunkId?: string } | null;
 
 const VIEWS: { id: View; label: string; d: string; phase: string }[] = [
+  { id: "home", label: "Home", d: ICONS.home, phase: "P1" },
   { id: "shelf", label: "Shelf", d: ICONS.shelf, phase: "P2" },
   { id: "attention", label: "Attention", d: ICONS.attention, phase: "P7" },
   { id: "session", label: "Session", d: ICONS.session, phase: "P3" },
@@ -121,6 +133,9 @@ export default function App() {
   const [shelfKind, setShelfKind] = useState<ShelfKind>("skills");
   const [skillInstalled, setSkillInstalled] = useState(false);
   const [installingSkill, setInstallingSkill] = useState(false);
+  // Q270: a shelf row can be pinned to the session the window already has open.
+  const [pinningSkill, setPinningSkill] = useState(false);
+  const [pinnedSkillId, setPinnedSkillId] = useState<string | null>(null);
 
   const [loading, setLoading] = useState(true);
   const [slow, setSlow] = useState(false);
@@ -129,7 +144,7 @@ export default function App() {
     isTauri() ? "Search the local index. Nothing leaves this machine." : "Browser preview — sample rows, no database.",
   );
 
-  const [view, setView] = useState<View>("shelf");
+  const [view, setView] = useState<View>("home");
   // Account can deep-link into Settings; the target is set before the view switches.
   const [settingsPage, setSettingsPage] = useState<SettingsPage>("agent");
   // D159: widths are per project, because a project's folder names and paths decide how much
@@ -142,6 +157,11 @@ export default function App() {
     start: number;
   } | null>(null);
   const [paletteOpen, setPaletteOpen] = useState(false);
+  // Q289: focus hides the navigation chrome without changing the surface underneath.
+  const [focusMode, setFocusMode] = useState(false);
+  const [shortcuts, setShortcuts] = useState<ShortcutMap>(() => loadShortcuts());
+  // Q295: the release notes live in their own dialog, not the settings page.
+  const [aboutOpen, setAboutOpen] = useState(false);
   // D154: how many unresolved rows the rail badge shows. The Attention view reads the same list.
   const [attention, setAttention] = useState(0);
   const [focus, setFocus] = useState<Focus>(null);
@@ -197,6 +217,10 @@ export default function App() {
 
   const runPaletteAction = useCallback(
     (action: PaletteAction) => {
+      if (action === "focus") {
+        setFocusMode((on) => !on);
+        return;
+      }
       if (action === "terminal") setTerminalMounted(true);
       if (action === "settings") setSettingsPage("agent");
       setView(action);
@@ -308,15 +332,29 @@ export default function App() {
       .then((next) => {
         if (!live) return;
         applyTheme(next.theme);
+        applyContrast(next.high_contrast);
         applyDisplay(next.ui_scale, next.compact_density);
       })
       .catch(() => {
         applyTheme("dark");
+        applyContrast(false);
         applyDisplay(100, false);
       });
     return () => {
       live = false;
     };
+  }, []);
+
+  // Q277: while the saved choice is `system`, a live OS change recolours the window without a
+  // restart. An explicit dark/light choice is left alone.
+  useEffect(() => {
+    const media = window.matchMedia?.("(prefers-color-scheme: light)");
+    if (!media) return;
+    const sync = () => {
+      if (themePreference() === "system") applyTheme("system");
+    };
+    media.addEventListener("change", sync);
+    return () => media.removeEventListener("change", sync);
   }, []);
 
   // D159: switching project restores that project's widths; a project with none gets the
@@ -558,27 +596,43 @@ export default function App() {
   }, [source, selectedId, reload]);
 
   useEffect(() => {
+    const refresh = () => setShortcuts(loadShortcuts());
+    window.addEventListener(SHORTCUTS_EVENT, refresh);
+    return () => window.removeEventListener(SHORTCUTS_EVENT, refresh);
+  }, []);
+
+  useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
       const target = event.target as HTMLElement | null;
-      // D147: Ctrl+K is the palette everywhere except a terminal, where the shell owns the key.
-      if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "k") {
-        if (target?.closest(".terminal-surface")) return;
+      const inTerminal = Boolean(target?.closest(".terminal-surface"));
+      // D147: the palette is available everywhere except a terminal, where the shell owns the key.
+      if (matchesShortcut(event, shortcuts.palette)) {
+        if (inTerminal) return;
         event.preventDefault();
         setPaletteOpen((open) => !open);
         return;
       }
-      if (
-        event.key === "/" &&
-        target?.tagName !== "INPUT" &&
-        target?.tagName !== "TEXTAREA"
-      ) {
+      // Q289: focus is a window action, not a setting; the same key leaves it again.
+      if (matchesShortcut(event, shortcuts.focus)) {
+        event.preventDefault();
+        setFocusMode((on) => !on);
+        return;
+      }
+      const typing =
+        target?.tagName === "INPUT" ||
+        target?.tagName === "TEXTAREA" ||
+        target?.tagName === "SELECT" ||
+        target?.isContentEditable === true;
+      // A plain-key binding stays out of fields and the terminal; a modified one may reach them.
+      if (matchesShortcut(event, shortcuts.search)) {
+        if (!shortcuts.search.mod && !shortcuts.search.alt && (typing || inTerminal)) return;
         event.preventDefault();
         searchRef.current?.focus();
       }
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, []);
+  }, [shortcuts]);
 
   // A skill opened from the palette may not be in the current result page. Falling back to the
   // loaded detail keeps the pane usable without changing the shelf's query behind the user.
@@ -653,6 +707,22 @@ export default function App() {
     if (remembered) void openPath(remembered);
   }, [openPath]);
 
+  // The window driver opens a prepared project before the first human click. A shipped build
+  // has no `RIGEL_E2E_PROJECT`, so this resolves to null and changes nothing.
+  useEffect(() => {
+    if (!isTauri()) return;
+    let live = true;
+    void (async () => {
+      const config = await api.e2eConfig();
+      if (!live || !config) return;
+      document.documentElement.dataset.e2e = "1";
+      await openPath(config.project);
+    })();
+    return () => {
+      live = false;
+    };
+  }, [openPath]);
+
   // Start every local service the app fronts as it opens, then again once the project is
   // known: the chat checkout is found beside it. Nothing waits on this; each tab polls state.
   useEffect(() => {
@@ -662,6 +732,13 @@ export default function App() {
     bootedFor.current = root;
     void api.startServers(root).catch(() => {});
   }, [project?.root]);
+
+  // Item 15: probe every credentialed door once per launch. The picker reads the cached rows;
+  // a failed probe never blocks a turn, it only labels that door.
+  useEffect(() => {
+    if (!isTauri()) return;
+    void api.providerHealth().catch(() => {});
+  }, []);
 
   const chooseFolder = useCallback(async () => {
     try {
@@ -727,6 +804,7 @@ export default function App() {
     if (targets.length === 0) {
       // Swarm is the fan-out: an empty room is a step to finish, not a reason to send the user
       // to another tab. Start the checkout's ready harnesses and give them a moment to join.
+      // The app command also installs Free mode's managed agent when Free mode is on.
       setSwarmNotice("Starting the room's configured agents…");
       try {
         await api.agentChat.startAgents(target);
@@ -734,6 +812,14 @@ export default function App() {
         // Missing CLIs and keys are reported by the roster below; some agents may still join.
       }
       for (let attempt = 0; attempt < 24 && targets.length === 0; attempt += 1) {
+        await new Promise((resolve) => setTimeout(resolve, 500));
+        targets = online(await api.agentChat.agents());
+      }
+    } else {
+      // The room already has agents. Free mode adds the managed free-model agent without
+      // restarting or suppressing the crew that is already online.
+      const free = await api.agentChat.startFree(target).catch(() => null);
+      for (let attempt = 0; free && attempt < 12 && !targets.some((row) => row.name.startsWith("rigel-free") || row.label === "Rigel Free"); attempt += 1) {
         await new Promise((resolve) => setTimeout(resolve, 500));
         targets = online(await api.agentChat.agents());
       }
@@ -746,23 +832,44 @@ export default function App() {
     return targets;
   }, [project]);
 
-  /** Swarm step two: broadcast the task to the agents the preflight left ticked. */
-  const sendSwarm = useCallback(async (task: string, names: string[]) => {
-    if (names.length === 0) return;
-    const mentions = names.map((name) => `@${name}`).join(" ");
-    await api.agentChat.send(
-      "general",
-      `${mentions} — swarm task. Work on this in parallel in the current project; coordinate here so you do not duplicate or overwrite each other.
+  /** Swarm step two: Rigel splits the task, or the room gets one direct broadcast. */
+  const sendSwarm = useCallback(
+    async (task: string, names: string[], lead: SwarmLead = { kind: "rigel" }) => {
+      if (names.length === 0) return;
+      if (isTauri() && lead.kind !== "broadcast") {
+        const id = await api.swarmEnqueue(project?.root ?? "", task, names, lead);
+        setView("chat");
+        const boss =
+          lead.kind === "model"
+            ? `Rigel (${lead.provider} / ${lead.model})`
+            : "Rigel (Muse)";
+        setSwarmNotice(
+          `Swarm queued for ${boss} (${id.slice(0, 8)}). Rigel will assign ${names.join(
+            ", ",
+          )} and tell each one to spawn its own helpers.`,
+        );
+        return;
+      }
+      const mentions = names.map((name) => `@${name}`).join(" ");
+      await api.agentChat.send(
+        "general",
+        `${mentions} — swarm task. Work on this in parallel in the current project; coordinate here so you do not duplicate or overwrite each other.
 
 ${task}`,
-    );
-    setView("chat");
-    setSwarmNotice(
-      `Swarm sent to ${names.length} agent${names.length === 1 ? "" : "s"}: ${names.join(
-        ", ",
-      )}. Watch #general.`,
-    );
-  }, []);
+      );
+      setView("chat");
+      setSwarmNotice(
+        lead.kind === "broadcast"
+          ? `Broadcast sent directly to ${names.length} agent${
+              names.length === 1 ? "" : "s"
+            }: ${names.join(", ")}. Watch #general.`
+          : `Swarm sent directly to ${names.length} agent${
+              names.length === 1 ? "" : "s"
+            }: ${names.join(", ")}. Watch #general.`,
+      );
+    },
+    [project],
+  );
 
   const indexRepo = useCallback(async () => {
     const repo = repoInput.trim();
@@ -793,6 +900,30 @@ ${task}`,
 
   const native = isTauri();
   const sessionProject = project?.root ?? (native ? "" : "/preview/rigel");
+
+  useEffect(() => {
+    setPinnedSkillId(null);
+  }, [selectedId]);
+
+  const pinSkill = useCallback(async () => {
+    if (!selected) return;
+    if (!activeSession) {
+      setNotice("Open a session before pinning a skill.");
+      return;
+    }
+    setPinningSkill(true);
+    try {
+      await api.pins.pin(sessionProject, activeSession.id, selected.id);
+      setPinnedSkillId(selected.id);
+      setNotice(
+        `“${selected.name}” pinned to ${activeSession.title || "the open session"}. The body version stays fixed.`,
+      );
+    } catch (problem) {
+      setNotice(problem instanceof Error ? problem.message : String(problem));
+    } finally {
+      setPinningSkill(false);
+    }
+  }, [selected, activeSession, sessionProject]);
 
   const workspaceForm = newWorkspace ? (
     <form
@@ -897,7 +1028,7 @@ ${task}`,
               label: "Command palette",
               detail: "Skills, sessions, turns and patches",
               icon: "command",
-              hint: "Ctrl K",
+              hint: formatShortcut(shortcuts.palette),
               onSelect: () => setPaletteOpen(true),
             },
             {
@@ -992,6 +1123,26 @@ ${task}`,
             },
           ],
         },
+        {
+          label: "Help",
+          items: [
+            {
+              label: "About Rigel",
+              detail: "Version, licence and where the data lives",
+              icon: "spark",
+              onSelect: () => setAboutOpen(true),
+            },
+            {
+              label: "Focus mode",
+              detail: focusMode
+                ? "Show the rail, list and inspector"
+                : "Hide the rail, list and inspector",
+              icon: "command",
+              hint: formatShortcut(shortcuts.focus),
+              onSelect: () => setFocusMode((on) => !on),
+            },
+          ],
+        },
       ],
       footer: "Right-click a row for actions on it",
     });
@@ -1006,7 +1157,7 @@ ${task}`,
     <div
       className={`shell${native ? " chrome" : ""}${view === "session" ? " session" : ""}${
         view === "settings" || view === "account" ? " settings" : ""
-      }${view === "diff" ? " diff" : ""}`}
+      }${view === "diff" ? " diff" : ""}${view === "home" ? " home" : ""}${focusMode ? " focus" : ""}`}
       style={
         {
           "--list-w": `${panes.list}px`,
@@ -1065,7 +1216,7 @@ ${task}`,
                         label: "Command palette",
                         detail: "Search everything from here",
                         icon: "command",
-                        hint: "Ctrl K",
+                        hint: formatShortcut(shortcuts.palette),
                         onSelect: () => setPaletteOpen(true),
                       },
                     ],
@@ -1121,6 +1272,9 @@ ${task}`,
         role="separator"
         aria-orientation="vertical"
         aria-label="Resize the list"
+        aria-valuemin={160}
+        aria-valuemax={640}
+        aria-valuenow={Math.round(panes.list)}
         tabIndex={0}
         style={{ left: `calc(48px + ${panes.list}px - 3px)`, top: handleTop, bottom: 28 }}
         onPointerDown={(event) => startPane("list", event)}
@@ -1140,6 +1294,9 @@ ${task}`,
           role="separator"
           aria-orientation="vertical"
           aria-label="Resize the inspector"
+          aria-valuemin={160}
+          aria-valuemax={640}
+          aria-valuenow={Math.round(panes.inspector)}
           tabIndex={0}
           style={{ right: `calc(${panes.inspector}px - 3px)`, top: handleTop, bottom: 28 }}
           onPointerDown={(event) => startPane("inspector", event)}
@@ -1201,9 +1358,17 @@ ${task}`,
         </div>
       ) : null}
 
-      {view === "terminal" ? null : view === "session" ? (
+      {view === "home" ? (
+        <HomeView
+          project={sessionProject}
+          onSessions={setSessions}
+          onOpenSession={openSessionFromPalette}
+          onOpenProject={() => void chooseFolder()}
+        />
+      ) : view === "terminal" ? null : view === "session" ? (
         <SessionView
           project={sessionProject}
+          source={source}
           onSessions={setSessions}
           onActive={setActive}
           onNotice={noticeFromSession}
@@ -1291,7 +1456,7 @@ ${task}`,
                 placeholder="Search skills…"
                 aria-label="Search skills"
               />
-              <kbd>/</kbd>
+              <kbd>{formatShortcut(shortcuts.search)}</kbd>
             </label>
           ) : null}
         </div>
@@ -1492,6 +1657,32 @@ ${task}`,
 
           {selected ? (
             <div className="detail-actions">
+              <button
+                className="chip"
+                type="button"
+                onClick={() => void pinSkill()}
+                disabled={
+                  !activeSession ||
+                  !selected.has_body ||
+                  pinningSkill ||
+                  pinnedSkillId === selected.id
+                }
+                title={
+                  !activeSession
+                    ? "Open a session first"
+                    : !selected.has_body
+                      ? "This row has no indexed SKILL.md body to pin"
+                      : pinnedSkillId === selected.id
+                        ? "Pinned to the open session at this body"
+                        : "Pin this skill's current body to the open session"
+                }
+              >
+                {pinningSkill
+                  ? "Pinning…"
+                  : pinnedSkillId === selected.id
+                    ? "✓ Pinned"
+                    : "Pin to session"}
+              </button>
               <button
                 className="primary"
                 type="button"
@@ -1698,6 +1889,8 @@ ${task}`,
         open={paletteOpen}
         project={project?.root ?? null}
         currentSession={activeSession?.id ?? null}
+        shortcut={formatShortcut(shortcuts.palette)}
+        focusShortcut={formatShortcut(shortcuts.focus)}
         onClose={() => setPaletteOpen(false)}
         onAction={runPaletteAction}
         onSkill={openSkillFromPalette}
@@ -1722,7 +1915,9 @@ ${task}`,
         <span>
           {view === "session" && activeSession
             ? `session ${activeSession.id.slice(0, 8)}`
-            : view === "shelf" && shelfKind === "mcps"
+            : view === "home"
+              ? "Rigel Paper"
+              : view === "shelf" && shelfKind === "mcps"
               ? "MCP catalogue"
               : `${(total ?? rows.length).toLocaleString()} skills`}
         </span>
@@ -1748,11 +1943,22 @@ ${task}`,
         </span>
         <span className="grow" />
         <button
+          className="chip focus-chip"
+          onClick={() => setFocusMode((on) => !on)}
+          aria-pressed={focusMode}
+          title={`Hide the rail, list and inspector (${formatShortcut(shortcuts.focus)})`}
+        >
+          {focusMode ? "Exit focus" : "Focus"} · {formatShortcut(shortcuts.focus)}
+        </button>
+        <button className="chip" onClick={() => setAboutOpen(true)} title="About Rigel">
+          About
+        </button>
+        <button
           className="chip"
           onClick={() => setPaletteOpen(true)}
-          title="Search actions, skills, sessions, turns and patches (Ctrl+K)"
+          title={`Search actions, skills, sessions, turns and patches (${formatShortcut(shortcuts.palette)})`}
         >
-          Search · Ctrl K
+          Search · {formatShortcut(shortcuts.palette)}
         </button>
         <span className="metric" title="Interventions per completed task — the product metric (D17)">
           {activeSession
@@ -1760,6 +1966,54 @@ ${task}`,
             : "0/0 interventions/tasks"}
         </span>
       </footer>
+
+      {/* Q295: release notes and licences, separate from Settings. */}
+      {aboutOpen ? (
+        <div
+          className="about-backdrop"
+          role="presentation"
+          onClick={() => setAboutOpen(false)}
+        >
+          <section
+            className="about-card"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="about-title"
+            onClick={(event) => event.stopPropagation()}
+          >
+            <div className="about-head">
+              <RigelMark size={24} />
+              <div>
+                <h2 id="about-title">Rigel</h2>
+                <p className="fine">A local-first agent workbench for Windows.</p>
+              </div>
+              <span className="pill">0.1.7</span>
+            </div>
+            <dl className="about-facts">
+              <div>
+                <dt>Version</dt>
+                <dd>0.1.7 · 0.2.0 in progress</dd>
+              </div>
+              <div>
+                <dt>Data</dt>
+                <dd>Sessions live under .rigel/ in the project; the skill index under AppData.</dd>
+              </div>
+              <div>
+                <dt>Licence</dt>
+                <dd>MIT or Apache-2.0, at your option.</dd>
+              </div>
+            </dl>
+            <p className="fine">
+              No telemetry. Diagnostics stay local until you copy or export them.
+            </p>
+            <div className="settings-actions">
+              <button className="primary" onClick={() => setAboutOpen(false)}>
+                Close
+              </button>
+            </div>
+          </section>
+        </div>
+      ) : null}
     </div>
   );
 }

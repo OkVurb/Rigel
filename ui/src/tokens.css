@@ -1,0 +1,99 @@
+/* Rigel design tokens (roadmap 106).
+ *
+ * This is the only file in the window allowed to introduce a colour literal outside the
+ * documented exceptions (the xterm palette in `terminal.tsx` and fixture-provider colours in
+ * `api.ts`). Surfaces consume `var(--token)` and nothing else.
+ *
+ * Brand: instrument dark. One amber accent, hairline depth, tabular numbers, no text below
+ * 11px. See `docs/design.md` for the surface jobs, type scale, spacing and motion rules.
+ */
+
+:root {
+  /* Native controls and scrollbars follow the app, not the OS light theme. */
+  color-scheme: dark;
+  --bg: #0b0c0e;
+  --surface: #121417;
+  --raised: #171a1f;
+  /* Recessed wells inside a raised card: conflict sides, merged text, writable rows. */
+  --well: #0e1013;
+  --hairline: rgba(255, 255, 255, 0.07);
+  --text: #e6e8eb;
+  --muted: #9ba1a9;
+  /* 5.0:1 on the bg — AA for the 10–11px metadata this colour is used for. */
+  --faint: #7b838d;
+  --accent: #e9a23b;
+  /* Destructive text on a dark surface: #ff8a8d clears AA at the 9px pill size. */
+  --danger-text: #ff8a8d;
+  /* Text and icons in the accent hue. Identical to --accent here; the light theme uses a
+     darker shade of the same amber so labels clear AA on white. Fills keep --accent. */
+  --accent-text: #e9a23b;
+  --focus: var(--accent);
+  --verified: #4cc38a;
+  --danger: #e5484d;
+  --scroll-thumb: #333a43;
+  --scroll-thumb-hover: #454d58;
+  /* Text placed on a deliberately bright or dark computed background. */
+  --on-light: #0b0c0e;
+  --on-dark: #ffffff;
+  /* Punctuation between facts (`·`) and the underline of a text link. */
+  --sep: rgba(255, 255, 255, 0.24);
+  --shadow-popover: 0 18px 45px rgba(0, 0, 0, 0.45);
+  --shadow-menu: 0 16px 40px rgba(0, 0, 0, 0.45);
+  --shadow-panel: 0 10px 30px rgba(0, 0, 0, 0.35);
+  --cursor-ring: rgba(11, 12, 14, 0.7);
+  --ui: "Inter", system-ui, -apple-system, "Segoe UI", sans-serif;
+  --mono: "JetBrains Mono", "Cascadia Mono", ui-monospace, monospace;
+}
+
+/* Light theme (D126). Surfaces follow the brief's #FAFAF9 / #FFFFFF / #F2F2F0, and the amber
+   stays the identity. Text colours are picked against white rather than flipped. Measured on
+   #FFFFFF / the raised #F2F2F0 (the worst case, and the real pairing for most metadata): muted
+   6.65 / 5.93, faint 5.49 / 4.90, accent text 5.28 / 4.71, verified 5.43 / 4.84, danger 6.57 /
+   5.87. On-accent stays #191106 at 8.6:1. */
+:root[data-theme="light"] {
+  color-scheme: light;
+  --bg: #fafaf9;
+  --surface: #ffffff;
+  --raised: #f2f2f0;
+  --well: #f7f7f5;
+  --hairline: rgba(20, 22, 26, 0.1);
+  --text: #14161a;
+  --muted: #565d67;
+  --faint: #616a74;
+  --accent-text: #9c5d00;
+  --focus: #9c5d00;
+  --verified: #16794a;
+  --danger: #b42318;
+  --danger-text: #a01a12;
+  --scroll-thumb: #c9c9c4;
+  --scroll-thumb-hover: #b0b0aa;
+  --on-light: #14161a;
+  --on-dark: #ffffff;
+  --sep: rgba(20, 22, 26, 0.32);
+  --shadow-popover: 0 18px 45px rgba(20, 22, 26, 0.14);
+  --shadow-menu: 0 16px 40px rgba(20, 22, 26, 0.14);
+  --shadow-panel: 0 10px 30px rgba(20, 22, 26, 0.1);
+  --cursor-ring: rgba(20, 22, 26, 0.45);
+}
+
+/* D158: a high-contrast palette follows the OS preference. Only text and hairlines move; the
+   amber identity, layout and density stay exactly where they were. */
+@media (prefers-contrast: more) {
+  :root {
+    --muted: #c6cbd2;
+    --faint: #aeb5be;
+    --hairline: rgba(255, 255, 255, 0.22);
+    --sep: rgba(255, 255, 255, 0.5);
+  }
+
+  :root[data-theme="light"] {
+    --muted: #343a42;
+    --faint: #3f464f;
+    --hairline: rgba(20, 22, 26, 0.28);
+    --sep: rgba(20, 22, 26, 0.55);
+  }
+
+  :focus-visible {
+    outline-width: 3px;
+  }
+}

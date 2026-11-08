@@ -23,7 +23,7 @@ test("the badge counts unresolved rows and the view groups them by session", asy
   const approval = page.getByRole("button", { name: /cargo test --workspace/ });
   await expect(approval).toHaveAttribute("title", "Open the turn that asked");
   await approval.click();
-  await expect(nav.getByRole("button", { name: "Session" })).toHaveAttribute(
+  await expect(nav.getByRole("button", { name: "Session", exact: true })).toHaveAttribute(
     "aria-pressed",
     "true",
   );

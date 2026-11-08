@@ -22,31 +22,51 @@ import {
   type PendingApproval,
   type Session,
   type SessionTemplate,
+  type SkillPin,
+  type SkillPinReview,
+  type SkillRow,
+  type SkillSource,
   type Settings,
+  type TestRun,
   type Turn,
+  type SwarmLead,
   type SwarmTarget,
   type TurnQuote,
   type TeamAgent,
   type RolePreset,
   type PlanState,
   type TurnTranscript,
+  type RecoveryOffer,
+  type SubagentGraph,
 } from "./api";
+import { StepCost } from "./inspector/step-cost";
+import { Recovery } from "./recovery";
+import { SubagentGraphView } from "./subagent-graph";
+import { ApprovalCard } from "./session/approval-card";
+import { DegradedBanner } from "./degraded-banner";
 import { ModelControls } from "./modelpicker";
 import BrowserPanel, { latestBrowserCall } from "./browser";
 import RefineCard from "./refine";
+import CompanionSponsor from "./companion";
 import { notify } from "./notify";
 import { useMenu } from "./menu";
+import { bodyDiff } from "./skilldiff";
 import {
   previewAgents,
   previewApprovals,
+  previewArchivedSession,
   previewBudget,
   previewPatches,
+  previewRecovery,
   previewSession,
+  previewSubagentGraph,
   previewTranscript,
 } from "./sessionMock";
 
 interface Props {
   project: string;
+  /** The same local index the Shelf reads; the pin menu searches it in place. */
+  source: SkillSource;
   onSessions: (sessions: Session[]) => void;
   onActive: (session: Session | null) => void;
   onNotice: (notice: string) => void;
@@ -56,8 +76,8 @@ interface Props {
   projectControls?: ReactNode;
   /** Swarm step one: who is online, or a refusal to show. Sends nothing. */
   onSwarmPrepare?: () => Promise<SwarmTarget[]>;
-  /** Swarm step two: broadcast one task to the chosen agent names. */
-  onSwarm?: (task: string, names: string[]) => Promise<void>;
+  /** Swarm step two: send one task to the chosen agents, under the chosen big boss. */
+  onSwarm?: (task: string, names: string[], lead: SwarmLead) => Promise<void>;
   /** D147: open this session and land on a turn once its transcript is rendered. */
   focus?: { sessionId: string; turnId?: string } | null;
   onFocusHandled?: () => void;
@@ -74,6 +94,43 @@ const cents = (value: number | null | undefined): string =>
 /** D153: a range is read at a glance, so a fraction of a cent keeps its significant digits. */
 const shortMoney = (micros: number): string =>
   `$${(micros / 1_000_000).toFixed(micros < 10_000 ? 6 : 4)}`;
+
+/** A step can be running or interrupted, so only a finished turn has a duration. */
+function stepDuration(startedAt: number, completedAt: number | null, status: string): string {
+  if (!Number.isFinite(startedAt) || startedAt <= 0) return "—";
+  if (completedAt === null) return status === "running" ? "running" : "—";
+  const ms = Math.max(0, completedAt - startedAt);
+  if (ms < 1_000) return `${ms} ms`;
+  if (ms < 60_000) return `${(ms / 1_000).toFixed(1)} s`;
+  const minutes = Math.floor(ms / 60_000);
+  const seconds = Math.round((ms % 60_000) / 1_000);
+  if (minutes < 60) return `${minutes}m ${seconds}s`;
+  const hours = Math.floor(minutes / 60);
+  return `${hours}h ${minutes % 60}m`;
+}
+
+/** Q246: the refusal rule, for a question whose file predates `expires_at`. */
+const APPROVAL_WAIT_MS = 10 * 60_000;
+
+/** The instant an unanswered question is refused, taken from the asker's own wait. */
+function approvalDeadline(pending: PendingApproval): number {
+  return pending.expires_at ?? pending.requested_at + APPROVAL_WAIT_MS;
+}
+
+/** Q246: `m:ss` left, never negative; zero is the refusal, not a countdown. */
+
+/** Q246: what to ask the agent once its question went unanswered. A plan cannot be rebuilt
+ * from its card, so only a command or a mail has a retry. */
+function retryPrompt(pending: PendingApproval): string | null {
+  if (pending.kind === "command") {
+    const cwd = typeof pending.detail?.cwd === "string" ? ` in ${pending.detail.cwd}` : "";
+    return `Retry the request that was refused after ten minutes without an answer: run \`${pending.title}\`${cwd}. Ask me again before it runs.`;
+  }
+  if (pending.kind === "mail") {
+    return `Retry the request that was refused after ten minutes without an answer: ${pending.title}. Ask me again before it is sent.`;
+  }
+  return null;
+}
 function bodyText(item: Item, key: string): string {
   const value = item.body?.[key];
   return typeof value === "string" ? value : "";
@@ -106,6 +163,42 @@ function itemBookmarkLabel(item: Item, seq: number): string {
         : argsSummary(item);
   const tail = summary.replace(/\s+/g, " ").trim().slice(0, 100);
   return `turn ${seq} · ${item.kind}${tail ? ` · ${tail}` : ""}`;
+}
+
+/** Q266: the files a turn touched, taken from its own recorded patch rows. */
+function handoffFiles(entry: TurnTranscript): string[] {
+  const paths = entry.items
+    .filter((item) => item.kind === "file_change")
+    .map((item) => {
+      const result = bodyRecord(item, "result");
+      return result && typeof result.path === "string" ? result.path : bodyText(item, "path");
+    })
+    .filter((path) => path.length > 0);
+  return [...new Set(paths)];
+}
+
+/** Q266: a prefilled handoff names the files and the last recorded outcome, nothing more. */
+function handoffPrompt(entry: TurnTranscript, from: string): string {
+  const summary = [...entry.items]
+    .reverse()
+    .find((item) => item.kind === "message" && bodyText(item, "text").trim());
+  const text = summary ? bodyText(summary, "text").replace(/\s+/g, " ").trim() : "";
+  const outcome = text
+    ? text.length > 600
+      ? `${text.slice(0, 597)}…`
+      : text
+    : `Turn ${entry.turn.seq} finished ${entry.turn.stop_reason ?? entry.turn.status} without a recorded summary.`;
+  const files = handoffFiles(entry);
+  return [
+    `Handoff from turn ${entry.turn.seq}${from ? ` (${from})` : ""}.`,
+    "",
+    `Outcome: ${outcome}`,
+    "",
+    "Changed files:",
+    ...(files.length > 0 ? files.map((path) => `- ${path}`) : ["- none recorded in this turn"]),
+    "",
+    "Take over from here: review the outcome and the changed files, then continue the work.",
+  ].join("\n");
 }
 
 /* ------------------------- transcript filters (D136) ------------------------- */
@@ -364,6 +457,7 @@ function HarnessPicker({
 
 export default function SessionView({
   project,
+  source,
   onSessions,
   onActive,
   onNotice,
@@ -379,15 +473,43 @@ export default function SessionView({
   const tauri = isTauri();
   const contextMenu = useMenu();
   const [session, setSession] = useState<Session | null>(() => (tauri ? null : previewSession));
+  const [recovery, setRecovery] = useState<RecoveryOffer | null>(() =>
+    !tauri && new URLSearchParams(window.location.search).get("recovery") === "1"
+      ? previewRecovery
+      : null,
+  );
+  const [readOnly, setReadOnly] = useState(false);
   const [agents, setAgents] = useState<Agent[]>(() => (tauri ? [] : previewAgents));
   const [team, setTeam] = useState<TeamAgent[]>([]);
   const [rolePresets, setRolePresets] = useState<RolePreset[]>([]);
   const [plan, setPlan] = useState<PlanState | null>(null);
+  // Roadmap 42: one graph per parent turn, refreshed as child turns land.
+  const [subagentGraphs, setSubagentGraphs] = useState<SubagentGraph[]>(() =>
+    !tauri && new URLSearchParams(window.location.search).get("dag") === "1"
+      ? previewSubagentGraph
+      : [],
+  );
   const [turns, setTurns] = useState<TurnTranscript[]>(() => (tauri ? [] : previewTranscript));
   const [budget, setBudget] = useState<BudgetSnapshot | null>(() => (tauri ? null : previewBudget));
   const [patches, setPatches] = useState<Patch[]>(() => (tauri ? [] : previewPatches));
   const [checkpoints, setCheckpoints] = useState<Checkpoint[]>([]);
   const [bookmarks, setBookmarks] = useState<Bookmark[]>([]);
+  // Q270: pins are per session. The menu searches the same index as Shelf and writes the
+  // current body hash; a template copies the id + hash pair.
+  const [pins, setPins] = useState<SkillPin[]>([]);
+  const [pinOpen, setPinOpen] = useState(false);
+  const [pinQuery, setPinQuery] = useState("");
+  const [pinResults, setPinResults] = useState<SkillRow[]>([]);
+  const [pinBusy, setPinBusy] = useState<string | null>(null);
+  const [pinLabels, setPinLabels] = useState<Record<string, string>>({});
+  // D141: a changed pin opens one card with both bodies and a recorded Keep or Update.
+  const [pinReview, setPinReview] = useState<SkillPinReview | null>(null);
+  const [pinReviewBusy, setPinReviewBusy] = useState<"keep" | "update" | null>(null);
+  const [pinReason, setPinReason] = useState("");
+  const [pinChangedOnly, setPinChangedOnly] = useState(false);
+  const [pinBatchReason, setPinBatchReason] = useState("");
+  const [pinBatchBusy, setPinBatchBusy] = useState<"keep" | "update" | null>(null);
+  const pinRef = useRef<HTMLDivElement | null>(null);
   const [stream, setStream] = useState<Record<string, string>>({});
   const [liveTurn, setLiveTurn] = useState<Turn | null>(null);
   // D40: one transcript, or two side by side. Never more than two, and never a grid.
@@ -426,6 +548,9 @@ export default function SessionView({
   const [warning, setWarning] = useState(false);
   const [exporting, setExporting] = useState(false);
   const [publishing, setPublishing] = useState(false);
+  const [testRun, setTestRun] = useState<TestRun | null>(null);
+  const [testRunning, setTestRunning] = useState(false);
+  const testRunFor = useRef<string | null>(null);
   // Who the composer sends to. A Claude turn is run by the harness; everything else is the
   // native loop. The picker is the only place this is chosen, so the transcript header can say
   // which agent answered.
@@ -438,7 +563,9 @@ export default function SessionView({
   // D148: the left pane is either the project's sessions or this session's agents. The list
   // lives here rather than in App because every edit returns the row the core stored.
   const [pane, setPane] = useState<"sessions" | "agents">("agents");
-  const [list, setList] = useState<Session[]>(() => (tauri ? [] : [previewSession]));
+  const [list, setList] = useState<Session[]>(() =>
+    tauri ? [] : [previewSession, previewArchivedSession],
+  );
   const [sessionQuery, setSessionQuery] = useState("");
   const [statusFilter, setStatusFilter] = useState<"all" | Session["status"]>("all");
   const [showArchived, setShowArchived] = useState(false);
@@ -446,6 +573,9 @@ export default function SessionView({
   const [renameText, setRenameText] = useState("");
   const renamingRef = useRef<string | null>(null);
   const [listBusy, setListBusy] = useState<string | null>(null);
+  // Q274: the row waiting on the typed confirmation, and what has been typed so far.
+  const [deleting, setDeleting] = useState<Session | null>(null);
+  const [deleteText, setDeleteText] = useState("");
   const copyText = useCallback(
     async (text: string, label: string) => {
       if (!text) {
@@ -478,16 +608,36 @@ export default function SessionView({
   const [swarmTask, setSwarmTask] = useState("");
   const [swarmTargets, setSwarmTargets] = useState<SwarmTarget[] | null>(null);
   const [swarmPicked, setSwarmPicked] = useState<string[]>([]);
+  const [swarmBoss, setSwarmBoss] = useState<"rigel" | "model" | "broadcast">("rigel");
+  // The boss model is local to this preflight. It starts on the composer's model but the picker
+  // reads the full chat roster, so choosing a different door never silently changes the chat
+  // default the composer will use after the Swarm is sent.
+  const [swarmBossModel, setSwarmBossModel] = useState<{
+    provider: string;
+    model: string;
+  } | null>(null);
   // The commands waiting on this window (P4.10e). Empty is the normal state.
   const [approvals, setApprovals] = useState<PendingApproval[]>(() =>
     tauri ? [] : previewApprovals.map((pending) => ({ ...pending })),
   );
   const approvalsSeen = useRef(0);
+  // Q246: a question the channel refused while this window was open. It stays on the card —
+  // with Retry — instead of vanishing, because the refusal is the moment the user can act.
+  const [refusedApprovals, setRefusedApprovals] = useState<PendingApproval[]>([]);
+  // An id this window answered or dismissed: its disappearance is not a refusal.
+  const answeredApprovals = useRef<Set<string>>(new Set());
   const approvalsRef = useRef(approvals);
   const defaultsRef = useRef<Settings | null>(defaults);
   useEffect(() => {
     defaultsRef.current = defaults;
   }, [defaults]);
+
+  // Q268: a result belongs to the session that asked for it; switching sessions clears it, and
+  // a late answer cannot paint over the new one.
+  useEffect(() => {
+    testRunFor.current = session?.id ?? null;
+    setTestRun(null);
+  }, [project, session?.id]);
 
   // The focus listener runs on session boundaries only, so it reads the latest rows through
   // refs rather than restarting — and resetting its baseline — on every streamed item.
@@ -527,10 +677,29 @@ export default function SessionView({
     };
   }, [tauri, project, session?.id]);
 
+  useEffect(() => {
+    let live = true;
+    // The browser preview ships its own sample graph; only the desktop reads the store.
+    if (!tauri) return;
+    if (!project || !session) {
+      setSubagentGraphs([]);
+      return;
+    }
+    api
+      .subagentGraph(project, session.id)
+      .then((next) => live && setSubagentGraphs(next))
+      .catch(() => live && setSubagentGraphs([]));
+    return () => {
+      live = false;
+    };
+  }, [tauri, project, session?.id, turns.length]);
+
   const spendMicros = budget?.session_micros ?? (session ? session.spend_cents * 10_000 : 0);
   const capMicros = budget?.cap_micros ?? (session?.budget_cents ? session.budget_cents * 10_000 : null);
   const model = defaults?.model ?? "gpt-5.6-sol-medium";
   const effort = defaults?.effort ?? "medium";
+  // Sent with the model so the turn cannot land on the previous door while a save is in flight.
+  const provider = defaults?.provider ?? "";
 
   const sessionRef = useRef<Session | null>(session);
   // A palette jump must not race the mount effect that opens the newest session. The ref keeps
@@ -549,6 +718,68 @@ export default function SessionView({
     projectRef.current = project;
   }, [project]);
 
+  // Q270: switching sessions switches their pins. A read failure shows no pins rather than a
+  // stale list from the session that was open before.
+  useEffect(() => {
+    setPinReview(null);
+    setPinReason("");
+    setPinChangedOnly(false);
+    setPinBatchReason("");
+    if (!session) {
+      setPins([]);
+      return;
+    }
+    let live = true;
+    api.pins
+      .list(project, session.id)
+      .then((next) => live && setPins(next))
+      .catch(() => live && setPins([]));
+    return () => {
+      live = false;
+    };
+  }, [project, session?.id]);
+
+  useEffect(() => {
+    let live = true;
+    const ids = pins.map((pin) => pin.skill_id);
+    if (ids.length === 0) {
+      setPinLabels({});
+      return;
+    }
+    void Promise.all(
+      ids.map(async (id) => {
+        try {
+          return [id, (await source.load(id)).skill.name] as const;
+        } catch {
+          return [id, id.split(/[:/]/).filter(Boolean).pop() ?? id] as const;
+        }
+      }),
+    ).then((rows) => live && setPinLabels(Object.fromEntries(rows)));
+    return () => {
+      live = false;
+    };
+  }, [pins, source]);
+
+  useEffect(() => {
+    if (!pinOpen) return;
+    const query = pinQuery.trim();
+    if (!query) {
+      setPinResults([]);
+      return;
+    }
+    let live = true;
+    const timer = window.setTimeout(() => {
+      source
+        .search(query, 6)
+        .then((rows) => live && setPinResults(rows))
+        .catch(() => live && setPinResults([]));
+    }, 160);
+    return () => {
+      live = false;
+      window.clearTimeout(timer);
+    };
+  }, [pinOpen, pinQuery, source]);
+
   // A command can be asked for at any moment while a turn runs, so the card polls. The read is
   // scoped to the open project, so another checkout's question is not this card's to answer.
   // In the browser the same call returns the sample queue, which is how this state is
@@ -560,6 +791,21 @@ export default function SessionView({
       try {
         const open = await api.approvals.pending(project);
         if (alive) {
+          // Q246: a question that vanished at its deadline was refused, not answered. Keep it
+          // in front of the user with Retry instead of letting the card disappear.
+          const ids = new Set(open.map((row) => row.id));
+          const gone = approvalsRef.current.filter(
+            (row) =>
+              !ids.has(row.id) &&
+              !answeredApprovals.current.has(row.id) &&
+              Date.now() >= approvalDeadline(row),
+          );
+          if (gone.length > 0) {
+            setRefusedApprovals((rows) => [
+              ...rows.filter((row) => !gone.some((old) => old.id === row.id)),
+              ...gone,
+            ]);
+          }
           if (open.length > approvalsSeen.current) {
             notify(
               "approval",
@@ -608,7 +854,9 @@ export default function SessionView({
   ) => {
     // The row disappears as soon as it is answered, whatever the answer: a question that has
     // been decided must never look open.
+    answeredApprovals.current.add(pending.id);
     setApprovals((open) => open.filter((row) => row.id !== pending.id));
+    setRefusedApprovals((rows) => rows.filter((row) => row.id !== pending.id));
     try {
       await api.approvals.answer(pending.id, scope, options);
     } catch (problem) {
@@ -657,6 +905,8 @@ export default function SessionView({
       setBookmarks([]);
       setTeam([]);
       setBudget(null);
+      setRecovery(null);
+      setReadOnly(false);
       setError(null);
       if (!tauri || !project) return;
       try {
@@ -697,6 +947,23 @@ export default function SessionView({
     },
     [tauri, project],
   );
+
+  // Roadmap 37: ask the database, not a transient process flag, what a dead process left open.
+  useEffect(() => {
+    if (!tauri || !project || !session?.id) return;
+    let live = true;
+    void api
+      .recoveryOffer(project, session.id)
+      .then((offer) => {
+        if (live) setRecovery(offer);
+      })
+      .catch(() => {
+        if (live) setRecovery(null);
+      });
+    return () => {
+      live = false;
+    };
+  }, [tauri, project, session?.id]);
 
   useEffect(() => {
     if (!tauri) return;
@@ -800,6 +1067,9 @@ export default function SessionView({
         ...base,
         model: nextModel,
         effort: nextEffort,
+        // A hand-picked model is not the free model Free mode proved, so the button's state
+        // must not keep claiming it is.
+        free_mode: false,
         ...(nextProvider ? { provider: nextProvider } : {}),
       };
       setDefaults(next);
@@ -811,6 +1081,22 @@ export default function SessionView({
     },
     [defaults],
   );
+
+  // Free mode refreshes every configured provider, lets Antigravity rank the live zero-price
+  // rows, and then proves the winner with a real request. The saved pair survives a restart.
+  const [freePicking, setFreePicking] = useState(false);
+  const pickFree = useCallback(async () => {
+    setFreePicking(true);
+    try {
+      const choice = await api.freeMode();
+      setDefaults(await api.getSettings());
+      onNotice(choice.note);
+    } catch (problem) {
+      setError(problem instanceof Error ? problem.message : String(problem));
+    } finally {
+      setFreePicking(false);
+    }
+  }, [onNotice]);
 
   // The picker's chat filter is a saved preference, not popover state: the same command as the
   // model, so a restart reads back what this window last chose.
@@ -1028,6 +1314,7 @@ export default function SessionView({
           spendMicros,
           capMicros,
           model,
+          provider,
           effort,
         )
         .then((next) => {
@@ -1044,17 +1331,19 @@ export default function SessionView({
   }, [session, text, spendMicros, capMicros, model, effort]);
 
   useEffect(() => {
-    if (!addOpen && !snipOpen && !templateOpen) return;
+    if (!addOpen && !snipOpen && !templateOpen && !pinOpen) return;
     const closeOnPointer = (event: PointerEvent) => {
       if (!addRef.current?.contains(event.target as Node)) setAddOpen(false);
       if (!snippetRef.current?.contains(event.target as Node)) setSnipOpen(false);
       if (!templateRef.current?.contains(event.target as Node)) setTemplateOpen(false);
+      if (!pinRef.current?.contains(event.target as Node)) setPinOpen(false);
     };
     const closeOnKey = (event: KeyboardEvent) => {
       if (event.key === "Escape") {
         setAddOpen(false);
         setSnipOpen(false);
         setTemplateOpen(false);
+        setPinOpen(false);
       }
     };
     window.addEventListener("pointerdown", closeOnPointer);
@@ -1063,7 +1352,7 @@ export default function SessionView({
       window.removeEventListener("pointerdown", closeOnPointer);
       window.removeEventListener("keydown", closeOnKey);
     };
-  }, [addOpen, snipOpen]);
+  }, [addOpen, snipOpen, templateOpen, pinOpen]);
 
   // Snippets are stored per project, so opening another project reads its own list.
   useEffect(() => {
@@ -1114,6 +1403,177 @@ export default function SessionView({
     [project, session],
   );
 
+  // Q270: pinning resolves the current body hash in the core; the menu never invents a
+  // version. A second pin of the same skill reports the version already kept.
+  const pinSkill = useCallback(
+    async (skillId: string) => {
+      if (!project || !session) return;
+      const label =
+        pinLabels[skillId] ?? skillId.split(/[:/]/).filter(Boolean).pop() ?? skillId;
+      const wasPinned = pins.some((pin) => pin.skill_id === skillId);
+      setPinBusy(skillId);
+      try {
+        const pinned = await api.pins.pin(project, session.id, skillId);
+        setPins((current) =>
+          [...current.filter((pin) => pin.skill_id !== pinned.skill_id), pinned].sort(
+            (a, b) => a.pinned_at - b.pinned_at,
+          ),
+        );
+        setPinQuery("");
+        setPinResults([]);
+        onNotice(
+          wasPinned
+            ? `“${label}” is already pinned to this session at its recorded body.`
+            : `“${label}” pinned at its current body; this session keeps that version.`,
+        );
+      } catch (problem) {
+        setError(problem instanceof Error ? problem.message : String(problem));
+      } finally {
+        setPinBusy(null);
+      }
+    },
+    [project, session, pins, pinLabels, onNotice],
+  );
+
+  const unpinSkill = useCallback(
+    async (pin: SkillPin) => {
+      if (!project || !session) return;
+      const label =
+        pinLabels[pin.skill_id] ?? pin.skill_id.split(/[:/]/).filter(Boolean).pop() ?? pin.skill_id;
+      setPinBusy(pin.skill_id);
+      try {
+        const removed = await api.pins.unpin(project, session.id, pin.skill_id);
+        if (removed) {
+          setPins((current) => current.filter((row) => row.skill_id !== pin.skill_id));
+          if (pinReview?.pin.skill_id === pin.skill_id) setPinReview(null);
+        }
+        onNotice(`“${label}” ${removed ? "unpinned" : "was already unpinned"}.`);
+      } catch (problem) {
+        setError(problem instanceof Error ? problem.message : String(problem));
+      } finally {
+        setPinBusy(null);
+      }
+    },
+    [project, session, pinLabels, pinReview, onNotice],
+  );
+
+  const openPinReview = useCallback(
+    async (pin: SkillPin) => {
+      if (!project || !session) return;
+      setPinOpen(false);
+      setError(null);
+      try {
+        setPinReview(await api.pins.review(project, session.id, pin.skill_id));
+        setPinReason("");
+      } catch (problem) {
+        setError(problem instanceof Error ? problem.message : String(problem));
+      }
+    },
+    [project, session],
+  );
+
+  const settlePin = useCallback(
+    async (mode: "keep" | "update") => {
+      if (!project || !session || !pinReview) return;
+      const label =
+        pinLabels[pinReview.pin.skill_id] ??
+        pinReview.pin.skill_id.split(/[:/]/).filter(Boolean).pop() ??
+        pinReview.pin.skill_id;
+      const reason =
+        pinReason.trim() ||
+        (mode === "keep"
+          ? "Kept the pinned body after reviewing the index change."
+          : "Updated to the indexed body after reviewing the change.");
+      setPinReviewBusy(mode);
+      try {
+        const next =
+          mode === "keep"
+            ? await api.pins.keep(project, session.id, pinReview.pin.skill_id, reason)
+            : await api.pins.update(project, session.id, pinReview.pin.skill_id, reason);
+        setPins((current) =>
+          current.map((pin) => (pin.skill_id === next.skill_id ? next : pin)),
+        );
+        setPinReview(null);
+        setPinReason("");
+        onNotice(
+          mode === "keep"
+            ? `“${label}” keeps its pinned body; the reason is recorded on this session.`
+            : `“${label}” now reads the indexed body; the update is recorded on this session.`,
+        );
+      } catch (problem) {
+        setError(problem instanceof Error ? problem.message : String(problem));
+      } finally {
+        setPinReviewBusy(null);
+      }
+    },
+    [project, session, pinReview, pinLabels, pinReason, onNotice],
+  );
+
+  const changedPins = useMemo(() => pins.filter((pin) => pin.changed), [pins]);
+  const visiblePins = useMemo(
+    () => (pinChangedOnly ? changedPins : pins),
+    [pinChangedOnly, changedPins, pins],
+  );
+
+  const updateAllChanged = useCallback(async () => {
+    if (!project || !session || changedPins.length === 0) return;
+    const reason =
+      pinBatchReason.trim() ||
+      "Updated every changed pinned skill from the Skills menu.";
+    setPinBatchBusy("update");
+    try {
+      const next = await api.pins.updateAll(project, session.id, reason);
+      const remaining = next.filter((pin) => pin.changed).length;
+      setPins(next);
+      setPinBatchReason("");
+      setPinOpen(false);
+      setPinReview(null);
+      onNotice(
+        remaining === 0
+          ? `${changedPins.length} changed pinned skill${
+              changedPins.length === 1 ? "" : "s"
+            } updated at once; one reason is recorded on this session.`
+          : `${changedPins.length - remaining} of ${changedPins.length} changed pins updated; ${remaining} still need attention.`,
+      );
+    } catch (problem) {
+      setError(problem instanceof Error ? problem.message : String(problem));
+    } finally {
+      setPinBatchBusy(null);
+    }
+  }, [project, session, changedPins, pinBatchReason, onNotice]);
+
+  const keepAllChanged = useCallback(async () => {
+    if (!project || !session || changedPins.length === 0) return;
+    const reason =
+      pinBatchReason.trim() ||
+      "Kept every changed pinned body after reviewing the index change.";
+    setPinBatchBusy("keep");
+    try {
+      const next = await api.pins.keepAll(project, session.id, reason);
+      setPins(next);
+      setPinBatchReason("");
+      setPinOpen(false);
+      setPinReview(null);
+      onNotice(
+        `${changedPins.length} changed pinned skill${
+          changedPins.length === 1 ? "" : "s"
+        } kept at the pinned version; one reason is recorded on this session.`,
+      );
+    } catch (problem) {
+      setError(problem instanceof Error ? problem.message : String(problem));
+    } finally {
+      setPinBatchBusy(null);
+    }
+  }, [project, session, changedPins, pinBatchReason, onNotice]);
+
+  const pinDiff = useMemo(
+    () =>
+      pinReview
+        ? bodyDiff(pinReview.pinned_body ?? "", pinReview.current_body ?? "")
+        : [],
+    [pinReview],
+  );
+
   /* ------------------------------- actions ------------------------------- */
 
   const startSession = useCallback(
@@ -1126,6 +1586,14 @@ export default function SessionView({
       setTemplateOpen(false);
       try {
         const created = await api.startSession(project, template?.name ?? "Session");
+        const pinFailures: string[] = [];
+        for (const skill of template?.skills ?? []) {
+          try {
+            await api.pins.pin(project, created.id, skill.skill_id, skill.body_sha);
+          } catch {
+            pinFailures.push(skill.skill_id);
+          }
+        }
         const listed = await api.listSessions(project);
         setList(listed);
         onSessions(listed);
@@ -1161,8 +1629,17 @@ export default function SessionView({
           setText(template.prompt);
           composerRef.current?.focus();
         }
+        const restored = template.skills?.length ?? 0;
         onNotice(
-          `Started from “${template.name}”. The prompt is in the composer; nothing has been sent.`,
+          `Started from “${template.name}”.${
+            restored
+              ? ` ${restored} pinned skill${restored === 1 ? "" : "s"} restored.`
+              : ""
+          }${
+            pinFailures.length
+              ? ` ${pinFailures.length} pin${pinFailures.length === 1 ? "" : "s"} could not be restored.`
+              : ""
+          } The prompt is in the composer; nothing has been sent.`,
         );
       } catch (problem) {
         setError(problem instanceof Error ? problem.message : String(problem));
@@ -1219,6 +1696,7 @@ export default function SessionView({
           role: agent.role,
           model: agent.model,
         })),
+        skills: pins.map((pin) => ({ skill_id: pin.skill_id, body_sha: pin.body_sha })),
         prompt: text,
         created_at: existing?.created_at ?? 0,
       });
@@ -1233,7 +1711,7 @@ export default function SessionView({
     } finally {
       setTemplateSaving(false);
     }
-  }, [project, session, templates, model, effort, defaults, agents, text, onNotice]);
+  }, [project, session, templates, model, effort, defaults, agents, pins, text, onNotice]);
 
   const removeTemplate = useCallback(
     async (template: SessionTemplate) => {
@@ -1302,7 +1780,7 @@ export default function SessionView({
         applySession(next);
         onNotice(
           archived
-            ? "Archived. It stays searchable with Ctrl+K and resumable from the list."
+            ? "Archived. It stays searchable from the command palette and resumable from the list."
             : "Restored to the list.",
         );
       } catch (problem) {
@@ -1313,6 +1791,42 @@ export default function SessionView({
     },
     [tauri, project, listBusy, applySession, onNotice],
   );
+
+  // Q274: permanent deletion is archive-first and needs the id typed again. A session that is
+  // currently open is refused here as well as in the core, so the transcript cannot vanish from
+  // under the pane the user is reading.
+  const requestDelete = (row: Session) => {
+    if (listBusy) return;
+    if (row.archived_at === null) {
+      onNotice("Archive the session before deleting it.");
+      return;
+    }
+    if (session?.id === row.id) {
+      onNotice("Open another session before deleting this one.");
+      return;
+    }
+    setDeleteText("");
+    setDeleting(row);
+  };
+
+  const confirmDelete = useCallback(async () => {
+    if (!deleting || deleteText !== deleting.id || listBusy) return;
+    const row = deleting;
+    setListBusy(row.id);
+    try {
+      if (tauri) await api.deleteSession(project, row.id);
+      const next = list.filter((candidate) => candidate.id !== row.id);
+      setList(next);
+      onSessions(next);
+      setDeleting(null);
+      setDeleteText("");
+      onNotice(`Deleted session ${row.id.slice(0, 8)}.`);
+    } catch (problem) {
+      setError(problem instanceof Error ? problem.message : String(problem));
+    } finally {
+      setListBusy(null);
+    }
+  }, [deleting, deleteText, listBusy, list, tauri, project, onSessions, onNotice]);
 
   const beginRename = (row: Session) => {
     renamingRef.current = row.id;
@@ -1368,6 +1882,8 @@ export default function SessionView({
       setBusy(true);
       try {
         const outcome = await api.resumeSession(project, session.id, force);
+        setRecovery(null);
+        setReadOnly(false);
         await selectSession(outcome.session);
         const pending = outcome.patches.filter((patch) => patch.state === "pending").length;
         onNotice(
@@ -1386,11 +1902,43 @@ export default function SessionView({
     [tauri, project, session, selectSession, onNotice],
   );
 
+  const discardRecovery = useCallback(async () => {
+    if (!recovery) return;
+    const turn = recovery.turns[0];
+    setBusy(true);
+    try {
+      if (tauri && project) await api.discardTurn(project, turn.id);
+      setRecovery(null);
+      setReadOnly(true);
+      onNotice(`Discarded turn ${turn.seq} and wrote its tombstone.`);
+    } catch (problem) {
+      setError(problem instanceof Error ? problem.message : String(problem));
+    } finally {
+      setBusy(false);
+    }
+  }, [tauri, project, recovery, onNotice]);
+
   /** The confirmed text starts the turn; a failure leaves it in the composer. */
-  const deliver = useCallback(async (prompt: string) => {
+  const deliver = useCallback(
+    async (
+      prompt: string,
+      options?: {
+        agentId?: string;
+        keepComposer?: boolean;
+        /** A consent-gated fallback carries the chosen pair without waiting for a re-render. */
+        model?: string;
+        provider?: string;
+      },
+    ) => {
+    if (readOnly) {
+      setError("This transcript is read-only; turn sending is disabled.");
+      return;
+    }
     if (!prompt || !session || busy) return;
-    const turnPrompt = withAttachments(prompt);
-    setText("");
+    const chosenModel = options?.model ?? model;
+    const chosenProvider = options?.provider ?? provider;
+    const turnPrompt = options?.keepComposer ? prompt : withAttachments(prompt);
+    if (!options?.keepComposer) setText("");
     setError(null);
 
     if (!tauri) {
@@ -1401,7 +1949,7 @@ export default function SessionView({
         {
           turn: {
             id,
-            agent_id: agents[0]?.id ?? "preview",
+            agent_id: options?.agentId ?? agents[0]?.id ?? "preview",
             parent_turn_id: null,
             seq: previous.length + 1,
             status: "completed",
@@ -1428,32 +1976,55 @@ export default function SessionView({
         },
       ]);
       rememberPrompt(prompt);
-      setAttachments([]);
+      if (!options?.keepComposer) setAttachments([]);
       return;
     }
 
     setBusy(true);
     try {
-      // A watched agent is the one the next turn is for. Without a selection the harness picker
-      // keeps the old behaviour: the first agent of that harness answers.
+      // Q249: a continued turn names the agent that stopped. Otherwise a watched agent is the
+      // one the next turn is for; without a selection the harness picker keeps the old
+      // behaviour: the first agent of that harness answers.
+      const requested = options?.agentId
+        ? agents.find((agent) => agent.id === options.agentId)
+        : undefined;
+      if (options?.agentId && !requested) {
+        setError(
+          "The agent that stopped is no longer in this session. Start a new turn from the composer.",
+        );
+        return;
+      }
       const watched = shown.length === 1
         ? agents.find((agent) => agent.id === shown[0] && !observedOnly(agent))
         : undefined;
-      let worker = watched ?? agents.find((agent) => agent.harness === target);
+      let worker = requested ?? watched ?? agents.find((agent) => agent.harness === target);
       if (!worker) {
         const spawned = await api.spawnAgent(
           project,
           session.id,
           target,
           target === "claude" ? "claude" : "worker",
-          model,
+          chosenModel,
         );
         setAgents((previous) => [...previous, spawned]);
         worker = spawned;
       }
-      const reply = await api.sendTurn(project, session.id, worker.id, turnPrompt, model, effort);
+      const reply = await api.sendTurn(
+        project,
+        session.id,
+        worker.id,
+        turnPrompt,
+        chosenModel,
+        chosenProvider,
+        effort,
+      );
       rememberPrompt(prompt);
-      setAttachments([]);
+      if (!options?.keepComposer) setAttachments([]);
+      // The window specs compare this with route_explain; a shipped window never sets it.
+      if (document.documentElement.dataset.e2e === "1") {
+        (window as unknown as { __rigelLastTurnRoute?: unknown }).__rigelLastTurnRoute =
+          reply.route;
+      }
       setLiveTurn(reply.turn);
       setTurns((previous) => [
         ...previous,
@@ -1464,7 +2035,7 @@ export default function SessionView({
     } catch (problem) {
       const message = problem instanceof Error ? problem.message : String(problem);
       setError(message);
-      setText(prompt);
+      if (!options?.keepComposer) setText(prompt);
     } finally {
       setBusy(false);
     }
@@ -1476,11 +2047,86 @@ export default function SessionView({
     shown,
     project,
     model,
+    provider,
     effort,
     target,
     withAttachments,
     rememberPrompt,
+    readOnly,
   ]);
+
+  /** Q249: restart the stopped task with a fresh turn and a fresh step budget. */
+  const continueTurn = useCallback(
+    (entry: TurnTranscript) => {
+      if (!entry.turn.prompt || busy || liveTurn) return;
+      const stopped = agents.find((agent) => agent.id === entry.turn.agent_id);
+      if (!stopped) {
+        setError(
+          "The agent that stopped is no longer in this session. Start a new turn from the composer.",
+        );
+        return;
+      }
+      void deliver(entry.turn.prompt, { agentId: stopped.id, keepComposer: true });
+    },
+    [agents, busy, deliver, liveTurn],
+  );
+
+  /** Q266: prepare a turn for another agent. The composer gets the draft; nothing is sent. */
+  const handoffTurn = useCallback(
+    (entry: TurnTranscript, agent: Agent) => {
+      const source = agents.find((candidate) => candidate.id === entry.turn.agent_id);
+      setText(handoffPrompt(entry, source ? source.role ?? source.harness : "another agent"));
+      setShown([agent.id]);
+      setError(null);
+      composerRef.current?.focus();
+      onNotice(`Handoff ready for ${agent.role ?? agent.harness}; nothing has been sent.`);
+    },
+    [agents, onNotice],
+  );
+
+  /** Q268: explicit, local, and outside the agent loop. Nothing is sent to a model. */
+  const runTests = useCallback(async () => {
+    if (!session || testRunning) return;
+    const id = session.id;
+    testRunFor.current = id;
+    setTestRunning(true);
+    setTestRun(null);
+    setError(null);
+    try {
+      const report = await api.tests.run(project);
+      if (testRunFor.current === id) setTestRun(report);
+    } catch (problem) {
+      if (testRunFor.current === id) {
+        setError(problem instanceof Error ? problem.message : String(problem));
+      }
+    } finally {
+      setTestRunning(false);
+    }
+  }, [session, testRunning, project]);
+
+  /** Q246: the asker stopped listening at the deadline, so Retry is a new turn that asks the
+   * same agent to request the action again. The composer draft is left alone (Q249). */
+  const retryApproval = (pending: PendingApproval) => {
+    answeredApprovals.current.add(pending.id);
+    setApprovals((rows) => rows.filter((row) => row.id !== pending.id));
+    setRefusedApprovals((rows) => rows.filter((row) => row.id !== pending.id));
+    const agent = pending.agent_id
+      ? agents.find((candidate) => candidate.id === pending.agent_id)
+      : undefined;
+    const prompt = retryPrompt(pending);
+    if (!agent || !prompt) {
+      setError("The agent that asked is no longer in this session. Ask again from the composer.");
+      return;
+    }
+    void deliver(prompt, { agentId: agent.id, keepComposer: true });
+  };
+
+  /** A refused question the user does not want to retry. The asker already stopped waiting. */
+  const dismissApproval = (pending: PendingApproval) => {
+    answeredApprovals.current.add(pending.id);
+    setApprovals((rows) => rows.filter((row) => row.id !== pending.id));
+    setRefusedApprovals((rows) => rows.filter((row) => row.id !== pending.id));
+  };
 
   /** Copy files picked in the native dialog, then let the next turn name their paths. */
   const attachFiles = useCallback(async () => {
@@ -1515,11 +2161,20 @@ export default function SessionView({
    * the result goes straight out. A refiner failure is not a gate — the typed draft still sends.
    */
   const send = useCallback(async () => {
+    if (readOnly) {
+      setError("This transcript is read-only; turn sending is disabled.");
+      return;
+    }
     const prompt =
       text.trim() ||
       (attachments.length > 0 ? "Read the attached files and tell me what matters." : "");
     if (!prompt || !session || busy || review || refining) return;
     setAddOpen(false);
+    // A scripted window has no provider to refine with, and refinement is a real model call.
+    if (document.documentElement.dataset.e2e === "1") {
+      await deliver(prompt);
+      return;
+    }
     if (!autoRefine) {
       setReview(prompt);
       return;
@@ -1703,6 +2358,8 @@ export default function SessionView({
     }
     setPreparing(true);
     setAddOpen(false);
+    setSwarmBoss("rigel");
+    setSwarmBossModel(provider && model ? { provider, model } : null);
     setError(null);
     try {
       const targets = await onSwarmPrepare();
@@ -1715,7 +2372,7 @@ export default function SessionView({
     } finally {
       setPreparing(false);
     }
-  }, [onSwarmPrepare, text, onNotice, withAttachments]);
+  }, [onSwarmPrepare, text, onNotice, withAttachments, provider, model]);
 
   const toggleSwarmTarget = useCallback((name: string) => {
     setSwarmPicked((picked) =>
@@ -1730,24 +2387,54 @@ export default function SessionView({
       .map((target) => target.name)
       .filter((name) => swarmPicked.includes(name));
     if (chosen.length === 0) return;
+    const lead: SwarmLead =
+      swarmBoss === "broadcast"
+        ? { kind: "broadcast" }
+        : swarmBoss === "model" && swarmBossModel
+          ? { kind: "model", ...swarmBossModel }
+          : { kind: "rigel" };
+    if (swarmBoss === "model" && !swarmBossModel) {
+      setError("Pick a chat model before using it as the big boss.");
+      return;
+    }
     setSwarming(true);
     setError(null);
     try {
-      await onSwarm(swarmTask, chosen);
+      await onSwarm(swarmTask, chosen, lead);
       setSwarmTargets(null);
       setSwarmPicked([]);
+      setSwarmBoss("rigel");
+      setSwarmBossModel(null);
       setAttachments([]);
     } catch (problem) {
       setError(problem instanceof Error ? problem.message : String(problem));
     } finally {
       setSwarming(false);
     }
-  }, [onSwarm, swarmTargets, swarmPicked, swarmTask]);
+  }, [onSwarm, swarmTargets, swarmPicked, swarmTask, swarmBoss, swarmBossModel]);
 
   const cancel = useCallback(async () => {
     if (!liveTurn) return;
     try {
       await api.cancelTurn(liveTurn.id);
+    } catch (problem) {
+      setError(problem instanceof Error ? problem.message : String(problem));
+    }
+  }, [liveTurn]);
+
+  const pause = useCallback(async () => {
+    if (!liveTurn) return;
+    try {
+      await api.pauseTurn(liveTurn.id);
+    } catch (problem) {
+      setError(problem instanceof Error ? problem.message : String(problem));
+    }
+  }, [liveTurn]);
+
+  const resumeTurn = useCallback(async () => {
+    if (!liveTurn) return;
+    try {
+      await api.resumeTurn(liveTurn.id);
     } catch (problem) {
       setError(problem instanceof Error ? problem.message : String(problem));
     }
@@ -1984,6 +2671,14 @@ export default function SessionView({
     return groups;
   }, [paneEntries]);
 
+  // Q249: only the newest turn of an agent can be continued. An older stopped turn stays a
+  // record, not a second button that would duplicate the task.
+  const latestTurnByAgent = useMemo(() => {
+    const latest = new Map<string, string>();
+    for (const entry of turns) latest.set(entry.turn.agent_id, entry.turn.id);
+    return latest;
+  }, [turns]);
+
   // The filter is one state per project + session: opening another session shows its own view,
   // and a restart does not silently restore `all` over a deliberate choice.
   useEffect(() => {
@@ -2155,7 +2850,9 @@ export default function SessionView({
       onNotice(
         enable
           ? "Plan mode on: reads only, no edits or commands until you approve."
-          : "Plan approved; the next turn may edit.",
+          : next.tools.length > 0
+            ? `Plan approved; ${next.tools.length} tool${next.tools.length === 1 ? "" : "s"} may run without asking again.`
+            : "Plan approved; the next turn may edit.",
       );
     } catch (failure) {
       setError(failure instanceof Error ? failure.message : String(failure));
@@ -2308,6 +3005,9 @@ export default function SessionView({
                             <small>
                               {template.agents.length} agent
                               {template.agents.length === 1 ? "" : "s"}
+                              {template.skills?.length
+                                ? ` · ${template.skills.length} skill${template.skills.length === 1 ? "" : "s"}`
+                                : ""}
                               {template.model ? ` · ${template.model.split("/").pop()}` : ""}
                             </small>
                           </button>
@@ -2351,8 +3051,8 @@ export default function SessionView({
               <button
                 className="chip"
                 onClick={() => void saveTemplate()}
-                disabled={!tauri || !session || templateSaving}
-                title="Save this session's model, effort, steps, roster and draft as a project template"
+                disabled={!session || templateSaving}
+                title="Save this session's model, effort, steps, roster, pinned skills and draft as a project template"
               >
                 {templateSaving ? "saving…" : "save template"}
               </button>
@@ -2392,7 +3092,7 @@ export default function SessionView({
           {pane === "sessions" ? (
             <p className="fine roster-hint">
               Click a row to open it. Hover to rename, pin or archive; an archived session stays
-              searchable with Ctrl+K and resumable from this list.
+              searchable from the command palette and resumable from this list.
             </p>
           ) : session ? (
             <p className="fine roster-hint">
@@ -2446,6 +3146,19 @@ export default function SessionView({
                             icon: "archive",
                             disabled: listBusy === row.id,
                             onSelect: () => void toggleArchive(row),
+                          },
+                          {
+                            label: "Delete permanently…",
+                            detail:
+                              row.archived_at === null
+                                ? "Archive it first"
+                                : "Typed confirmation; cannot be undone",
+                            icon: "trash",
+                            disabled:
+                              row.archived_at === null ||
+                              listBusy === row.id ||
+                              session?.id === row.id,
+                            onSelect: () => requestDelete(row),
                           },
                         ],
                       },
@@ -2656,7 +3369,20 @@ export default function SessionView({
                 {working ? `working on ${working}` : agent.model ?? "no model"}
               </span>
               </span>
-              <span className="row-meta">{money(agent.spend_micros)}</span>
+              <span className="row-meta">
+                {agent.claims_held > 0 ? (
+                  <span
+                    className={`claim-count${agent.claims_stale > 0 ? " stale" : ""}`}
+                    title={`${agent.claims_held} file claim(s) held${
+                      agent.claims_stale > 0 ? `, ${agent.claims_stale} stale` : ""
+                    } — see Diff`}
+                  >
+                    {agent.claims_held} claimed
+                    {agent.claims_stale > 0 ? ` · ${agent.claims_stale} stale` : ""}
+                  </span>
+                ) : null}
+                {money(agent.spend_micros)}
+              </span>
             </button>
             );
           })}
@@ -2690,7 +3416,10 @@ export default function SessionView({
               {project.split(/[\\/]/).pop() || project}
               {!tauri ? " · sample transcript" : session ? ` · ${session.id.slice(0, 8)}` : ""}
             </p>
-            <h2>{session?.title ?? "Session"}</h2>
+            <h2>
+              {session?.title ?? "Session"}
+              {readOnly ? <span className="pill read-only">read-only</span> : null}
+            </h2>
             <p className="lede">
               {session
                 ? `${session.interventions}/${session.tasks_done} interventions/tasks · ${money(
@@ -2702,12 +3431,22 @@ export default function SessionView({
           <div className="session-tools">
             <ModelControls
               model={model}
+              provider={provider}
               effort={effort}
               chatOnly={defaults?.chat_models_only ?? true}
               onModel={(next, provider) => void applyModel(next, effort, provider)}
               onEffort={(next) => void applyModel(model, next)}
               onChatOnly={(next) => void applyChatOnly(next)}
             />
+            <button
+              type="button"
+              className={`chip${defaults?.free_mode ? " on" : ""}`}
+              onClick={() => void pickFree()}
+              disabled={freePicking || live}
+              title="Refresh every provider, let Antigravity rank the live free models, and probe the best candidates within five minutes"
+            >
+              {freePicking ? "scanning free models…" : "free mode"}
+            </button>
             <HarnessPicker
               value={target}
               onChange={setTarget}
@@ -2720,7 +3459,7 @@ export default function SessionView({
             ) : null}
             {plan?.mode ? (
               <button className="chip on" onClick={() => void togglePlan()}>
-                approve plan
+                {plan.tools.length > 0 ? `approve plan (${plan.tools.length})` : "approve plan"}
               </button>
             ) : (
               <button className="chip" onClick={() => void togglePlan()} disabled={!session}>
@@ -2731,6 +3470,16 @@ export default function SessionView({
               <input type="checkbox" checked={raw} onChange={(event) => setRaw(event.target.checked)} />
               raw
             </label>
+            {session ? (
+              <button
+                className="chip"
+                onClick={() => void runTests()}
+                disabled={testRunning}
+                title="Run the project's detected test command; output stays local"
+              >
+                {testRunning ? "Running tests…" : "Run tests"}
+              </button>
+            ) : null}
             {session ? (
               <button
                 className="chip"
@@ -2778,15 +3527,115 @@ export default function SessionView({
               </button>
             ) : null}
             {liveTurn ? (
-              <button className="danger-button" onClick={() => void cancel()}>
-                Stop turn
-              </button>
+              <>
+                <button className="chip" onClick={() => void pause()}>
+                  Pause
+                </button>
+                <button className="chip" onClick={() => void resumeTurn()}>
+                  Resume
+                </button>
+                <button className="danger-button" onClick={() => void cancel()}>
+                  Stop turn
+                </button>
+              </>
             ) : null}
           </div>
         </header>
 
+        {recovery ? (
+          <Recovery
+            offer={recovery}
+            busy={busy}
+            readOnly={readOnly}
+            onResume={() => {
+              if (tauri) void resume(false);
+              else {
+                setRecovery(null);
+                setReadOnly(false);
+              }
+            }}
+            onReadOnly={() => setReadOnly(true)}
+            onDiscard={() => void discardRecovery()}
+          />
+        ) : null}
+
+        {testRun ? (
+          <section className="test-run" role="region" aria-label="Test results">
+            <div className="test-run-head">
+              <span className={`test-run-state ${testRun.ok ? "ok" : "bad"}`}>
+                {testRun.timed_out ? "timed out" : testRun.ok ? "passed" : "failed"}
+              </span>
+              <span>
+                <strong>{testRun.passed}</strong> passed
+              </span>
+              <span>
+                <strong>{testRun.failed}</strong> failed
+              </span>
+              <span className="mono test-run-command">{testRun.command}</span>
+              <span className="fine">
+                exit {testRun.exit_code ?? "—"} ·{" "}
+                {testRun.duration_ms < 1_000
+                  ? `${testRun.duration_ms} ms`
+                  : `${(testRun.duration_ms / 1_000).toFixed(1)} s`}
+              </span>
+              {testRun.truncated ? <span className="fine">output capped</span> : null}
+              <span className="grow" />
+              <button className="ghost-btn" onClick={() => setTestRun(null)}>
+                Dismiss
+              </button>
+            </div>
+            <details className="test-output">
+              <summary>{testRun.truncated ? "output (capped)" : "full output"}</summary>
+              <pre>{testRun.output || "No output."}</pre>
+            </details>
+          </section>
+        ) : null}
+
+        <DegradedBanner
+          turns={turns}
+          provider={provider}
+          model={model}
+          busy={busy || Boolean(liveTurn)}
+          onRetry={(entry) => {
+            if (!entry.turn.prompt) return;
+            void deliver(entry.turn.prompt, {
+              agentId: entry.turn.agent_id,
+              keepComposer: true,
+            });
+          }}
+          onFallback={(entry, offer) => {
+            if (!entry.turn.prompt) return;
+            void applyModel(offer.model, effort, offer.provider).then(() =>
+              deliver(entry.turn.prompt!, {
+                agentId: entry.turn.agent_id,
+                keepComposer: true,
+                model: offer.model,
+                provider: offer.provider,
+              }),
+            );
+          }}
+        />
+
         {approvals.map((pending) => (
-          <ApprovalCard key={pending.id} pending={pending} onAnswer={answer} />
+          <ApprovalCard
+            key={pending.id}
+            pending={pending}
+            onAnswer={answer}
+            onRetry={retryApproval}
+            onDismiss={dismissApproval}
+            retryDisabled={busy || Boolean(liveTurn)}
+          />
+        ))}
+        {refusedApprovals.map((pending) => (
+          <ApprovalCard
+            key={pending.id}
+            pending={pending}
+            refused
+            onAnswer={answer}
+            onRetry={retryApproval}
+            onDismiss={dismissApproval}
+            retryDisabled={busy || Boolean(liveTurn)}
+          />
         ))}
 
         {away ? (
@@ -2886,6 +3735,13 @@ export default function SessionView({
                     {entries.length === 0 ? (
                       <p className="empty">No turns yet. Ask for something small first.</p>
                     ) : null}
+                    {subagentGraphs
+                      .filter((graph) =>
+                        entries.some((entry) => entry.turn.id === graph.parent_turn_id),
+                      )
+                      .map((graph) => (
+                        <SubagentGraphView key={graph.parent_turn_id} graph={graph} />
+                      ))}
                     {entries.map((entry) => (
                       <TurnCard
                         key={entry.turn.id}
@@ -2898,6 +3754,17 @@ export default function SessionView({
                         onCopy={copyText}
                         stream={stream}
                         checkpoint={checkpoints.find((row) => row.turn_id === entry.turn.id)}
+                        canContinue={
+                          latestTurnByAgent.get(entry.turn.agent_id) === entry.turn.id &&
+                          session?.status !== "interrupted" &&
+                          session?.status !== "ended"
+                        }
+                        continueDisabled={
+                          busy || Boolean(liveTurn) || refining || Boolean(review)
+                        }
+                        onContinue={continueTurn}
+                        handoffAgents={agents.filter((agent) => !observedOnly(agent))}
+                        onHandoff={handoffTurn}
                         onRestore={async (checkpoint) => {
                           if (
                             !window.confirm(
@@ -3001,8 +3868,135 @@ export default function SessionView({
                 onDismiss={() => setReview(null)}
               />
             ) : null}
+            {!readOnly ? (
+              <CompanionSponsor project={project} sessionId={session.id} />
+            ) : null}
             <div className="composer">
+              {pinReview ? (
+                <section className="pin-review" aria-label="Review changed skill pin">
+                  <div className="pin-review-head">
+                    <div>
+                      <strong>
+                        {pinLabels[pinReview.pin.skill_id] ??
+                          pinReview.pin.skill_id.split(/[:/]/).filter(Boolean).pop() ??
+                          pinReview.pin.skill_id}{" "}
+                        moved
+                      </strong>
+                      <small>
+                        pinned sha256:{pinReview.pin.body_sha.slice(0, 12)}
+                        {pinReview.pin.current_body_sha
+                          ? ` → current sha256:${pinReview.pin.current_body_sha.slice(0, 12)}`
+                          : " · not on the shelf"}
+                      </small>
+                    </div>
+                    <button
+                      type="button"
+                      className="snippet-delete"
+                      aria-label="Close changed-pin review"
+                      title="Close"
+                      onClick={() => setPinReview(null)}
+                    >
+                      ×
+                    </button>
+                  </div>
+                  {pinReview.pinned_body === null || pinReview.current_body === null ? (
+                    <p className="pin-review-note">
+                      {pinReview.pinned_body === null
+                        ? "The pinned body is no longer on disk, so there is nothing to diff. Keep the pin, or update to what the index has now."
+                        : "The current body is not on disk. Keep the pinned body; update is unavailable until the index has the body."}
+                    </p>
+                  ) : (
+                    <pre className="pin-diff" aria-label="Skill body changes">
+                      {pinDiff.map((line, index) => (
+                        <span
+                          className={`pin-diff-line ${line.kind}`}
+                          key={`${line.oldLine}-${line.newLine}-${index}`}
+                        >
+                          <span className="pin-diff-no">{line.oldLine ?? ""}</span>
+                          <span className="pin-diff-no">{line.newLine ?? ""}</span>
+                          <span className="pin-diff-mark">
+                            {line.kind === "add"
+                              ? "+"
+                              : line.kind === "del"
+                                ? "-"
+                                : line.kind === "gap"
+                                  ? "…"
+                                  : " "}
+                          </span>
+                          <span>{line.text || " "}</span>
+                        </span>
+                      ))}
+                    </pre>
+                  )}
+                  <label className="pin-reason">
+                    <span>Why?</span>
+                    <input
+                      value={pinReason}
+                      onChange={(event) => setPinReason(event.target.value)}
+                      placeholder="Optional note; a default is recorded"
+                      aria-label="Why this pin decision"
+                    />
+                  </label>
+                  <div className="pin-review-actions">
+                    <button
+                      type="button"
+                      className="chip"
+                      disabled={pinReviewBusy !== null}
+                      onClick={() => void settlePin("keep")}
+                    >
+                      {pinReviewBusy === "keep" ? "Keeping…" : "Keep pin"}
+                    </button>
+                    <button
+                      type="button"
+                      className="primary"
+                      disabled={pinReviewBusy !== null || pinReview.current_body === null}
+                      onClick={() => void settlePin("update")}
+                    >
+                      {pinReviewBusy === "update" ? "Updating…" : "Update to current"}
+                    </button>
+                  </div>
+                </section>
+              ) : null}
               <div className="composer-field">
+              {pins.length > 0 ? (
+                <ul className="composer-pins" aria-label="Skills pinned to this session">
+                  {pins.map((pin) => {
+                    const name =
+                      pinLabels[pin.skill_id] ??
+                      pin.skill_id.split(/[:/]/).filter(Boolean).pop() ??
+                      pin.skill_id;
+                    return (
+                      <li
+                        className="composer-pin"
+                        key={pin.skill_id}
+                        title={`${pin.skill_id} · sha256:${pin.body_sha.slice(0, 12)}`}
+                      >
+                        <span>{name}</span>
+                        {pin.changed ? (
+                          <button
+                            type="button"
+                            className="pin-changed"
+                            aria-label={`Review changed skill ${name}`}
+                            title="The indexed body moved; review the diff"
+                            onClick={() => void openPinReview(pin)}
+                          >
+                            changed
+                          </button>
+                        ) : null}
+                        <button
+                          type="button"
+                          aria-label={`Unpin ${name}`}
+                          title={`Unpin ${name}`}
+                          onClick={() => void unpinSkill(pin)}
+                          disabled={pinBusy === pin.skill_id}
+                        >
+                          ×
+                        </button>
+                      </li>
+                    );
+                  })}
+                </ul>
+              ) : null}
                 <textarea
                   ref={composerRef}
                   value={text}
@@ -3012,9 +4006,11 @@ export default function SessionView({
                   }}
                   onKeyDown={onComposerKeyDown}
                   placeholder={
-                    review
-                      ? "Review the brief above before it sends…"
-                      : refining
+                    readOnly
+                      ? "Read-only transcript; sending is disabled"
+                      : review
+                        ? "Review the brief above before it sends…"
+                        : refining
                         ? "Tightening the brief…"
                         : live
                           ? "A turn is running…"
@@ -3023,7 +4019,7 @@ export default function SessionView({
                             : "Ask the agent; Enter sends, Shift+Enter adds a line"
                   }
                   rows={2}
-                  disabled={live || review !== null || refining}
+                  disabled={readOnly || live || review !== null || refining}
                 />
                 <div className="composer-tray">
                   <div className="composer-add" ref={addRef}>
@@ -3127,13 +4123,198 @@ export default function SessionView({
                       </div>
                     ) : null}
                   </div>
+                  <div className="composer-snippets" ref={pinRef}>
+                    <button
+                      type="button"
+                      className="composer-snippet-toggle"
+                      aria-haspopup="menu"
+                      aria-expanded={pinOpen}
+                      aria-label={`Session skills: skills${pins.length > 0 ? ` ${pins.length}` : ""}${
+                        changedPins.length > 0 ? ` ${changedPins.length} changed` : ""
+                      }`}
+                      title="Pin a skill to this session; the pin keeps the body version"
+                      onClick={() => setPinOpen((open) => !open)}
+                      disabled={!session}
+                    >
+                      skills{pins.length > 0 ? ` ${pins.length}` : ""}
+                      {changedPins.length > 0 ? " " : null}
+                      {changedPins.length > 0 ? (
+                        <span
+                          className="composer-snippet-changed"
+                          title={`${changedPins.length} changed pinned skill${
+                            changedPins.length === 1 ? "" : "s"
+                          }`}
+                        >
+                          {changedPins.length} changed
+                        </span>
+                      ) : null}
+                    </button>
+                    {pinOpen ? (
+                      <div className="composer-menu pin-menu" role="menu" aria-label="Session skills">
+                        <div className="pin-menu-head">
+                          <p className="composer-menu-label">Pinned skills</p>
+                          <button
+                            type="button"
+                            className="pin-filter"
+                            aria-pressed={pinChangedOnly}
+                            title="Show only pins whose indexed body moved"
+                            onClick={() => setPinChangedOnly((value) => !value)}
+                          >
+                            changed only{changedPins.length > 0 ? ` ${changedPins.length}` : ""}
+                          </button>
+                        </div>
+                        {pins.length === 0 ? (
+                          <p className="composer-menu-hint">
+                            No skills pinned. Search below to pin one to this session.
+                          </p>
+                        ) : visiblePins.length === 0 ? (
+                          <p className="composer-menu-hint">No pins match “changed only”.</p>
+                        ) : (
+                          <ul className="pin-rows">
+                            {visiblePins.map((pin) => {
+                              const name =
+                                pinLabels[pin.skill_id] ??
+                                pin.skill_id.split(/[:/]/).filter(Boolean).pop() ??
+                                pin.skill_id;
+                              return (
+                                <li className="snippet-row" key={pin.skill_id}>
+                                  <span className="pin-row-text" title={pin.skill_id}>
+                                    <span>{name}</span>
+                                    <small>sha256:{pin.body_sha.slice(0, 12)}</small>
+                                  </span>
+                                  {pin.changed ? (
+                                    <button
+                                      type="button"
+                                      className="pin-changed"
+                                      aria-label={`Review changed skill ${name}`}
+                                      title="The indexed body moved; review the diff"
+                                      onClick={() => void openPinReview(pin)}
+                                    >
+                                      changed
+                                    </button>
+                                  ) : null}
+                                  <button
+                                    type="button"
+                                    className="snippet-delete"
+                                    aria-label={`Unpin ${name}`}
+                                    title={`Unpin ${name}`}
+                                    onClick={() => void unpinSkill(pin)}
+                                    disabled={pinBusy === pin.skill_id}
+                                  >
+                                    ×
+                                  </button>
+                                </li>
+                              );
+                            })}
+                          </ul>
+                        )}
+                        {changedPins.length > 0 ? (
+                          <div className="pin-batch">
+                            <div className="pin-batch-head">
+                              <span>
+                                {changedPins.length} changed pin
+                                {changedPins.length === 1 ? "" : "s"}
+                              </span>
+                              <small>one reason for all</small>
+                            </div>
+                            <div className="pin-batch-form">
+                              <input
+                                value={pinBatchReason}
+                                onChange={(event) => setPinBatchReason(event.target.value)}
+                                placeholder="reason for all (optional)"
+                                aria-label="Reason for the batch pin decision"
+                              />
+                              <div className="pin-batch-actions">
+                                <button
+                                  type="button"
+                                  className="chip"
+                                  onClick={() => void keepAllChanged()}
+                                  disabled={pinBatchBusy !== null}
+                                >
+                                  {pinBatchBusy === "keep" ? "Keeping…" : "Keep all changed"}
+                                </button>
+                                <button
+                                  type="button"
+                                  className="chip"
+                                  onClick={() => void updateAllChanged()}
+                                  disabled={pinBatchBusy !== null}
+                                >
+                                  {pinBatchBusy === "update"
+                                    ? "Updating…"
+                                    : "Update all changed"}
+                                </button>
+                              </div>
+                            </div>
+                          </div>
+                        ) : null}
+                        <label className="pin-search">
+                          <span aria-hidden>⌕</span>
+                          <input
+                            value={pinQuery}
+                            onChange={(event) => setPinQuery(event.target.value)}
+                            placeholder="Search skills to pin…"
+                            aria-label="Search skills to pin"
+                          />
+                        </label>
+                        {pinQuery.trim()
+                          ? pinResults
+                              .filter((row) => !pins.some((pin) => pin.skill_id === row.id))
+                              .map((row) => (
+                                <button
+                                  type="button"
+                                  role="menuitem"
+                                  className="composer-menu-item"
+                                  key={row.id}
+                                  onClick={() => void pinSkill(row.id)}
+                                  disabled={!row.has_body || pinBusy !== null}
+                                  title={
+                                    row.has_body
+                                      ? row.description
+                                      : "This row has no indexed body to pin"
+                                  }
+                                >
+                                  <span>{row.name}</span>
+                                  <small>
+                                    {pinBusy === row.id
+                                      ? "pinning…"
+                                      : row.has_body
+                                        ? "pin"
+                                        : "no body"}
+                                  </small>
+                                </button>
+                              ))
+                          : null}
+                        {pinQuery.trim() && pinResults.length === 0 ? (
+                          <p className="composer-menu-hint">No skill in the local index matches.</p>
+                        ) : null}
+                        {onBrowseSkills ? (
+                          <button
+                            type="button"
+                            role="menuitem"
+                            className="composer-menu-item"
+                            onClick={() => {
+                              setPinOpen(false);
+                              onBrowseSkills();
+                            }}
+                          >
+                            <span>Browse the shelf…</span>
+                            <small>local index</small>
+                          </button>
+                        ) : null}
+                        <p className="composer-menu-hint">
+                          A pin records the current body hash. A changed shelf body never changes
+                          what this session loads; open the changed badge to diff it and choose
+                          Keep or Update.
+                        </p>
+                      </div>
+                    ) : null}
+                  </div>
                   <div className="composer-snippets" ref={snippetRef}>
                     <button
                       type="button"
                       className="composer-snippet-toggle"
                       aria-haspopup="menu"
                       aria-expanded={snipOpen}
-                      aria-label="Snippets"
                       title="Insert a saved prompt; placeholders are selected for you"
                       onClick={() => setSnipOpen((open) => !open)}
                       disabled={live || review !== null}
@@ -3239,11 +4420,16 @@ export default function SessionView({
                           ? "Wait for the running turn to finish"
                           : review !== null
                             ? "Confirm or cancel the review card first"
-                            : "Show which agents are online, then send to the ones you keep ticked"
+                            : "Choose the big boss, then send to the agents you keep ticked"
                     }
                     onClick={() => void prepareSwarm()}
                     disabled={
-                      live || review !== null || preparing || !text.trim() || swarmTargets !== null
+                      readOnly ||
+                      live ||
+                      review !== null ||
+                      preparing ||
+                      !text.trim() ||
+                      swarmTargets !== null
                     }
                   >
                     {preparing ? "Waking…" : "Swarm"}
@@ -3253,6 +4439,7 @@ export default function SessionView({
                   className="primary"
                   onClick={() => void send()}
                   disabled={
+                    readOnly ||
                     refining ||
                     live ||
                     review !== null ||
@@ -3271,6 +4458,92 @@ export default function SessionView({
                     {swarmTargets.length} online · {swarmPicked.length} selected
                   </span>
                 </div>
+                <div className="swarm-boss" role="radiogroup" aria-label="Big boss model">
+                  <div className="swarm-boss-head">
+                    <strong>Big boss model</strong>
+                    <span className="fine">Rigel is the Muse coordinator</span>
+                  </div>
+                  <label className={`swarm-boss-row${swarmBoss === "rigel" ? " on" : ""}`}>
+                    <input
+                      type="radio"
+                      name="swarm-boss"
+                      checked={swarmBoss === "rigel"}
+                      onChange={() => setSwarmBoss("rigel")}
+                    />
+                    <span className="swarm-boss-copy">
+                      <span className="row-name">
+                        Rigel <span className="tag">Muse</span>
+                      </span>
+                      <span className="fine">
+                        Splits the task, assigns the ticked agents and keeps the plan.
+                      </span>
+                    </span>
+                  </label>
+                  <div className="swarm-boss-option">
+                    <label className={`swarm-boss-row${swarmBoss === "model" ? " on" : ""}`}>
+                      <input
+                        type="radio"
+                        name="swarm-boss"
+                        checked={swarmBoss === "model"}
+                        onChange={() => {
+                          setSwarmBoss("model");
+                          if (!swarmBossModel && provider && model) {
+                            setSwarmBossModel({ provider, model });
+                          }
+                        }}
+                      />
+                      <span className="swarm-boss-copy">
+                        <span className="row-name">
+                          Rigel +{" "}
+                          <span className="mono">
+                            {swarmBossModel?.model || "choose a model"}
+                          </span>
+                        </span>
+                        <span className="fine">
+                          The same Muse coordinator, thinking with{" "}
+                          {swarmBossModel
+                            ? `${swarmBossModel.provider} / ${swarmBossModel.model}`
+                            : "the chat model you choose"}
+                          .
+                        </span>
+                      </span>
+                    </label>
+                    {swarmBoss === "model" ? (
+                      <div className="swarm-boss-picker">
+                        <ModelControls
+                          model={swarmBossModel?.model ?? ""}
+                          provider={swarmBossModel?.provider}
+                          effort={defaults?.effort ?? "medium"}
+                          chatOnly
+                          label="choose model"
+                          heading="Big boss model"
+                          title="Choose any chat model for the Swarm big boss"
+                          showEffort={false}
+                          forceChatOnly
+                          onModel={(next, nextProvider) =>
+                            setSwarmBossModel({ provider: nextProvider, model: next })
+                          }
+                          onEffort={() => {}}
+                          onChatOnly={() => {}}
+                        />
+                      </div>
+                    ) : null}
+                  </div>
+                  <label className={`swarm-boss-row${swarmBoss === "broadcast" ? " on" : ""}`}>
+                    <input
+                      type="radio"
+                      name="swarm-boss"
+                      checked={swarmBoss === "broadcast"}
+                      onChange={() => setSwarmBoss("broadcast")}
+                    />
+                    <span className="swarm-boss-copy">
+                      <span className="row-name">No single boss</span>
+                      <span className="fine">
+                        Broadcast the same task to every ticked agent. Nobody assigns or reviews.
+                      </span>
+                    </span>
+                  </label>
+                </div>
                 <ul>
                   {swarmTargets.map((target) => (
                     <li key={target.name}>
@@ -3288,7 +4561,9 @@ export default function SessionView({
                   ))}
                 </ul>
                 <p className="fine">
-                  One @mention broadcast on #general. Every ticked agent gets the same task text.
+                  {swarmBoss === "broadcast"
+                    ? "One @mention broadcast on #general. Every ticked agent gets the same task text."
+                    : "Rigel splits this task and assigns it to the ticked agents on #general."}
                 </p>
                 <div className="swarm-actions">
                   <button
@@ -3296,6 +4571,8 @@ export default function SessionView({
                     onClick={() => {
                       setSwarmTargets(null);
                       setSwarmPicked([]);
+                      setSwarmBoss("rigel");
+                      setSwarmBossModel(null);
                     }}
                     disabled={swarming}
                   >
@@ -3306,7 +4583,11 @@ export default function SessionView({
                     onClick={() => void launchSwarm()}
                     disabled={swarming || swarmPicked.length === 0}
                   >
-                    {swarming ? "Sending…" : `Send to ${swarmPicked.length}`}
+                    {swarming
+                      ? "Sending…"
+                      : swarmBoss === "broadcast"
+                        ? `Broadcast to ${swarmPicked.length}`
+                        : `Send to ${swarmPicked.length}`}
                   </button>
                 </div>
               </div>
@@ -3343,9 +4624,9 @@ export default function SessionView({
             ) : null}
             {review === null && text.trim() && quote ? (
               <p
-                className={`composer-quote${quoteWarning ? " over" : ""}`}
+                className={`composer-quote${quoteWarning ? " over" : ""}${quote.price_stale ? " stale" : ""}`}
                 role="status"
-                title={`${quote.model} · ~${quote.input_tokens} in · ~${quote.output_tokens} out · first step only`}
+                title={`${quote.model} · ~${quote.input_tokens} in · ~${quote.output_tokens} out · first step only${quote.price_stale ? ` · price table fetched ${quote.price_fetched_on}` : ""}`}
               >
                 <span className="mono">≈ {money(quote.first_step_micros)}</span> first step
                 {quote.remaining_micros !== null ? (
@@ -3358,6 +4639,11 @@ export default function SessionView({
                   </>
                 ) : null}
                 {quoteWarning ? ` — ${quoteWarning}` : null}
+                {quote.price_stale ? (
+                  <span className="price-stale">
+                    {" · "}stale prices: {quote.price_age_days} days old · {quote.price_source}
+                  </span>
+                ) : null}
               </p>
             ) : null}
           </>
@@ -3476,6 +4762,78 @@ export default function SessionView({
           </p>
         </section>
       </aside>
+
+      {/* Q274: the confirmation is part of the shell, not a native prompt, so it keeps the
+          palette and cannot be dismissed by a webview that does not implement window.prompt. */}
+      {deleting ? (
+        <div
+          className="delete-backdrop"
+          role="presentation"
+          onMouseDown={(event) => {
+            if (event.target === event.currentTarget && listBusy !== deleting.id) {
+              setDeleting(null);
+              setDeleteText("");
+            }
+          }}
+        >
+          <form
+            className="delete-card"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="delete-title"
+            onSubmit={(event) => {
+              event.preventDefault();
+              void confirmDelete();
+            }}
+          >
+            <h2 id="delete-title">Delete this session permanently?</h2>
+            <p className="fine">
+              {deleting.title ?? "Untitled session"} is archived. Deleting it removes its turns,
+              checkpoints and stored spend from this project; it cannot be undone.
+            </p>
+            <label className="fine" htmlFor="delete-confirm">
+              Type the session id to confirm:
+            </label>
+            <code className="delete-id">{deleting.id}</code>
+            <input
+              id="delete-confirm"
+              className="delete-input"
+              autoFocus
+              autoComplete="off"
+              spellCheck={false}
+              value={deleteText}
+              onChange={(event) => setDeleteText(event.target.value)}
+              onKeyDown={(event) => {
+                if (event.key === "Escape" && listBusy !== deleting.id) {
+                  event.preventDefault();
+                  setDeleting(null);
+                  setDeleteText("");
+                }
+              }}
+            />
+            <div className="delete-actions">
+              <button
+                type="button"
+                className="chip"
+                disabled={listBusy === deleting.id}
+                onClick={() => {
+                  setDeleting(null);
+                  setDeleteText("");
+                }}
+              >
+                Cancel
+              </button>
+              <button
+                type="submit"
+                className="chip danger"
+                disabled={deleteText !== deleting.id || listBusy === deleting.id}
+              >
+                {listBusy === deleting.id ? "Deleting…" : "Delete permanently"}
+              </button>
+            </div>
+          </form>
+        </div>
+      ) : null}
     </>
   );
 }
@@ -3493,144 +4851,6 @@ function observedOnly(agent: Agent): boolean {
 }
 
 
-/**
- * One command waiting on this window.
- *
- * The exact text is the title, because that is what a grant is keyed by: the four scope buttons
- * are the only way to answer, and "reject" is the default in spirit even though it is styled as
- * one button among five. Destructive rows and the advisors' note are shown here, before consent.
- */
-function ApprovalCard({
-  pending,
-  onAnswer,
-}: {
-  pending: PendingApproval;
-  onAnswer: (
-    pending: PendingApproval,
-    scope: ApprovalAnswer,
-    options?: { skip?: boolean; note?: string },
-  ) => void;
-}) {
-  const detail = pending.detail ?? {};
-  const [skippingPlan, setSkippingPlan] = useState(false);
-  const [skipReason, setSkipReason] = useState("");
-  const cwd = typeof detail.cwd === "string" ? detail.cwd : null;
-  const timeout = typeof detail.timeout_secs === "number" ? detail.timeout_secs : null;
-  const destructive = Array.isArray(detail.destructive)
-    ? (detail.destructive as { id?: string; summary?: string }[])
-    : [];
-  const deliberation =
-    detail.deliberation && typeof detail.deliberation === "object"
-      ? (detail.deliberation as { note?: string })
-      : null;
-  // D114: a writable fan-out is its own question. It shows each child's plan before its
-  // first edit, and the skip path asks for the reason the ledger will keep.
-  const planned =
-    pending.kind === "plan" && Array.isArray(detail.agents)
-      ? (detail.agents as { role?: string; files?: string[]; task?: string; plan?: string }[])
-      : [];
-  if (pending.kind === "plan") {
-    return (
-      <section className="approval-card" aria-label="Writable agents awaiting approval">
-        <header>
-          <span className="pill running">plan</span>
-          <span className="approval-title mono">{pending.title}</span>
-          <span className="grow" />
-          <span className="approval-wait">waiting for you</span>
-        </header>
-        <p className="approval-meta mono">
-          each child works in its own worktree; its changes land only after a review
-        </p>
-        <ul className="approval-rows plan-rows">
-          {planned.map((agent, index) => (
-            <li key={`${agent.role ?? "agent"}-${index}`}>
-              <span className="pill running">{agent.role ?? "agent"}</span>
-              <span className="mono plan-files">{(agent.files ?? []).join(", ")}</span>
-              {agent.task ? <p className="fine">{agent.task}</p> : null}
-              <pre className="plan-body">{agent.plan ?? ""}</pre>
-            </li>
-          ))}
-        </ul>
-        {skippingPlan ? (
-          <div className="plan-skip">
-            <p className="fine">
-              Skipping records a waiver instead of an approval. What is the reason?
-            </p>
-            <div className="cap-form">
-              <input
-                value={skipReason}
-                onChange={(event) => setSkipReason(event.target.value)}
-                placeholder="why this fan-out does not need a plan check"
-                aria-label="Reason for skipping the plan check"
-              />
-              <button
-                className="chip warn"
-                onClick={() =>
-                  onAnswer(pending, "deny", { skip: true, note: skipReason })
-                }
-              >
-                Record skip
-              </button>
-            </div>
-          </div>
-        ) : null}
-        <div className="approval-actions">
-          <button className="chip" onClick={() => onAnswer(pending, "once")}>
-            Approve plan
-          </button>
-          <button className="chip warn" onClick={() => setSkippingPlan(true)}>
-            Skip check, with a reason
-          </button>
-          <button className="chip danger" onClick={() => onAnswer(pending, "deny")}>
-            Reject
-          </button>
-        </div>
-      </section>
-    );
-  }
-  return (
-    <section className="approval-card" aria-label="Approval required">
-      <header>
-        <span className={`pill ${destructive.length > 0 ? "failed" : "running"}`}>{pending.kind}</span>
-        <span className="approval-title mono">{pending.title}</span>
-        <span className="grow" />
-        <span className="approval-wait">waiting for you</span>
-      </header>
-      <p className="approval-meta mono">
-        {cwd ? `cwd ${cwd}` : null}
-        {timeout ? ` · ${timeout}s` : null}
-      </p>
-      {destructive.length > 0 ? (
-        <ul className="approval-rows">
-          {destructive.map((row, index) => (
-            <li key={`${row.id ?? "row"}-${index}`}>
-              <span className="pill danger">{row.id ?? "policy"}</span> {row.summary ?? ""}
-            </li>
-          ))}
-        </ul>
-      ) : null}
-      {deliberation?.note ? <p className="approval-note">{deliberation.note}</p> : null}
-      <div className="approval-actions">
-        <button className="chip" onClick={() => onAnswer(pending, "once")}>
-          Allow once
-        </button>
-        <button className="chip" onClick={() => onAnswer(pending, "session")}>
-          This session
-        </button>
-        <button className="chip" onClick={() => onAnswer(pending, "project")}>
-          This project
-        </button>
-        <button className="chip" onClick={() => onAnswer(pending, "always")}>
-          Always
-        </button>
-        <button className="chip danger" onClick={() => onAnswer(pending, "deny")}>
-          Reject
-        </button>
-      </div>
-    </section>
-  );
-}
-
 /** One turn as it appears in a transcript pane. Both panes of a comparison use it. */
 function TurnCard({
   entry,
@@ -3643,6 +4863,11 @@ function TurnCard({
   bookmarks,
   onBookmark,
   onCopy,
+  onContinue,
+  canContinue,
+  continueDisabled,
+  handoffAgents,
+  onHandoff,
 }: {
   entry: TurnTranscript;
   turns: TurnTranscript[];
@@ -3654,6 +4879,13 @@ function TurnCard({
   bookmarks: Bookmark[];
   onBookmark: (item: Item, seq: number) => void;
   onCopy: (text: string, label: string) => void;
+  /** Q249: restart the stopped task with a fresh turn and a fresh step budget. */
+  onContinue?: (entry: TurnTranscript) => void;
+  canContinue?: boolean;
+  continueDisabled?: boolean;
+  /** Q266: sendable agents; the source agent is removed by the card. */
+  handoffAgents?: Agent[];
+  onHandoff?: (entry: TurnTranscript, agent: Agent) => void;
 }) {
   const contextMenu = useMenu();
   const children = turns.filter((candidate) => candidate.turn.parent_turn_id === entry.turn.id);
@@ -3665,6 +4897,11 @@ function TurnCard({
   const childSpend = children.reduce(
     (sum, child) => sum + (child.turn.usage?.cost_micros ?? 0),
     0,
+  );
+  const usage = entry.turn.usage;
+  const duration = stepDuration(entry.turn.started_at, entry.turn.completed_at, entry.turn.status);
+  const handoffTargets = (handoffAgents ?? []).filter(
+    (agent) => agent.id !== entry.turn.agent_id,
   );
   return (
     <article
@@ -3733,6 +4970,44 @@ function TurnCard({
         {entry.turn.stop_reason && entry.turn.stop_reason !== entry.turn.status ? (
           <span className="turn-stop">{entry.turn.stop_reason}</span>
         ) : null}
+        {entry.turn.stop_reason === "step_limit" &&
+        canContinue &&
+        entry.turn.prompt &&
+        onContinue ? (
+          <button
+            type="button"
+            className="chip warn turn-continue"
+            disabled={continueDisabled}
+            title="Start a new turn with this task and a fresh step budget"
+            onClick={() => onContinue(entry)}
+          >
+            Continue
+          </button>
+        ) : null}
+        {entry.turn.status === "completed" && onHandoff && handoffTargets.length > 0 ? (
+          <select
+            className="chip turn-handoff"
+            aria-label={`Hand turn ${entry.turn.seq} to another agent`}
+            value=""
+            disabled={continueDisabled}
+            title={
+              continueDisabled
+                ? "Finish the current step before handing off"
+                : "Prefill the composer for another agent; nothing is sent"
+            }
+            onChange={(event) => {
+              const target = handoffTargets.find((agent) => agent.id === event.target.value);
+              if (target) onHandoff(entry, target);
+            }}
+          >
+            <option value="">Hand to…</option>
+            {handoffTargets.map((agent) => (
+              <option key={agent.id} value={agent.id}>
+                {agent.role ?? "agent"} · {agent.harness}
+              </option>
+            ))}
+          </select>
+        ) : null}
         <span className="grow" />
         {checkpoint && entry.turn.status === "completed" && onRestore ? (
           <button
@@ -3755,6 +5030,61 @@ function TurnCard({
           </span>
         ) : null}
       </header>
+
+      <details className="step-details">
+        <summary>step details</summary>
+        {entry.items.find((item) => item.kind === "usage") ? (
+          <StepCost body={entry.items.find((item) => item.kind === "usage")!.body} />
+        ) : null}
+        {usage ? (
+          <dl>
+            <div>
+              <dt>input</dt>
+              <dd>{compact(usage.input_tokens)} tok</dd>
+            </div>
+            <div>
+              <dt>cached</dt>
+              <dd>{compact(usage.cached_input_tokens)} tok</dd>
+            </div>
+            <div>
+              <dt>output</dt>
+              <dd>{compact(usage.output_tokens)} tok</dd>
+            </div>
+            <div>
+              <dt>reasoning</dt>
+              <dd>{compact(usage.reasoning_tokens)} tok</dd>
+            </div>
+            <div>
+              <dt>total</dt>
+              <dd>{compact(usage.input_tokens + usage.output_tokens)} tok</dd>
+            </div>
+            <div>
+              <dt>cost</dt>
+              <dd>
+                {money(usage.cost_micros)}
+                {usage.source === "estimated" ? " est." : ""}
+              </dd>
+            </div>
+            {usage.served_model ? (
+              <div>
+                <dt>served</dt>
+                <dd className="mono">{usage.served_model}</dd>
+              </div>
+            ) : null}
+            <div>
+              <dt>duration</dt>
+              <dd>{duration}</dd>
+            </div>
+          </dl>
+        ) : (
+          <p className="step-details-empty">
+            {entry.turn.status === "running"
+              ? "This step is still running."
+              : "No usage was recorded for this step."}{" "}
+            Duration: {duration}.
+          </p>
+        )}
+      </details>
 
       {entry.turn.prompt && filterShowsPrompt(filter) ? (
         <div className="msg user">
@@ -3957,12 +5287,9 @@ function ItemRow({ item, raw }: { item: Item; raw: boolean }) {
   }
 
   if (item.kind === "usage") {
-    const usage = item.body as unknown as { cost_micros?: number; input_tokens?: number; output_tokens?: number };
     return (
       <>
-        <p className="usage-line mono">
-          {money(usage.cost_micros ?? 0)} · {compact((usage.input_tokens ?? 0) + (usage.output_tokens ?? 0))} tok
-        </p>
+        <StepCost body={item.body} />
         {rawBlock}
       </>
     );
