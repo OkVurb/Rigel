@@ -1,0 +1,3 @@
+{"schema_version":1,"payload_type":"run.model.configured","payload_schema_version":1,"payload":{"model_id":"muse-spark-1.3"}}
+{"schema_version":1,"payload_type":"run.output.delta","payload_schema_version":1,"payload":{"text":"working"}}
+{"schema_version":1,"payload_type":"run.terminal.cancelled","payload_schema_version":1,"payload":{"reason":"cancelled by user"}}

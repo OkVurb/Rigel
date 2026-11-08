@@ -1,0 +1,2 @@
+{"schema_version":1,"payload_type":"run.model.configured","payload_schema_version":1,"payload":{"model_id":"muse-spark-1.3"}}
+{"schema_version":1,"payload_type":"run.terminal.failed","payload_schema_version":1,"payload":{"reason":"approval is not available in muse exec one-shot mode"}}

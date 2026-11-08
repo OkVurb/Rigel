@@ -691,6 +691,21 @@ struct CachedAppCheckToken {
     expires_at: i64,
 }
 
+/// The sentence a 401/403 from the attestation endpoint produces. The endpoint is reachable, so it
+/// must never read like the offline error; the two fixes are different (enrol this install versus
+/// start the endpoint).
+fn app_check_refusal(status: reqwest::StatusCode, has_client_token: bool) -> String {
+    if has_client_token {
+        format!(
+            "the attestation endpoint refused this client ({status}); the stored client token is not on its allowlist"
+        )
+    } else {
+        format!(
+            "the attestation endpoint refused this client ({status}); set the App Check client token for this installation"
+        )
+    }
+}
+
 impl AppCheck {
     fn new(attest_url: String, client_token: Option<String>, http: reqwest::Client) -> Self {
         Self {
@@ -770,15 +785,7 @@ impl AppCheck {
         if !status.is_success() {
             let detail = text.trim();
             let message = if matches!(status.as_u16(), 401 | 403) {
-                if self.has_client_token() {
-                    format!(
-                        "the attestation endpoint refused this client ({status}); the stored client token is not on its allowlist"
-                    )
-                } else {
-                    format!(
-                        "the attestation endpoint refused this client ({status}); set the App Check client token for this installation"
-                    )
-                }
+                app_check_refusal(status, self.has_client_token())
             } else if detail.is_empty() {
                 format!("the attestation endpoint answered {status}")
             } else {
@@ -2326,6 +2333,55 @@ mod tests {
         let config: CloudConfig =
             serde_json::from_str(r#"{"project_id":"rigel-cloud","api_key":"key"}"#).unwrap();
         assert!(config.app_check.is_none());
+    }
+
+    #[test]
+    fn a_fresh_install_has_no_cloud_project() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(
+            CloudConfig::load(dir.path()).unwrap().is_none(),
+            "a fresh install must not carry someone else's cloud project"
+        );
+        assert!(!CloudStatus::unconfigured().configured);
+        assert!(CloudStatus::unconfigured().app_check.is_none());
+    }
+
+    #[test]
+    fn an_unattested_client_gets_a_refusal_not_an_outage() {
+        let absent = app_check_refusal(reqwest::StatusCode::FORBIDDEN, false);
+        assert_eq!(
+            absent,
+            "the attestation endpoint refused this client (403 Forbidden); set the App Check client token for this installation"
+        );
+        let stale = app_check_refusal(reqwest::StatusCode::UNAUTHORIZED, true);
+        assert_eq!(
+            stale,
+            "the attestation endpoint refused this client (401 Unauthorized); the stored client token is not on its allowlist"
+        );
+        assert_ne!(absent, stale);
+        assert!(
+            !absent.contains("not reachable"),
+            "a refusal must not read like an outage: {absent}"
+        );
+    }
+
+    #[test]
+    fn the_app_check_refusal_is_in_the_troubleshooting_cookbook() {
+        let book = include_str!("../../../docs/troubleshooting.md");
+        assert!(
+            book.contains(
+                "the attestation endpoint refused this client (403 Forbidden); set the App Check client token for this installation"
+            ),
+            "the un-attested failure needs a cookbook entry"
+        );
+        assert!(
+            book.contains("the attestation endpoint is not reachable"),
+            "the cookbook must distinguish a refusal from an outage"
+        );
+        assert!(
+            book.contains("the attestation endpoint must answer with"),
+            "a malformed endpoint answer needs its own shape"
+        );
     }
 
     #[test]

@@ -10,11 +10,13 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use async_trait::async_trait;
+use rigel_core::agent::dag::NodeState;
 use rigel_core::agent::{
     Cancels, ChatRequest, Coordinator, Delta, DeltaSink, Model, ModelError, RawUsage,
     ScriptedModel, StopReason, Tools,
 };
 use rigel_core::{BudgetService, SessionService, StopAt, Usage};
+use tokio::sync::Notify;
 use tokio_util::sync::CancellationToken;
 
 const SCRIPT: &str = r#"{
@@ -101,6 +103,156 @@ fn coordinator(
     }
 }
 
+#[derive(Default)]
+struct CapturingModel {
+    seen: Mutex<Vec<ChatRequest>>,
+}
+
+#[async_trait]
+impl Model for CapturingModel {
+    fn id(&self) -> String {
+        "script".to_string()
+    }
+
+    async fn chat(
+        &self,
+        request: ChatRequest,
+        _cancel: &CancellationToken,
+        on_delta: &mut DeltaSink<'_>,
+    ) -> Result<(), ModelError> {
+        self.seen.lock().unwrap().push(request);
+        on_delta(Delta::Text("done\n".to_string()));
+        on_delta(Delta::Finish("stop".to_string()));
+        Ok(())
+    }
+}
+
+fn coordinator_with_model(
+    root: &std::path::Path,
+    service: &SessionService,
+    model: Arc<dyn Model>,
+    stop: StopAt,
+    max_steps: usize,
+) -> Coordinator {
+    let cancels = Arc::new(Cancels::new());
+    let budget = Arc::new(BudgetService::new(
+        service.pool().clone(),
+        cancels.clone() as Arc<dyn rigel_core::InterruptSink>,
+    ));
+    let tools = Tools::new(
+        root.to_path_buf(),
+        service.clone(),
+        budget.clone(),
+        root.join("index"),
+        stop,
+    );
+    Coordinator {
+        session: service.clone(),
+        budget,
+        tools,
+        model,
+        sink: Arc::new(rigel_core::NullSink),
+        cancels,
+        project_root: root.to_path_buf(),
+        model_name: "script".to_string(),
+        effort: None,
+        max_steps,
+        subagents: rigel_core::agent::SubagentPolicy::default(),
+        depth: 0,
+        parent_cancel: None,
+        worktree_dir: None,
+        chat_parent: None,
+    }
+}
+
+#[tokio::test]
+async fn two_hundred_turns_compact_and_carry_pins_and_the_summary_forward() {
+    let tmp = repo();
+    let service = SessionService::open(tmp.path()).await.unwrap();
+    let session = service.start(Some("compaction"), Some(25)).await.unwrap();
+    let agent = service
+        .register_agent(&session.id, "native", Some("worker"))
+        .await
+        .unwrap();
+    service
+        .pin_skill(&session.id, "pdf-tools", "sha-pinned", false)
+        .await
+        .unwrap();
+
+    for index in 0..200 {
+        let turn = service
+            .append_turn(&agent.id, Some(&format!("request {index}")))
+            .await
+            .unwrap();
+        service
+            .append_item(
+                &turn.id,
+                "message",
+                "complete",
+                &serde_json::json!({
+                    "role": "assistant",
+                    "text": format!("answer {index} {}", "x".repeat(4_000)),
+                }),
+                &serde_json::json!({}),
+            )
+            .await
+            .unwrap();
+        service
+            .append_item(
+                &turn.id,
+                "mcp_call",
+                "ok",
+                &serde_json::json!({
+                    "tool": "read_file",
+                    "result": { "content": format!("TOOL-RESULT-{index}") },
+                }),
+                &serde_json::json!({}),
+            )
+            .await
+            .unwrap();
+        service.finish_turn(&turn.id, "completed").await.unwrap();
+    }
+
+    let model = Arc::new(CapturingModel::default());
+    let coordinator = coordinator_with_model(
+        tmp.path(),
+        &service,
+        model.clone() as Arc<dyn Model>,
+        StopAt::Never,
+        2,
+    );
+    let run = coordinator
+        .run(&session.id, &agent.id, "finish the task")
+        .await
+        .unwrap();
+    assert_eq!(run.status, "completed");
+
+    let items = service.items(&run.turn.id).await.unwrap();
+    let record = items
+        .iter()
+        .find(|item| item.status == "compacted")
+        .expect("the turn records compaction");
+    let dropped = record.body["dropped"].as_array().unwrap();
+    assert_eq!(dropped.len(), 196);
+    assert_eq!(record.body["retained_turns"].as_array().unwrap().len(), 4);
+    assert!(dropped.iter().all(|span| span["turn_id"].is_string()));
+    let summary = record.body["summary"].as_str().unwrap();
+    assert!(summary.contains("pdf-tools @ sha-pinned"), "pins survive");
+    assert!(summary.contains("TOOL-RESULT-0"), "tool results survive");
+
+    let seen = model.seen.lock().unwrap();
+    let sent = seen[0]
+        .messages
+        .iter()
+        .filter_map(|message| message.content.as_deref())
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(sent.contains("Compacted history"));
+    assert!(sent.contains("pdf-tools @ sha-pinned"));
+    assert!(sent.contains("request 199"), "recent turns stay verbatim");
+    assert_eq!(seen[0].messages.last().unwrap().role, "user");
+}
+
 #[tokio::test]
 async fn a_scripted_turn_reads_three_files_and_patches_one() {
     let tmp = repo();
@@ -171,6 +323,311 @@ async fn a_scripted_turn_reads_three_files_and_patches_one() {
 }
 
 #[tokio::test]
+async fn a_step_limit_turn_can_be_continued_with_a_fresh_budget() {
+    let tmp = repo();
+    let service = SessionService::open(tmp.path()).await.unwrap();
+    let session = service.start(Some("steps"), Some(25)).await.unwrap();
+    let agent = service
+        .register_agent(&session.id, "native", Some("worker"))
+        .await
+        .unwrap();
+    let script = r#"{
+      "steps": [
+        {
+          "text": "Reading first.\n",
+          "tool_calls": [{"name": "read_file", "arguments": {"path": "README.md"}}],
+          "usage": {"input_tokens": 100, "output_tokens": 20, "cost_usd": 0.0002}
+        },
+        {"text": "Finished on the next turn.\n"}
+      ]
+    }"#;
+
+    let first = coordinator(tmp.path(), &service, script, StopAt::Never, 1)
+        .run(&session.id, &agent.id, "same task")
+        .await
+        .unwrap();
+    assert_eq!(first.stop, StopReason::StepLimit);
+    assert_eq!(first.status, "failed");
+    assert_eq!(first.steps, 1);
+    assert_eq!(first.turn.stop_reason.as_deref(), Some("step_limit"));
+
+    // Q249: the user's Continue starts a new turn with the same task and a fresh bound. The
+    // stopped turn stays closed, so the transcript tells the truth about what ran.
+    let second = coordinator(tmp.path(), &service, script, StopAt::Never, 2)
+        .run(&session.id, &agent.id, "same task")
+        .await
+        .unwrap();
+    assert_eq!(second.stop, StopReason::Completed);
+    assert_eq!(second.status, "completed");
+    assert_eq!(second.steps, 2);
+    assert_eq!(second.turn.prompt.as_deref(), Some("same task"));
+
+    let transcript = service.transcript(&session.id).await.unwrap();
+    assert_eq!(transcript.len(), 2);
+    assert_eq!(transcript[1].turn.stop_reason.as_deref(), Some("completed"));
+}
+
+#[tokio::test]
+async fn a_paused_turn_waits_for_resume_and_keeps_the_same_turn() {
+    let tmp = repo();
+    let service = SessionService::open(tmp.path()).await.unwrap();
+    let session = service.start(Some("pause"), Some(25)).await.unwrap();
+    let agent = service
+        .register_agent(&session.id, "native", Some("worker"))
+        .await
+        .unwrap();
+    let script = r#"{
+      "steps": [
+        {"text": "First step.\n"},
+        {"text": "Second step.\n"}
+      ]
+    }"#;
+
+    let cancels = Arc::new(Cancels::new());
+    let budget = Arc::new(BudgetService::new(
+        service.pool().clone(),
+        cancels.clone() as Arc<dyn rigel_core::InterruptSink>,
+    ));
+    let tools = Tools::new(
+        tmp.path().to_path_buf(),
+        service.clone(),
+        budget.clone(),
+        tmp.path().join("index"),
+        StopAt::Never,
+    );
+    let coordinator = Coordinator {
+        session: service.clone(),
+        budget,
+        tools,
+        model: Arc::new(ScriptedModel::from_json(script).unwrap()),
+        sink: Arc::new(rigel_core::NullSink),
+        cancels: cancels.clone(),
+        project_root: tmp.path().to_path_buf(),
+        model_name: "script".to_string(),
+        effort: None,
+        max_steps: 10,
+        subagents: rigel_core::agent::SubagentPolicy::default(),
+        depth: 0,
+        parent_cancel: None,
+        worktree_dir: None,
+        chat_parent: None,
+    };
+
+    let turn = service
+        .append_turn(&agent.id, Some("pause me"))
+        .await
+        .unwrap();
+    let turn_id = turn.id.clone();
+    cancels.pause_turn(&turn_id);
+    let paused = service.clone();
+    let resume = cancels.clone();
+    let paused_turn = turn_id.clone();
+    let inspect = async move {
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        let items = paused.items(&paused_turn).await.unwrap();
+        assert!(
+            items.iter().any(|item| item.status == "paused"),
+            "the boundary records the pause before it waits"
+        );
+        assert!(
+            !items.iter().any(|item| item.status == "resumed"),
+            "the turn is still waiting"
+        );
+        let stored = rigel_core::store::paused::PauseStore::new(paused.pool().clone())
+            .load(&paused_turn)
+            .await
+            .unwrap()
+            .expect("the pause is durable while the turn waits");
+        assert!(stored.remaining_steps <= 10);
+        assert_eq!(stored.messages.last().unwrap().role, "user");
+        resume.resume_turn(&paused_turn);
+    };
+    let (run, ()) = tokio::join!(
+        coordinator.run_existing(&session.id, &agent.id, turn, "pause me"),
+        inspect
+    );
+    let run = run.unwrap();
+    assert_eq!(run.stop, StopReason::Completed);
+    assert_eq!(run.turn.id, turn_id, "resume continues the same turn");
+
+    let items = service.items(&turn_id).await.unwrap();
+    assert!(items.iter().any(|item| item.status == "resumed"));
+    let stored = rigel_core::store::paused::PauseStore::new(service.pool().clone())
+        .load(&turn_id)
+        .await
+        .unwrap()
+        .expect("the pause row remains for audit");
+    assert!(
+        stored.resumed_at.is_some(),
+        "the same-process resume claims it"
+    );
+}
+
+#[tokio::test]
+async fn a_paused_turn_reopens_with_the_same_messages_and_budget_once() {
+    let tmp = repo();
+    let service = SessionService::open(tmp.path()).await.unwrap();
+    let session = service.start(Some("reopen"), Some(25)).await.unwrap();
+    let agent = service
+        .register_agent(&session.id, "native", Some("worker"))
+        .await
+        .unwrap();
+    let turn = service
+        .append_turn(&agent.id, Some("finish the report"))
+        .await
+        .unwrap();
+    let messages = vec![
+        rigel_core::agent::ChatMessage::system("RESTORED-SYSTEM-MARKER"),
+        rigel_core::agent::ChatMessage::user("finish the report"),
+    ];
+    rigel_core::store::paused::PauseStore::new(service.pool().clone())
+        .save(&rigel_core::store::paused::PausedTurn {
+            turn_id: turn.id.clone(),
+            session_id: session.id.clone(),
+            agent_id: agent.id.clone(),
+            messages: messages.clone(),
+            remaining_steps: 2,
+            remaining_micros: Some(1_234),
+            paused_at: rigel_core::migrate::now_ms(),
+            resumed_at: None,
+        })
+        .await
+        .unwrap();
+
+    let model = Arc::new(CapturingModel::default());
+    let coordinator = coordinator_with_model(
+        tmp.path(),
+        &service,
+        model.clone() as Arc<dyn Model>,
+        StopAt::Never,
+        10,
+    );
+    let run = coordinator
+        .resume_paused(&session.id, &agent.id, &turn.id)
+        .await
+        .unwrap();
+    assert_eq!(run.status, "completed");
+    {
+        let seen = model.seen.lock().unwrap();
+        assert_eq!(seen[0].messages.len(), 2);
+        assert_eq!(
+            seen[0].messages[0].content.as_deref(),
+            Some("RESTORED-SYSTEM-MARKER")
+        );
+        assert_eq!(
+            seen[0].messages[1].content.as_deref(),
+            Some("finish the report")
+        );
+    }
+    assert!(
+        coordinator
+            .resume_paused(&session.id, &agent.id, &turn.id)
+            .await
+            .is_err(),
+        "a double resume is refused"
+    );
+}
+
+#[tokio::test]
+async fn a_stream_that_dies_mid_answer_keeps_the_partial_text_and_bills_it() {
+    let tmp = repo();
+    let service = SessionService::open(tmp.path()).await.unwrap();
+    let session = service.start(Some("partial"), Some(25)).await.unwrap();
+    let agent = service
+        .register_agent(&session.id, "native", Some("worker"))
+        .await
+        .unwrap();
+    let script = r#"{
+      "steps": [
+        {
+          "text": "The fix starts in src/lib.rs, but the connection",
+          "usage": {"input_tokens": 100, "output_tokens": 20, "cost_usd": 0.0002},
+          "error_after": "connection reset by peer"
+        }
+      ]
+    }"#;
+
+    let error = coordinator(tmp.path(), &service, script, StopAt::Never, 10)
+        .run(&session.id, &agent.id, "finish the fix")
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(error, rigel_core::AgentError::Model(_)),
+        "unexpected error: {error:?}"
+    );
+
+    let transcript = service.transcript(&session.id).await.unwrap();
+    let turn = &transcript[0].turn;
+    assert_eq!(turn.status, "incomplete");
+    assert_eq!(turn.stop_reason.as_deref(), Some("model_error"));
+
+    let message = transcript[0]
+        .items
+        .iter()
+        .find(|item| item.kind == "message")
+        .expect("the partial answer is kept");
+    assert_eq!(message.status, "incomplete");
+    assert!(
+        message.body["text"]
+            .as_str()
+            .unwrap()
+            .contains("src/lib.rs")
+    );
+
+    // The provider reported usage before the connection broke, so that is the bill. The row
+    // names the step that spent it, and the turn/session totals reconcile with that row.
+    let usage = turn.usage.as_ref().unwrap();
+    assert_eq!(usage.cost_micros, 200);
+    let usage_row = transcript[0]
+        .items
+        .iter()
+        .find(|item| item.kind == "usage")
+        .expect("the partial step has a usage row");
+    assert_eq!(usage_row.turn_id, turn.id);
+    assert_eq!(usage_row.body["step"], 1);
+    assert_eq!(usage_row.body["incomplete"], true);
+    assert_eq!(service.get(&session.id).await.unwrap().spend_micros, 200);
+
+    // A provider that only reports usage at the end never sent it: charge the local estimate
+    // for the tokens it did deliver rather than recording a free step.
+    let estimated =
+        r#"{"steps":[{"text":"partial words with no usage chunk","error_after":"gone"}]}"#;
+    let second = service.start(Some("estimated"), Some(25)).await.unwrap();
+    let second_agent = service
+        .register_agent(&second.id, "native", Some("worker"))
+        .await
+        .unwrap();
+    coordinator(tmp.path(), &service, estimated, StopAt::Never, 10)
+        .run(&second.id, &second_agent.id, "estimate it")
+        .await
+        .unwrap_err();
+    let transcript = service.transcript(&second.id).await.unwrap();
+    let usage = transcript[0].turn.usage.as_ref().unwrap();
+    assert!(usage.cost_micros > 0, "partial output is never free");
+    assert_eq!(usage.source, rigel_core::CostSource::Estimated);
+
+    // A stream that dies before any content is still a plain failure with no message row.
+    let empty = r#"{"steps":[{"error":"boom"}]}"#;
+    let failed = service.start(Some("empty"), Some(25)).await.unwrap();
+    let failed_agent = service
+        .register_agent(&failed.id, "native", Some("worker"))
+        .await
+        .unwrap();
+    coordinator(tmp.path(), &service, empty, StopAt::Never, 10)
+        .run(&failed.id, &failed_agent.id, "nothing")
+        .await
+        .unwrap_err();
+    let transcript = service.transcript(&failed.id).await.unwrap();
+    assert_eq!(transcript[0].turn.status, "failed");
+    assert!(
+        transcript[0]
+            .items
+            .iter()
+            .all(|item| item.kind != "message")
+    );
+}
+
+#[tokio::test]
 async fn the_cap_stops_the_turn_and_refuses_the_next_one() {
     let tmp = repo();
     let service = SessionService::open(tmp.path()).await.unwrap();
@@ -218,6 +675,7 @@ async fn the_cap_stops_the_turn_and_refuses_the_next_one() {
 #[derive(Default)]
 struct SubagentScriptModel {
     parent_calls: AtomicUsize,
+    child_stuck: bool,
 }
 
 #[async_trait]
@@ -248,6 +706,24 @@ impl Model for SubagentScriptModel {
             .unwrap_or_default();
 
         if system.contains("You are a read-only subagent") {
+            if self.child_stuck {
+                on_delta(Delta::ToolCall {
+                    index: 0,
+                    id: Some("child_read".to_string()),
+                    name: Some("read_file".to_string()),
+                    arguments: serde_json::json!({ "path": "README.md" }).to_string(),
+                });
+                on_delta(Delta::Usage(RawUsage {
+                    input_tokens: 50,
+                    cached_input_tokens: 0,
+                    output_tokens: 10,
+                    reasoning_tokens: 0,
+                    cost_usd: Some(0.0003),
+                    served_model: None,
+                }));
+                on_delta(Delta::Finish("tool_calls".to_string()));
+                return Ok(());
+            }
             let text = if last_user.contains("README") {
                 "README says Demo.\n"
             } else {
@@ -260,6 +736,7 @@ impl Model for SubagentScriptModel {
                 output_tokens: 10,
                 reasoning_tokens: 0,
                 cost_usd: Some(0.0003),
+                served_model: None,
             }));
             on_delta(Delta::Finish("stop".to_string()));
             return Ok(());
@@ -286,6 +763,7 @@ impl Model for SubagentScriptModel {
                 output_tokens: 20,
                 reasoning_tokens: 0,
                 cost_usd: Some(0.0004),
+                served_model: None,
             }));
         } else if call == 1 {
             on_delta(Delta::ToolCall {
@@ -304,6 +782,7 @@ impl Model for SubagentScriptModel {
                 output_tokens: 20,
                 reasoning_tokens: 0,
                 cost_usd: Some(0.0001),
+                served_model: None,
             }));
         }
         on_delta(Delta::Finish(if call == 1 {
@@ -455,6 +934,82 @@ async fn subagents_are_read_only_billed_separately_and_nested_under_the_parent()
     let budget = BudgetService::with_null_interrupt(service.pool().clone());
     let reconcile = budget.reconcile(&session.id).await.unwrap();
     assert!(reconcile.ok, "every child is in its own agent's sum");
+}
+
+#[tokio::test]
+async fn a_subagent_stops_at_its_own_step_cap() {
+    let tmp = repo();
+    let service = SessionService::open(tmp.path()).await.unwrap();
+    let session = service.start(Some("child-cap"), Some(25)).await.unwrap();
+    let agent = service
+        .register_agent(&session.id, "native", Some("worker"))
+        .await
+        .unwrap();
+    let cancels = Arc::new(Cancels::new());
+    let budget = Arc::new(BudgetService::new(
+        service.pool().clone(),
+        cancels.clone() as Arc<dyn rigel_core::InterruptSink>,
+    ));
+    let tools = Tools::new(
+        tmp.path().to_path_buf(),
+        service.clone(),
+        budget.clone(),
+        tmp.path().join("index"),
+        StopAt::Never,
+    );
+    let run = Coordinator {
+        session: service.clone(),
+        budget,
+        tools,
+        model: Arc::new(SubagentScriptModel {
+            child_stuck: true,
+            ..Default::default()
+        }),
+        sink: Arc::new(rigel_core::NullSink),
+        cancels,
+        project_root: tmp.path().to_path_buf(),
+        model_name: "subagent-script".to_string(),
+        effort: None,
+        max_steps: 10,
+        subagents: rigel_core::agent::SubagentPolicy {
+            max_steps: 2,
+            ..Default::default()
+        },
+        depth: 0,
+        parent_cancel: None,
+        worktree_dir: None,
+        chat_parent: None,
+    }
+    .run(&session.id, &agent.id, "cap the children")
+    .await
+    .unwrap();
+
+    assert_eq!(run.stop, StopReason::Completed);
+    let transcript = service.transcript(&session.id).await.unwrap();
+    let children: Vec<_> = transcript
+        .iter()
+        .filter(|entry| entry.turn.parent_turn_id.as_deref() == Some(run.turn.id.as_str()))
+        .collect();
+    assert_eq!(children.len(), 2);
+    for child in &children {
+        assert_eq!(child.turn.status, "failed");
+        assert_eq!(child.turn.stop_reason.as_deref(), Some("step_limit"));
+    }
+
+    let parent = transcript
+        .iter()
+        .find(|entry| entry.turn.id == run.turn.id)
+        .expect("the parent turn is in the transcript");
+    let results = parent
+        .items
+        .iter()
+        .find(|item| {
+            item.body.get("tool").and_then(|tool| tool.as_str()) == Some("subagent_results")
+        })
+        .expect("the collect call is in the parent transcript");
+    for child in results.body["result"]["agents"].as_array().unwrap() {
+        assert_eq!(child["stop"], "step_limit");
+    }
 }
 
 #[tokio::test]
@@ -1503,4 +2058,798 @@ async fn plan_mode_refuses_the_edit_until_the_plan_is_approved() {
             .contains("a.saturating_sub(b)"),
         "approval lets the same edit through"
     );
+}
+
+/// A provider stream that delivers text and usage, then waits for the stop. This is the shape a
+/// real cancelled stream has: the provider already charged for what it sent.
+struct HangingModel;
+
+#[async_trait]
+impl Model for HangingModel {
+    fn id(&self) -> String {
+        "hanging".to_string()
+    }
+
+    async fn chat(
+        &self,
+        _request: ChatRequest,
+        cancel: &CancellationToken,
+        on_delta: &mut DeltaSink<'_>,
+    ) -> Result<(), ModelError> {
+        on_delta(Delta::Text("Half an answer".to_string()));
+        on_delta(Delta::Usage(RawUsage {
+            input_tokens: 100,
+            cached_input_tokens: 0,
+            output_tokens: 20,
+            reasoning_tokens: 0,
+            cost_usd: Some(0.0002),
+            served_model: None,
+        }));
+        while !cancel.is_cancelled() {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        Err(ModelError::Cancelled)
+    }
+}
+
+#[tokio::test]
+async fn a_cancelled_stream_is_billed_once_and_closes_as_cancelled() {
+    let tmp = repo();
+    let service = SessionService::open(tmp.path()).await.unwrap();
+    let session = service.start(Some("cancel"), Some(25)).await.unwrap();
+    let agent = service
+        .register_agent(&session.id, "native", Some("worker"))
+        .await
+        .unwrap();
+
+    let cancels = Arc::new(Cancels::new());
+    let budget = Arc::new(BudgetService::new(
+        service.pool().clone(),
+        cancels.clone() as Arc<dyn rigel_core::InterruptSink>,
+    ));
+    let tools = Tools::new(
+        tmp.path().to_path_buf(),
+        service.clone(),
+        budget.clone(),
+        tmp.path().join("index"),
+        StopAt::Never,
+    );
+    let coordinator = Coordinator {
+        session: service.clone(),
+        budget,
+        tools,
+        model: Arc::new(HangingModel),
+        sink: Arc::new(rigel_core::NullSink),
+        cancels: cancels.clone(),
+        project_root: tmp.path().to_path_buf(),
+        model_name: "hanging".to_string(),
+        effort: None,
+        max_steps: 5,
+        subagents: rigel_core::agent::SubagentPolicy::default(),
+        depth: 0,
+        parent_cancel: None,
+        worktree_dir: None,
+        chat_parent: None,
+    };
+
+    let turn = service
+        .append_turn(&agent.id, Some("cancel me"))
+        .await
+        .unwrap();
+    let turn_id = turn.id.clone();
+    let stop = cancels.clone();
+    let stop_id = turn_id.clone();
+    let trigger = async move {
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        stop.cancel_turn(&stop_id);
+    };
+    let (run, ()) = tokio::join!(
+        coordinator.run_existing(&session.id, &agent.id, turn, "cancel me"),
+        trigger
+    );
+    let run = run.unwrap();
+    assert_eq!(run.stop, StopReason::Cancelled);
+    assert_eq!(run.status, "cancelled");
+    assert_eq!(
+        run.usage.cost_micros, 200,
+        "the cancelled stream was charged by the provider"
+    );
+
+    let items = service.items(&turn_id).await.unwrap();
+    assert_eq!(
+        items.iter().filter(|item| item.kind == "usage").count(),
+        1,
+        "one partial usage row, not zero and not two"
+    );
+    let partial = items
+        .iter()
+        .find(|item| item.kind == "message")
+        .expect("the partial answer is kept");
+    assert_eq!(partial.status, "incomplete");
+    assert!(
+        partial.body["text"]
+            .as_str()
+            .is_some_and(|text| text.contains("Half an answer")),
+        "the partial text is kept and marked incomplete"
+    );
+    assert_eq!(
+        service.get(&session.id).await.unwrap().spend_micros,
+        200,
+        "the cancelled turn is on the bill exactly once"
+    );
+}
+
+/// A provider that reports a limiter wait before it answers. The delta is the real contract:
+/// both HTTP adapters emit it from the shared bucket.
+struct RateLimitedModel;
+
+#[async_trait]
+impl Model for RateLimitedModel {
+    fn id(&self) -> String {
+        "rate-limited".to_string()
+    }
+
+    async fn chat(
+        &self,
+        _request: ChatRequest,
+        _cancel: &CancellationToken,
+        on_delta: &mut DeltaSink<'_>,
+    ) -> Result<(), ModelError> {
+        on_delta(Delta::RateLimit {
+            provider: "groq".to_string(),
+            waited_ms: 1_200,
+        });
+        on_delta(Delta::Text("Answered after the wait.\n".to_string()));
+        on_delta(Delta::Finish("stop".to_string()));
+        Ok(())
+    }
+}
+
+#[tokio::test]
+async fn a_limiter_wait_is_a_rate_limit_row_in_the_transcript() {
+    let tmp = repo();
+    let service = SessionService::open(tmp.path()).await.unwrap();
+    let session = service.start(Some("rate-limit"), Some(25)).await.unwrap();
+    let agent = service
+        .register_agent(&session.id, "native", Some("worker"))
+        .await
+        .unwrap();
+
+    let cancels = Arc::new(Cancels::new());
+    let budget = Arc::new(BudgetService::new(
+        service.pool().clone(),
+        cancels.clone() as Arc<dyn rigel_core::InterruptSink>,
+    ));
+    let tools = Tools::new(
+        tmp.path().to_path_buf(),
+        service.clone(),
+        budget.clone(),
+        tmp.path().join("index"),
+        StopAt::Never,
+    );
+    let coordinator = Coordinator {
+        session: service.clone(),
+        budget,
+        tools,
+        model: Arc::new(RateLimitedModel),
+        sink: Arc::new(rigel_core::NullSink),
+        cancels,
+        project_root: tmp.path().to_path_buf(),
+        model_name: "rate-limited".to_string(),
+        effort: None,
+        max_steps: 5,
+        subagents: rigel_core::agent::SubagentPolicy::default(),
+        depth: 0,
+        parent_cancel: None,
+        worktree_dir: None,
+        chat_parent: None,
+    };
+
+    let run = coordinator
+        .run(&session.id, &agent.id, "wait for the door")
+        .await
+        .unwrap();
+    assert_eq!(run.status, "completed");
+
+    let items = service.items(&run.turn.id).await.unwrap();
+    let wait = items
+        .iter()
+        .find(|item| item.status == "rate_limit")
+        .expect("the wait is a transcript row, not a silent delay");
+    assert_eq!(wait.kind, "message");
+    assert_eq!(wait.body["provider"], "groq");
+    assert_eq!(wait.body["waited_ms"], 1_200);
+}
+
+#[tokio::test]
+async fn continue_turn_records_its_bound_and_keeps_the_session_spend() {
+    let tmp = repo();
+    let service = SessionService::open(tmp.path()).await.unwrap();
+    let session = service.start(Some("continue"), Some(25)).await.unwrap();
+    let agent = service
+        .register_agent(&session.id, "native", Some("worker"))
+        .await
+        .unwrap();
+    let script = r#"{
+      "steps": [
+        {
+          "text": "Reading first.\n",
+          "tool_calls": [{"name": "read_file", "arguments": {"path": "README.md"}}],
+          "usage": {"input_tokens": 100, "output_tokens": 20, "cost_usd": 0.0002}
+        },
+        {"text": "Finished on the continuation.\n", "usage": {"input_tokens": 50, "output_tokens": 10, "cost_usd": 0.0001}}
+      ]
+    }"#;
+
+    let first = coordinator(tmp.path(), &service, script, StopAt::Never, 1)
+        .run(&session.id, &agent.id, "same task")
+        .await
+        .unwrap();
+    assert_eq!(first.stop, StopReason::StepLimit);
+    assert_eq!(first.step_budget, 1);
+    assert_eq!(first.usage.cost_micros, 200);
+
+    let continued = coordinator(tmp.path(), &service, script, StopAt::Never, 9)
+        .continue_turn(&session.id, &agent.id, "same task", 2)
+        .await
+        .unwrap();
+    assert_eq!(continued.stop, StopReason::Completed);
+    assert_eq!(continued.step_budget, 2);
+    assert_eq!(continued.steps, 2);
+    assert_eq!(continued.usage.cost_micros, 300);
+
+    let items = service.items(&continued.turn.id).await.unwrap();
+    let bound = items
+        .iter()
+        .find(|item| item.status == "continue")
+        .expect("the continuation records its stated bound");
+    assert_eq!(bound.body["max_steps"], 2);
+    assert_eq!(bound.body["previous_spend_micros"], 200);
+
+    // The ledger continues: 200 from the stopped turn plus 300 from the continuation.
+    assert_eq!(service.get(&session.id).await.unwrap().spend_micros, 500);
+}
+
+#[tokio::test]
+async fn continue_turn_refuses_a_zero_bound() {
+    let tmp = repo();
+    let service = SessionService::open(tmp.path()).await.unwrap();
+    let session = service.start(Some("continue"), Some(25)).await.unwrap();
+    let agent = service
+        .register_agent(&session.id, "native", Some("worker"))
+        .await
+        .unwrap();
+
+    let error = coordinator(tmp.path(), &service, SCRIPT, StopAt::Never, 1)
+        .continue_turn(&session.id, &agent.id, "same task", 0)
+        .await
+        .unwrap_err();
+    assert!(matches!(error, rigel_core::AgentError::InvalidStepBudget));
+    assert!(service.transcript(&session.id).await.unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn a_near_miss_tool_call_is_repaired_once_and_a_second_failure_keeps_the_raw_call() {
+    let tmp = repo();
+    let service = SessionService::open(tmp.path()).await.unwrap();
+    let session = service.start(Some("repair"), Some(25)).await.unwrap();
+    let agent = service
+        .register_agent(&session.id, "native", Some("worker"))
+        .await
+        .unwrap();
+    let script = r#"{
+      "steps": [
+        {
+          "text": "Reading with the wrong spelling.\n",
+          "tool_calls": [
+            {"name": "Read-File", "arguments": {"file_path": "README.md"}},
+            {"name": "read_file", "arguments": "```json\n{\"path\":\"src/lib.rs\"}\n```"}
+          ]
+        },
+        {
+          "text": "Trying a repaired call with no path.\n",
+          "tool_calls": [{"name": "Read-File", "arguments": {}}]
+        },
+        {"text": "Done.\n"}
+      ]
+    }"#;
+
+    let run = coordinator(tmp.path(), &service, script, StopAt::Never, 4)
+        .run(&session.id, &agent.id, "repair these calls")
+        .await
+        .unwrap();
+    assert_eq!(run.status, "completed");
+
+    let items = service.items(&run.turn.id).await.unwrap();
+    let repaired: Vec<_> = items
+        .iter()
+        .filter(|item| item.status == "repaired")
+        .collect();
+    assert_eq!(repaired.len(), 3, "one repair row per corrected call");
+    assert!(repaired.iter().all(|item| item.body["tool"].is_string()));
+    assert!(
+        repaired
+            .iter()
+            .any(|item| item.body["reason"].as_str().unwrap().contains("file_path")),
+        "the reason names the field it changed"
+    );
+
+    // The repaired-but-still-invalid call is a tool error, and the row carries both the
+    // attempted repair and the raw call the model actually sent.
+    let failed = items
+        .iter()
+        .find(|item| item.status == "error" && item.body["repair_failed"] == true)
+        .expect("the second failure is recorded");
+    assert_eq!(failed.body["raw_call"]["name"], "Read-File");
+    assert_eq!(failed.body["requested_tool"], "Read-File");
+    assert!(
+        failed.body["repair_attempted"]
+            .as_str()
+            .unwrap()
+            .contains("unknown tool"),
+        "the attempted repair is named"
+    );
+    assert_eq!(failed.body["result"]["error"]["code"], "BAD_ARGUMENTS");
+}
+
+#[tokio::test]
+async fn usage_rows_carry_step_wall_and_queue_time() {
+    let tmp = repo();
+    let service = SessionService::open(tmp.path()).await.unwrap();
+    let session = service.start(Some("timing"), Some(25)).await.unwrap();
+    let agent = service
+        .register_agent(&session.id, "native", Some("worker"))
+        .await
+        .unwrap();
+
+    let run = coordinator(tmp.path(), &service, SCRIPT, StopAt::Never, 3)
+        .run(&session.id, &agent.id, "time the steps")
+        .await
+        .unwrap();
+    let items = service.items(&run.turn.id).await.unwrap();
+    let usage = items
+        .iter()
+        .find(|item| item.kind == "usage")
+        .expect("a usage row");
+    assert_eq!(usage.body["step"], 1);
+    assert!(usage.body["duration_ms"].is_u64());
+    assert!(usage.body["queue_ms"].is_u64());
+    assert!(usage.body["cost_micros"].as_i64().unwrap() > 0);
+    let exported = serde_json::to_value(usage).unwrap();
+    assert_eq!(
+        exported["body"], usage.body,
+        "export carries the same step numbers"
+    );
+}
+
+#[derive(Default)]
+struct SteeringModel {
+    started: Notify,
+    release: Notify,
+    calls: AtomicUsize,
+}
+
+#[async_trait]
+impl Model for SteeringModel {
+    fn id(&self) -> String {
+        "script".to_string()
+    }
+
+    async fn chat(
+        &self,
+        _request: ChatRequest,
+        _cancel: &CancellationToken,
+        on_delta: &mut DeltaSink<'_>,
+    ) -> Result<(), ModelError> {
+        if self.calls.fetch_add(1, Ordering::SeqCst) == 0 {
+            self.started.notify_one();
+            self.release.notified().await;
+            on_delta(Delta::ToolCall {
+                index: 0,
+                id: Some("call_0".to_string()),
+                name: Some("read_file".to_string()),
+                arguments: r#"{"path":"README.md"}"#.to_string(),
+            });
+            on_delta(Delta::Finish("tool_calls".to_string()));
+        } else {
+            on_delta(Delta::Text("done\n".to_string()));
+            on_delta(Delta::Finish("stop".to_string()));
+        }
+        Ok(())
+    }
+}
+
+#[tokio::test]
+async fn a_steered_note_lands_once_at_the_next_step_and_names_that_step() {
+    let tmp = repo();
+    let service = SessionService::open(tmp.path()).await.unwrap();
+    let session = service.start(Some("steer"), Some(25)).await.unwrap();
+    let agent = service
+        .register_agent(&session.id, "native", Some("worker"))
+        .await
+        .unwrap();
+    let model = Arc::new(SteeringModel::default());
+    let coordinator = coordinator_with_model(
+        tmp.path(),
+        &service,
+        model.clone() as Arc<dyn Model>,
+        StopAt::Never,
+        3,
+    );
+    let cancels = coordinator.cancels.clone();
+    let run = coordinator.run(&session.id, &agent.id, "start the work");
+    tokio::pin!(run);
+    let mut steered = false;
+    let run = loop {
+        tokio::select! {
+            run = &mut run => break run.unwrap(),
+            _ = model.started.notified(), if !steered => {
+                steered = true;
+                let turn_id = loop {
+                    if let Some(turn) = service
+                        .running_turns(&session.id)
+                        .await
+                        .unwrap()
+                        .into_iter()
+                        .find(|turn| turn.agent_id == agent.id)
+                    {
+                        break turn.id;
+                    }
+                    tokio::time::sleep(Duration::from_millis(5)).await;
+                };
+                assert!(cancels.steer(&turn_id, "also read src/main.rs"));
+                model.release.notify_waiters();
+            }
+        }
+    };
+    assert_eq!(run.status, "completed");
+
+    let items = service.items(&run.turn.id).await.unwrap();
+    let notes = items
+        .iter()
+        .filter(|item| item.status == "user_intervention")
+        .collect::<Vec<_>>();
+    assert_eq!(notes.len(), 1, "the note lands exactly once");
+    assert_eq!(notes[0].body["text"], "also read src/main.rs");
+    assert_eq!(notes[0].body["step"], 2, "it names the step it joined");
+}
+
+#[tokio::test]
+async fn a_guaranteed_context_overflow_is_refused_before_the_model_runs() {
+    let tmp = repo();
+    let service = SessionService::open(tmp.path()).await.unwrap();
+    let session = service.start(Some("overflow"), Some(25)).await.unwrap();
+    let agent = service
+        .register_agent(&session.id, "native", Some("worker"))
+        .await
+        .unwrap();
+    let huge = "x".repeat(2_000_000);
+
+    let error = coordinator(tmp.path(), &service, SCRIPT, StopAt::Never, 2)
+        .run(&session.id, &agent.id, &huge)
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(
+            error,
+            rigel_core::AgentError::Model(ModelError::ContextOverflow { .. })
+        ),
+        "unexpected error: {error:?}"
+    );
+
+    let transcript = service.transcript(&session.id).await.unwrap();
+    assert_eq!(transcript[0].turn.status, "failed");
+    let refusal = transcript[0]
+        .items
+        .iter()
+        .find(|item| item.kind == "error")
+        .expect("the refusal is on the transcript");
+    assert_eq!(refusal.body["context"]["fits"], false);
+    assert_eq!(refusal.body["context"]["margin_pct"], 15);
+    assert!(refusal.body["context"]["window"].as_u64().unwrap() > 0);
+    assert!(
+        refusal.body["context"]["low"].as_u64().unwrap()
+            > refusal.body["context"]["window"].as_u64().unwrap()
+    );
+}
+
+/// Roadmap 42: a parent names two children and makes the second wait for the first. The child
+/// turns are real coordinator turns; the model only chooses the answers and the spawn order.
+#[derive(Default)]
+struct DagScriptModel {
+    parent_calls: AtomicUsize,
+    child_calls: AtomicUsize,
+    fail_first: bool,
+}
+
+#[async_trait]
+impl Model for DagScriptModel {
+    fn id(&self) -> String {
+        "dag-script".to_string()
+    }
+
+    async fn chat(
+        &self,
+        request: ChatRequest,
+        _cancel: &CancellationToken,
+        on_delta: &mut DeltaSink<'_>,
+    ) -> Result<(), ModelError> {
+        let system: String = request
+            .messages
+            .iter()
+            .filter(|message| message.role == "system")
+            .filter_map(|message| message.content.clone())
+            .collect::<Vec<_>>()
+            .join("\n");
+        let last_user = request
+            .messages
+            .iter()
+            .rev()
+            .find(|message| message.role == "user")
+            .and_then(|message| message.content.clone())
+            .unwrap_or_default();
+
+        if system.contains("You are a read-only subagent") {
+            let call = self.child_calls.fetch_add(1, Ordering::SeqCst);
+            if self.fail_first && call == 0 {
+                return Err(ModelError::Other("the first child failed".to_string()));
+            }
+            let text = if last_user.contains("FIRST") {
+                "first answer\n"
+            } else {
+                "second answer\n"
+            };
+            on_delta(Delta::Text(text.to_string()));
+            on_delta(Delta::Finish("stop".to_string()));
+            return Ok(());
+        }
+
+        let call = self.parent_calls.fetch_add(1, Ordering::SeqCst);
+        if call == 0 {
+            on_delta(Delta::ToolCall {
+                index: 0,
+                id: Some("call_0".to_string()),
+                name: Some("spawn_agents".to_string()),
+                arguments: serde_json::json!({
+                    "agents": [
+                        {
+                            "id": "first",
+                            "role": "first",
+                            "files": ["README.md"],
+                            "prompt": "Produce the FIRST answer."
+                        },
+                        {
+                            "id": "second",
+                            "role": "second",
+                            "files": ["src/lib.rs"],
+                            "prompt": "Produce the SECOND answer.",
+                            "depends_on": ["first"]
+                        }
+                    ]
+                })
+                .to_string(),
+            });
+            on_delta(Delta::Finish("tool_calls".to_string()));
+        } else if call == 1 {
+            on_delta(Delta::ToolCall {
+                index: 0,
+                id: Some("call_1".to_string()),
+                name: Some("subagent_results".to_string()),
+                arguments: serde_json::json!({ "timeout_secs": 20 }).to_string(),
+            });
+            on_delta(Delta::Finish("tool_calls".to_string()));
+        } else {
+            on_delta(Delta::Text("Coordinated the two children.\n".to_string()));
+            on_delta(Delta::Finish("stop".to_string()));
+        }
+        Ok(())
+    }
+}
+
+async fn dag_coordinator(
+    fail_first: bool,
+) -> (
+    tempfile::TempDir,
+    SessionService,
+    String,
+    String,
+    Coordinator,
+) {
+    let tmp = repo();
+    let service = SessionService::open(tmp.path()).await.unwrap();
+    let session = service.start(Some("subagent-dag"), Some(25)).await.unwrap();
+    let agent = service
+        .register_agent(&session.id, "native", Some("lead"))
+        .await
+        .unwrap();
+    let cancels = Arc::new(Cancels::new());
+    let budget = Arc::new(BudgetService::new(
+        service.pool().clone(),
+        cancels.clone() as Arc<dyn rigel_core::InterruptSink>,
+    ));
+    let tools = Tools::new(
+        tmp.path().to_path_buf(),
+        service.clone(),
+        budget.clone(),
+        tmp.path().join("index"),
+        StopAt::Never,
+    );
+    let coordinator = Coordinator {
+        session: service.clone(),
+        budget,
+        tools,
+        model: Arc::new(DagScriptModel {
+            fail_first,
+            ..DagScriptModel::default()
+        }),
+        sink: Arc::new(rigel_core::NullSink),
+        cancels,
+        project_root: tmp.path().to_path_buf(),
+        model_name: "dag-script".to_string(),
+        effort: None,
+        max_steps: 5,
+        subagents: rigel_core::agent::SubagentPolicy::default(),
+        depth: 0,
+        worktree_dir: None,
+        chat_parent: None,
+        parent_cancel: None,
+    };
+    (tmp, service, session.id, agent.id, coordinator)
+}
+
+#[tokio::test]
+async fn a_subagent_waits_for_its_named_sibling_and_hands_its_answer_back() {
+    let (_tmp, service, session_id, agent_id, coordinator) = dag_coordinator(false).await;
+    let run = coordinator
+        .run(&session_id, &agent_id, "coordinate the two readers")
+        .await
+        .unwrap();
+    assert_eq!(run.stop, StopReason::Completed);
+
+    let agents = service.agents(&session_id).await.unwrap();
+    let role_of = |agent_id: &str| {
+        agents
+            .iter()
+            .find(|agent| agent.id == agent_id)
+            .and_then(|agent| agent.role.clone())
+    };
+    let turns = service.transcript(&session_id).await.unwrap();
+    let children: Vec<_> = turns
+        .iter()
+        .filter(|entry| entry.turn.parent_turn_id.as_deref() == Some(run.turn.id.as_str()))
+        .collect();
+    assert_eq!(children.len(), 2, "both children ran a real child turn");
+    let first = children
+        .iter()
+        .find(|entry| role_of(&entry.turn.agent_id).as_deref() == Some("first"))
+        .expect("the first child has a turn");
+    let second = children
+        .iter()
+        .find(|entry| role_of(&entry.turn.agent_id).as_deref() == Some("second"))
+        .expect("the second child has a turn");
+    assert_eq!(first.turn.status, "completed");
+    assert_eq!(second.turn.status, "completed");
+    assert!(
+        second.turn.started_at >= first.turn.completed_at.unwrap(),
+        "the dependent child starts only after its prerequisite completed"
+    );
+
+    let graphs = service.dag(&session_id).await.unwrap();
+    assert_eq!(graphs.len(), 1);
+    assert_eq!(graphs[0].parent_turn_id, run.turn.id);
+    let first_node = graphs[0]
+        .nodes
+        .iter()
+        .find(|node| node.id == "first")
+        .unwrap();
+    let second_node = graphs[0]
+        .nodes
+        .iter()
+        .find(|node| node.id == "second")
+        .unwrap();
+    assert_eq!(first_node.state, NodeState::Done);
+    assert_eq!(second_node.state, NodeState::Done);
+    assert_eq!(second_node.depends_on, vec!["first".to_string()]);
+
+    let parent = turns
+        .iter()
+        .find(|entry| entry.turn.id == run.turn.id)
+        .unwrap();
+    let spawn = parent
+        .items
+        .iter()
+        .find(|item| item.body.get("tool").and_then(|tool| tool.as_str()) == Some("spawn_agents"))
+        .expect("the spawn call is in the transcript");
+    assert_eq!(spawn.body["result"]["edges"][0]["from"], "first");
+    assert_eq!(spawn.body["result"]["edges"][0]["to"], "second");
+    let results = parent
+        .items
+        .iter()
+        .find(|item| {
+            item.body.get("tool").and_then(|tool| tool.as_str()) == Some("subagent_results")
+        })
+        .expect("the collect call is in the transcript");
+    assert!(
+        results.body["result"]["agents"][1]["text"]
+            .as_str()
+            .unwrap()
+            .contains("second answer"),
+        "the dependent's answer is handed back to the parent"
+    );
+    assert_eq!(
+        results.body["result"]["graph"][0]["nodes"][1]["state"],
+        "done"
+    );
+}
+
+#[tokio::test]
+async fn a_failed_prerequisite_blocks_its_dependent_and_reports_why() {
+    let (_tmp, service, session_id, agent_id, coordinator) = dag_coordinator(true).await;
+    let run = coordinator
+        .run(&session_id, &agent_id, "coordinate despite a failure")
+        .await
+        .unwrap();
+    assert_eq!(run.stop, StopReason::Completed);
+
+    let agents = service.agents(&session_id).await.unwrap();
+    let role_of = |agent_id: &str| {
+        agents
+            .iter()
+            .find(|agent| agent.id == agent_id)
+            .and_then(|agent| agent.role.clone())
+    };
+    let turns = service.transcript(&session_id).await.unwrap();
+    let children: Vec<_> = turns
+        .iter()
+        .filter(|entry| entry.turn.parent_turn_id.as_deref() == Some(run.turn.id.as_str()))
+        .collect();
+    let first = children
+        .iter()
+        .find(|entry| role_of(&entry.turn.agent_id).as_deref() == Some("first"))
+        .expect("the failed child has a turn");
+    assert_eq!(first.turn.status, "failed");
+    assert!(
+        children
+            .iter()
+            .all(|entry| role_of(&entry.turn.agent_id).as_deref() != Some("second")),
+        "the blocked child never starts a turn"
+    );
+
+    let graphs = service.dag(&session_id).await.unwrap();
+    let first_node = graphs[0]
+        .nodes
+        .iter()
+        .find(|node| node.id == "first")
+        .unwrap();
+    let second_node = graphs[0]
+        .nodes
+        .iter()
+        .find(|node| node.id == "second")
+        .unwrap();
+    assert_eq!(first_node.state, NodeState::Failed);
+    assert_eq!(second_node.state, NodeState::Blocked);
+    assert!(
+        second_node
+            .detail
+            .as_deref()
+            .unwrap_or_default()
+            .contains("first"),
+        "the blocked node names the prerequisite that broke"
+    );
+
+    let parent = turns
+        .iter()
+        .find(|entry| entry.turn.id == run.turn.id)
+        .unwrap();
+    let results = parent
+        .items
+        .iter()
+        .find(|item| {
+            item.body.get("tool").and_then(|tool| tool.as_str()) == Some("subagent_results")
+        })
+        .expect("the collect call is in the transcript");
+    let blocked = &results.body["result"]["agents"][1];
+    assert_eq!(blocked["ok"], false);
+    assert_eq!(blocked["code"], "DEPENDENCY_FAILED");
+    assert!(blocked["error"].as_str().unwrap().contains("first"));
 }

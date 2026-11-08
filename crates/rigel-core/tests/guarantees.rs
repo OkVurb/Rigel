@@ -8,8 +8,11 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
+use async_trait::async_trait;
 use rigel_core::budget::{BudgetOutcome, BudgetService, InterruptSink};
-use rigel_core::memory::{MemoryError, MemoryService, WriteMode};
+use rigel_core::memory::{
+    MemoryApprover, MemoryDecision, MemoryError, MemoryRequest, MemoryService, WriteMode,
+};
 use rigel_core::patches::{PatchError, PatchPipeline, RecoveryState, StopAt};
 use rigel_core::{SessionService, Usage};
 
@@ -330,12 +333,67 @@ async fn budget_stops_within_one_turn() {
     );
 }
 
+struct AllowMemory;
+
+#[async_trait]
+impl MemoryApprover for AllowMemory {
+    async fn approve(&self, _request: &MemoryRequest) -> MemoryDecision {
+        MemoryDecision::Allow
+    }
+}
+
+/// Q251: a valid write still needs a human. The default is closed, and validation finishes
+/// before the question so a secret is reported as a secret rather than as an unanswered card.
+#[tokio::test]
+async fn memory_write_is_closed_without_an_approver() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let service = SessionService::open(tmp.path()).await.unwrap();
+    let denied = MemoryService::new(tmp.path(), service.pool().clone())
+        .write(
+            "agent-1",
+            "memory",
+            "Remember the parser lives in crates/rigel-core.\n",
+            WriteMode::Append,
+        )
+        .await
+        .unwrap_err();
+    assert!(matches!(denied, MemoryError::NotApproved));
+    assert!(denied.to_string().contains("did not approve"));
+    assert!(
+        denied.exit_code() == 3,
+        "a refusal is a policy exit, not a bad argument"
+    );
+}
+
+#[tokio::test]
+async fn an_approved_memory_write_lands() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let service = SessionService::open(tmp.path()).await.unwrap();
+    let memory =
+        MemoryService::new(tmp.path(), service.pool().clone()).with_approval(Arc::new(AllowMemory));
+
+    let file = memory
+        .write(
+            "agent-1",
+            "memory",
+            "Remember the parser lives in crates/rigel-core.\n",
+            WriteMode::Append,
+        )
+        .await
+        .unwrap();
+    let path = tmp.path().join(&file.path);
+    let body = std::fs::read_to_string(path).unwrap();
+    assert!(body.contains("crates/rigel-core"));
+    assert!(file.words > 0);
+}
+
 /// Phase 3, P3.6 — memory is committed, so it must not carry machine paths or secrets.
 #[tokio::test]
 async fn memory_rejects_paths() {
     let tmp = tempfile::TempDir::new().unwrap();
     let service = SessionService::open(tmp.path()).await.unwrap();
-    let memory = MemoryService::new(tmp.path(), service.pool().clone());
+    let memory =
+        MemoryService::new(tmp.path(), service.pool().clone()).with_approval(Arc::new(AllowMemory));
 
     let attempts = [
         "root: C:\\Users\\someone\\project",
@@ -400,7 +458,7 @@ async fn memory_rejects_paths() {
 /// as the other guarantees.
 #[test]
 fn fixture_replay_covers_every_harness_and_scenario() {
-    const HARNESSES: [&str; 3] = ["claude", "codex", "acp"];
+    const HARNESSES: [&str; 4] = ["claude", "codex", "acp", "muse"];
     const SCENARIOS: [&str; 5] = ["start", "tool_call", "approval", "error", "interrupt"];
     let root =
         Path::new(env!("CARGO_MANIFEST_DIR")).join("../rigel-adapters/tests/fixtures/golden");

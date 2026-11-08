@@ -328,3 +328,115 @@ async fn applying_a_role_preset_rewrites_the_roster_row_and_rejects_unknown_name
         Err(SessionError::InvalidRole(_))
     ));
 }
+
+#[tokio::test]
+async fn permanent_deletion_needs_an_archive_and_removes_the_session() {
+    let tmp = TempDir::new().unwrap();
+    let service = SessionService::open(tmp.path()).await.unwrap();
+    let session = service.start(Some("delete me"), None).await.unwrap();
+
+    let refused = service.delete_permanently(&session.id).await;
+    assert!(
+        matches!(refused, Err(SessionError::NotArchived(_))),
+        "a live transcript is never deleted by one call"
+    );
+    assert_eq!(service.list().await.unwrap().len(), 1);
+
+    service.set_archived(&session.id, true).await.unwrap();
+    service.delete_permanently(&session.id).await.unwrap();
+    assert!(service.list().await.unwrap().is_empty());
+    assert!(matches!(
+        service.get(&session.id).await,
+        Err(SessionError::SessionNotFound(_))
+    ));
+}
+
+#[tokio::test]
+async fn skill_pins_are_per_session_and_unpin_is_idempotent() {
+    let tmp = TempDir::new().unwrap();
+    let service = SessionService::open(tmp.path()).await.unwrap();
+    let session = service.start(Some("pins"), None).await.unwrap();
+
+    service
+        .pin_skill(
+            &session.id,
+            "github:acme/skills:pdf/SKILL.md",
+            "sha-a",
+            false,
+        )
+        .await
+        .unwrap();
+    service
+        .pin_skill(
+            &session.id,
+            "github:acme/skills:review/SKILL.md",
+            "sha-b",
+            false,
+        )
+        .await
+        .unwrap();
+
+    let pins = service.skill_pins(&session.id).await.unwrap();
+    assert_eq!(pins.len(), 2);
+    assert!(
+        pins.iter()
+            .any(|pin| pin.skill_id.ends_with("pdf/SKILL.md") && pin.body_sha == "sha-a")
+    );
+    assert!(
+        pins.iter()
+            .any(|pin| pin.skill_id.ends_with("review/SKILL.md") && pin.body_sha == "sha-b")
+    );
+
+    // A load does not silently move a pin; only a deliberate repin does.
+    assert_eq!(
+        service
+            .pin_skill(
+                &session.id,
+                "github:acme/skills:pdf/SKILL.md",
+                "sha-new",
+                false
+            )
+            .await
+            .unwrap(),
+        "sha-a"
+    );
+    assert_eq!(
+        service
+            .pin_skill(
+                &session.id,
+                "github:acme/skills:pdf/SKILL.md",
+                "sha-new",
+                true
+            )
+            .await
+            .unwrap(),
+        "sha-new"
+    );
+
+    let other = service.start(Some("other"), None).await.unwrap();
+    assert!(service.skill_pins(&other.id).await.unwrap().is_empty());
+    assert!(matches!(
+        service.skill_pins("missing").await,
+        Err(SessionError::SessionNotFound(_))
+    ));
+
+    assert!(
+        !service
+            .unpin_skill(&session.id, "github:acme/skills:missing/SKILL.md")
+            .await
+            .unwrap()
+    );
+    assert!(
+        service
+            .unpin_skill(&session.id, "github:acme/skills:pdf/SKILL.md")
+            .await
+            .unwrap()
+    );
+    assert!(
+        !service
+            .unpin_skill(&session.id, "github:acme/skills:pdf/SKILL.md")
+            .await
+            .unwrap()
+    );
+    assert_eq!(service.skill_pins(&session.id).await.unwrap().len(), 1);
+}

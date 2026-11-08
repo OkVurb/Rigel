@@ -13,16 +13,17 @@
 //! it does not sit next to the open project. `install_sidecar` is how the desktop shell hands
 //! the bundled copy over: the source is copied to app data, where the room may write.
 
+use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
-use std::sync::Mutex;
-use std::time::Duration;
+use std::sync::{Arc, Mutex, OnceLock};
+use std::time::{Duration, Instant};
 
 use futures::{SinkExt, StreamExt};
 use serde::Serialize;
 use serde_json::Value;
 
-use super::obscura;
+use super::{obscura, roblox};
 
 /// Where agentchattr listens by default (vendor config.toml `[server] port`).
 pub const DEFAULT_ORIGIN: &str = "http://127.0.0.1:8300";
@@ -492,6 +493,14 @@ pub fn install_sidecar(
 ) -> Result<String, String> {
     let source = source.into();
     let dir = data.into();
+    // `copy_tree` prunes anything the source does not have. An index root contains `index.db`,
+    // `api.json`, settings and blob directories, so installing there would delete user data.
+    if dir.join("index.db").exists() || dir.join("api.json").exists() {
+        return Err(format!(
+            "refusing to install the chat sidecar into {}: that is Rigel's data root, not its agentchat directory",
+            dir.display()
+        ));
+    }
     if !source.join("agentchattr/run.py").is_file() {
         return Err(format!(
             "the sidecar at {} is incomplete (no agentchattr/run.py); build it with \
@@ -528,6 +537,31 @@ pub fn install_sidecar(
         *guard = None;
     }
     Ok(dir.display().to_string())
+}
+
+/// The sidecar shipped beside this executable. The Windows installer puts it at `sidecar/`; a
+/// Tauri bundle can also preserve it under `resources/sidecar`.
+fn packaged_sidecar_dir(root: &Path) -> Option<PathBuf> {
+    ["sidecar", "resources/sidecar"]
+        .iter()
+        .map(|relative| root.join(relative))
+        .find(|candidate| candidate.join("agentchattr/run.py").is_file())
+}
+
+/// Adopt the sidecar installed beside this executable into `<index_dir>/agentchat`.
+///
+/// The API can start before the desktop shell has installed its sidecar. If that happened and it
+/// kept using `vendor/agentchattr`, the room would write `*_queue.jsonl` under the app-data copy
+/// while the wrappers watched the checkout's `data/` — the room would show every agent online and
+/// none of them would ever receive an assignment. Pointing both at the same app-data copy is what
+/// makes `POST /v1/room/agents/start` actually wake the crew.
+///
+/// The join is deliberate: `install_sidecar` replaces source files and prunes everything else,
+/// so handing it the index root would delete Rigel's database and settings.
+pub fn use_installed_sidecar(index_dir: impl Into<PathBuf>) -> Option<String> {
+    let root = std::env::current_exe().ok()?.parent()?.to_path_buf();
+    let source = packaged_sidecar_dir(&root)?;
+    install_sidecar(source, index_dir.into().join("agentchat")).ok()
 }
 
 /// The crew inherits `cwd` from `config.toml`. The vendor checkout sits inside the project, so
@@ -698,36 +732,6 @@ fn setup_help(project_root: Option<&str>) -> String {
     )
 }
 
-/// Muse Code is Meta's terminal agent. The vendor checkout has no table for it, so the first room
-/// start writes one into the writable `config.local.toml`; a user who already has an
-/// `[agents.muse]` table keeps theirs, flags included. `cwd` is the open project because the room
-/// runs from app data and `..` there is not the project.
-fn ensure_muse_agent(dir: &Path, project: Option<&str>) -> Result<(), String> {
-    let Some(project) = project.map(str::trim).filter(|path| !path.is_empty()) else {
-        return Ok(());
-    };
-    let path = dir.join("config.local.toml");
-    let existing = std::fs::read_to_string(&path).unwrap_or_default();
-    if existing.lines().any(|line| line.trim() == "[agents.muse]") {
-        return Ok(());
-    }
-    let cwd = project.replace('\\', "\\\\").replace('"', "\\\"");
-    let mut text = existing;
-    if !text.is_empty() && !text.ends_with('\n') {
-        text.push('\n');
-    }
-    text.push_str(&format!(
-        "\n# Added by Rigel: Meta's Muse Code, when `muse` is on PATH.\n\
-         [agents.muse]\n\
-         command = \"muse\"\n\
-         cwd = \"{cwd}\"\n\
-         color = \"#0866ff\"\n\
-         label = \"Muse\"\n"
-    ));
-    std::fs::write(&path, text)
-        .map_err(|error| format!("could not add Muse to config.local.toml: {error}"))
-}
-
 /// Serialises cold starts: the window's boot and a tab action can both see a dead server,
 /// and only one of them should spawn a process.
 fn start_lock() -> &'static tokio::sync::Mutex<()> {
@@ -747,7 +751,6 @@ pub async fn ensure_server(project_root: Option<&str>) -> Result<ChatStatus, Str
 
     let dir = dir_for(project_root).ok_or_else(missing_checkout)?;
     ensure_project_mcps(project_root)?;
-    ensure_muse_agent(&dir, project_root)?;
 
     spawn_server(&dir)?;
 
@@ -823,7 +826,9 @@ fn which(program: &str) -> Option<std::path::PathBuf> {
     let path = std::env::var_os("PATH")?;
     for dir in std::env::split_paths(&path) {
         #[cfg(windows)]
-        for suffix in [".exe", ""] {
+        // npm installs `muse` as `muse.cmd`; a `.cmd` shim is still a runnable CLI here because
+        // the wrapper launches it through `cmd.exe`.
+        for suffix in [".exe", ".cmd", ".bat", ".com", ""] {
             let candidate = dir.join(if program.ends_with(".exe") {
                 program.to_string()
             } else {
@@ -1028,6 +1033,38 @@ pub async fn send_as(text: &str, channel: &str, sender: &str) -> Result<(), Stri
 
 /* ------------------------- agents, without windows ------------------------ */
 
+/// What a harness needs before it can answer a room prompt.
+///
+/// Installation alone is not enough: Kimi, Kilo, CodeBuddy and Copilot all install cleanly while
+/// refusing a prompt until they are signed in. The readiness surfaces report this state from a
+/// real, bounded headless probe instead of calling every installed binary ready.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HarnessStatus {
+    /// Configured and installed, but not probed yet. Internal launch paths use this state; the
+    /// readiness surfaces replace it with the result of [`probed_harnesses`].
+    Unknown,
+    /// A real headless prompt completed and returned the probe token.
+    Usable,
+    /// The configured command is not on PATH.
+    Missing,
+    /// An API agent's configured provider key is not in the environment.
+    MissingKey,
+    /// The CLI ran but asked for a login, subscription or API key.
+    Unauthenticated,
+    /// The probe could not reach a verdict: spawn failure, a non-zero exit without a reply, or
+    /// no probe reply at all. A timeout is deliberately *not* this state: see [`ProbeTimeout`].
+    ProbeFailed,
+    /// The CLI was still starting when the probe's full budget (and one retry) ran out. This says
+    /// nothing about the account: reporting it as a credential failure would turn a slow cold
+    /// start into a false sign-in requirement.
+    ProbeTimeout,
+    /// The provider refused the turn because its account cannot bill it (billing disabled,
+    /// prepayment credits depleted, HTTP 402). The CLI itself is installed and authenticated;
+    /// the fix is a billing action on the provider's site, not a Rigel login.
+    ProviderBlocked,
+}
+
 /// One harness the vendor checkout can wrap, read from its own `config.toml`.
 ///
 /// Both start scripts and this module exist because agentchattr's Windows wrapper drives the
@@ -1040,8 +1077,41 @@ pub struct ChatHarness {
     pub label: String,
     /// `type = "api"`: an HTTP agent on a local model (`wrapper_api.py`), no CLI and no TUI.
     pub api: bool,
-    /// The CLI resolves on PATH. API agents are always ready — they need no binary.
+    /// Kept for clients of the old shape: true only when this harness is currently usable. The
+    /// raw configuration view can be true before probing; `configured` and the API probe first.
     pub ready: bool,
+    pub status: HarnessStatus,
+    /// The exact CLI line (or probe outcome) behind `status`, never a generic guess.
+    pub evidence: String,
+    /// The command a user must run, copied from the CLI's own diagnostic where possible.
+    pub remediation: Option<String>,
+    /// The credential source the CLI said it accepts.
+    pub credential: Option<String>,
+}
+
+/// The room name Rigel manages for Free mode. It is written to `config.local.toml` on every
+/// swarm start so the roster always sees the model Free mode actually chose.
+pub const FREE_AGENT_NAME: &str = "rigel-free";
+
+/// The environment variable the wrapper reads; the value is passed only to the spawned child.
+pub const FREE_AGENT_API_KEY_ENV: &str = "RIGEL_FREE_API_KEY";
+
+/// What to launch for Free mode. `api_key` is never serialized or logged.
+#[derive(Clone)]
+pub struct FreeAgent {
+    pub base_url: String,
+    pub model: String,
+    pub api_key: Option<String>,
+}
+
+impl std::fmt::Debug for FreeAgent {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("FreeAgent")
+            .field("base_url", &self.base_url)
+            .field("model", &self.model)
+            .field("api_key", &self.api_key.as_ref().map(|_| "[redacted]"))
+            .finish()
+    }
 }
 
 /// Strip a `#` comment, leaving quoted values alone (`color = "#da7756"` is not a comment).
@@ -1072,9 +1142,27 @@ type AgentTable = (String, Vec<(String, String)>);
 
 fn parse_agents(text: &str) -> Vec<AgentTable> {
     let mut tables: Vec<AgentTable> = Vec::new();
+    // `strip_env` is the one array-shaped value in the vendor file. Keep reading until its
+    // closing bracket instead of dropping every continuation line, which is what made the
+    // readiness probe inherit variables the room itself removes.
+    let mut pending: Option<(String, String)> = None;
     for raw in text.lines() {
         let line = without_comment(raw).trim();
         if line.is_empty() {
+            continue;
+        }
+        if let Some((key, mut value)) = pending.take() {
+            if !value.is_empty() {
+                value.push(' ');
+            }
+            value.push_str(line);
+            if line.contains(']') {
+                if let Some((_, pairs)) = tables.last_mut() {
+                    pairs.push((key, value));
+                }
+            } else {
+                pending = Some((key, value));
+            }
             continue;
         }
         if let Some(section) = line
@@ -1092,17 +1180,104 @@ fn parse_agents(text: &str) -> Vec<AgentTable> {
         let Some((key, value)) = line.split_once('=') else {
             continue;
         };
+        let key = key.trim().to_string();
+        let value = unquote(value);
         if let Some((_, pairs)) = tables.last_mut() {
-            pairs.push((key.trim().to_string(), unquote(value)));
+            if value.trim_start().starts_with('[') && !value.contains(']') {
+                pending = Some((key, value));
+            } else {
+                pairs.push((key, value));
+            }
         }
+    }
+    if let Some((key, value)) = pending
+        && let Some((_, pairs)) = tables.last_mut()
+    {
+        pairs.push((key, value));
     }
     tables.retain(|(name, _)| !name.is_empty());
     tables
 }
 
+/// The quoted members of a `strip_env = [...]` value.
+fn env_list(value: &str) -> Vec<String> {
+    value
+        .trim()
+        .trim_start_matches('[')
+        .trim_end_matches(']')
+        .split(',')
+        .map(unquote)
+        .filter(|item| !item.is_empty())
+        .collect()
+}
+
+/// Rewrite the managed Free-mode table in `config.local.toml`, leaving every user table and
+/// comment alone. The key is not written here: the wrapper reads it from the child's environment.
+pub fn install_free_agent(dir: &Path, free: &FreeAgent) -> Result<(), String> {
+    let path = dir.join("config.local.toml");
+    let text = std::fs::read_to_string(&path).unwrap_or_default();
+    let mut out = remove_agent_table(&text, FREE_AGENT_NAME);
+    if !out.is_empty() && !out.ends_with('\n') {
+        out.push('\n');
+    }
+    out.push_str(&format!(
+        "\n[agents.{FREE_AGENT_NAME}]\n\
+         type = \"api\"\n\
+         base_url = \"{}\"\n\
+         model = \"{}\"\n\
+         api_key_env = \"{FREE_AGENT_API_KEY_ENV}\"\n\
+         label = \"Rigel Free\"\n\
+         color = \"#6c8cff\"\n\
+         system_prompt = \"You are Rigel Free, a careful coding collaborator in the project's \
+         chat room. Read the recent messages, answer only what was asked, and keep replies short.\"\n",
+        toml_escape(&free.base_url),
+        toml_escape(&free.model),
+    ));
+    std::fs::write(&path, out)
+        .map_err(|error| format!("could not write {}: {error}", path.display()))
+}
+
+fn toml_escape(value: &str) -> String {
+    value.replace('\\', "\\\\").replace('"', "\\\"")
+}
+
+/// Remove one `[agents.*]` table without touching the sections around it.
+fn remove_agent_table(text: &str, name: &str) -> String {
+    let header = format!("[agents.{name}]");
+    let mut out = String::with_capacity(text.len());
+    let mut skipping = false;
+    for line in text.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with('[') && trimmed.ends_with(']') {
+            skipping = trimmed == header;
+        }
+        if !skipping {
+            out.push_str(line);
+            out.push('\n');
+        }
+    }
+    out
+}
+
 /// The harnesses the checkout would wrap, in config order. `config.local.toml` is merged
 /// over `config.toml` — the vendor's own precedence for machine-local agents.
 pub fn harnesses(dir: &Path) -> Vec<ChatHarness> {
+    harness_specs(dir)
+        .into_iter()
+        .map(|spec| spec.harness)
+        .collect()
+}
+
+/// Configuration kept beside the serializable harness so the probe can mirror the room's own
+/// environment handling without exposing `strip_env` through the API.
+#[derive(Clone)]
+struct HarnessSpec {
+    harness: ChatHarness,
+    command: String,
+    strip_env: Vec<String>,
+}
+
+fn harness_specs(dir: &Path) -> Vec<HarnessSpec> {
     let mut merged: Vec<AgentTable> = Vec::new();
     for file in ["config.toml", "config.local.toml"] {
         let Ok(text) = std::fs::read_to_string(dir.join(file)) else {
@@ -1128,27 +1303,665 @@ pub fn harnesses(dir: &Path) -> Vec<ChatHarness> {
             };
             let api = field("type").as_deref() == Some("api");
             let command = field("command").unwrap_or_else(|| name.clone());
-            let ready = harness_ready(api, &command, field("api_key_env").as_deref());
-            ChatHarness {
-                label: field("label").unwrap_or_else(|| name.clone()),
-                ready,
-                api,
-                name,
+            let api_key_env = field("api_key_env");
+            let strip_env = field("strip_env")
+                .map(|value| env_list(&value))
+                .unwrap_or_default();
+            let available = harness_ready(api, &command, api_key_env.as_deref());
+            let (status, evidence, remediation, credential) = if api {
+                match api_key_env.as_deref() {
+                    Some(key) if !available => {
+                        let (evidence, remediation) = if key == "MINIMAX_API_KEY" {
+                            (
+                                format!("{key} is not set and Rigel has no stored MiniMax key"),
+                                Some(
+                                    "Paste a MiniMax key in Settings → Harnesses, under Keys a harness receives"
+                                        .to_string(),
+                                ),
+                            )
+                        } else {
+                            (
+                                format!("{key} is not set in the environment that launches Rigel"),
+                                Some(format!(
+                                    "Set {key} in Rigel's environment, then restart the app"
+                                )),
+                            )
+                        };
+                        (
+                            HarnessStatus::MissingKey,
+                            evidence,
+                            remediation,
+                            Some(key.to_string()),
+                        )
+                    }
+                    _ => (HarnessStatus::Unknown, String::new(), None, None),
+                }
+            } else if !available {
+                (
+                    HarnessStatus::Missing,
+                    format!("`{command}` was not found on PATH"),
+                    Some(format!("Install `{command}` so it resolves on PATH")),
+                    None,
+                )
+            } else {
+                (HarnessStatus::Unknown, String::new(), None, None)
+            };
+            let ready = !matches!(
+                status,
+                HarnessStatus::Missing | HarnessStatus::MissingKey
+            );
+            HarnessSpec {
+                harness: ChatHarness {
+                    label: field("label").unwrap_or_else(|| name.clone()),
+                    ready,
+                    api,
+                    name,
+                    status,
+                    evidence,
+                    remediation,
+                    credential,
+                },
+                command,
+                strip_env,
             }
         })
         .collect()
 }
 
-/// A CLI must be installed; an API agent must also have its key in the environment, or it would
-/// join the roster only to fail every turn.
+const PROBE_PROMPT: &str = "Reply with exactly OK";
+/// A cold CLI start still has to load its runtime and reach a provider. Thirty seconds was tight
+/// enough that Antigravity, Qwen and Kilo intermittently lost the race while answering normally
+/// on the next attempt; the probe now gives every CLI a realistic budget and retries once.
+const PROBE_TIMEOUT: Duration = Duration::from_secs(45);
+/// The three CLIs observed starting slowly on Windows get a longer first attempt.
+const SLOW_PROBE_TIMEOUT: Duration = Duration::from_secs(90);
+/// `kilo auth list` only reads local credential state; it does not need a model's budget.
+const PROBE_AUTH_TIMEOUT: Duration = Duration::from_secs(20);
+/// Ten cold CLI starts at once starve each other on Windows: authenticated Claude, Codex, Qwen
+/// and Antigravity probes timed out while Gemini and Copilot survived. Keep two in flight so a
+/// real login is not reported as a failure just because the whole roster woke at once.
+const PROBE_CONCURRENCY: usize = 2;
+
+/// How long one attempt may take for this CLI. The probe still retries once after a timeout, so
+/// the total wall clock can be twice this before the card reports `probe_timeout`.
+fn probe_budget(name: &str) -> Duration {
+    match name {
+        "antigravity" | "qwen" | "kilo" => SLOW_PROBE_TIMEOUT,
+        _ => PROBE_TIMEOUT,
+    }
+}
+const READINESS_TTL: Duration = Duration::from_secs(60);
+
+type ReadinessCache = HashMap<PathBuf, (Instant, Vec<ChatHarness>)>;
+static READINESS_CACHE: OnceLock<Mutex<ReadinessCache>> = OnceLock::new();
+/// Bumped when a keychain write or a forced re-check invalidates the cache. A probe that started
+/// before the bump must not publish its answer, or a slow pre-sign-in pass would overwrite the
+/// fresh verdict with the stale one it was already carrying.
+static READINESS_GENERATION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+/// One roster probe at a time. The Chat tab and Settings can both read readiness; without this
+/// guard each reader launched its own ten-CLI roster, doubling process pressure and making a
+/// healthy CLI look like a timeout. A second reader waits, then reuses the fresh cache entry.
+static PROBE_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+
+/// The cache itself. `OnceLock::get` alone never initializes the slot, so a cache that only ever
+/// read through `get` silently missed every time and re-probed the whole roster on each request.
+fn readiness_cache() -> &'static Mutex<ReadinessCache> {
+    READINESS_CACHE.get_or_init(Mutex::default)
+}
+
+/// The cached verdict for one checkout, or `None` when it is absent or past its short lifetime.
+fn cached_readiness(dir: &Path) -> Option<Vec<ChatHarness>> {
+    let cache = readiness_cache().lock().ok()?;
+    let (at, rows) = cache.get(dir)?;
+    (at.elapsed() < READINESS_TTL).then(|| rows.clone())
+}
+
+fn remember_readiness(dir: &Path, rows: &[ChatHarness], generation: u64) {
+    if generation != READINESS_GENERATION.load(std::sync::atomic::Ordering::SeqCst) {
+        return;
+    }
+    if let Ok(mut cache) = readiness_cache().lock() {
+        cache.insert(dir.to_path_buf(), (Instant::now(), rows.to_vec()));
+    }
+}
+
+/// Probe each configured harness once and cache the answer briefly. The Chat tab polls its
+/// roster, so probing on every poll would spend a model request every few seconds; a minute is
+/// short enough that signing in is reflected without restarting Rigel.
+fn probed_harnesses(dir: &Path) -> Vec<ChatHarness> {
+    if let Some(rows) = cached_readiness(dir) {
+        return rows;
+    }
+
+    let _probe = PROBE_LOCK.get_or_init(Mutex::default).lock();
+    // Another reader may have finished the roster while this one waited for the lock.
+    if let Some(rows) = cached_readiness(dir) {
+        return rows;
+    }
+
+    let generation = READINESS_GENERATION.load(std::sync::atomic::Ordering::SeqCst);
+    let specs = harness_specs(dir);
+    let mut rows = Vec::with_capacity(specs.len());
+    for group in specs.chunks(PROBE_CONCURRENCY) {
+        let handles: Vec<_> = group
+            .iter()
+            .cloned()
+            .map(|spec| std::thread::spawn(move || probe_harness(spec)))
+            .collect();
+        rows.extend(handles.into_iter().filter_map(|handle| handle.join().ok()));
+    }
+
+    remember_readiness(dir, &rows, generation);
+    rows
+}
+
+/// A headless prompt that matches the room's launch as closely as the CLI allows. The prompt is
+/// one argv element on purpose: word-splitting it turns a real answer into a spurious failure.
+fn probe_args(name: &str) -> Option<Vec<String>> {
+    let prompt = PROBE_PROMPT.to_string();
+    Some(match name {
+        "claude" => vec!["-p".into(), prompt],
+        // Codex's room launch clears a stale local proxy override. Probe the same path so a
+        // working ChatGPT session is not misreported because an unrelated proxy is down.
+        "codex" => vec![
+            "exec".into(),
+            "-c".into(),
+            "openai_base_url=".into(),
+            prompt,
+        ],
+        "gemini" => vec!["-p".into(), prompt, "--skip-trust".into()],
+        // Print mode exits on its own; the interactive unattended flag can make older agy
+        // builds wait, so the readiness probe uses the plain headless path.
+        "antigravity" => vec!["-p".into(), prompt],
+        "kimi" | "qwen" | "codebuddy" | "copilot" => vec!["-p".into(), prompt],
+        "kilo" => vec!["run".into(), prompt],
+        _ => return None,
+    })
+}
+
+struct ProbeRun {
+    output: String,
+    code: Option<i32>,
+    timed_out: bool,
+    error: Option<String>,
+}
+
+/// Run one non-interactive probe with no stdin, a bounded wall clock, and the same env scrubbing
+/// the room applies. Both streams go to a temp file so a chatty CLI such as Codex cannot fill a
+/// pipe and deadlock while we wait for it.
+fn run_probe(spec: &HarnessSpec, args: &[String], budget: Duration) -> ProbeRun {
+    let program = which(&spec.command).unwrap_or_else(|| PathBuf::from(&spec.command));
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_nanos())
+        .unwrap_or_default();
+    let log = std::env::temp_dir().join(format!(
+        "rigel-readiness-{}-{}-{stamp}.log",
+        std::process::id(),
+        spec.harness.name
+    ));
+    let Ok(writer) = std::fs::File::create(&log) else {
+        return ProbeRun {
+            output: String::new(),
+            code: None,
+            timed_out: false,
+            error: Some("could not create the probe log".to_string()),
+        };
+    };
+    let Ok(stderr) = writer.try_clone() else {
+        let _ = std::fs::remove_file(&log);
+        return ProbeRun {
+            output: String::new(),
+            code: None,
+            timed_out: false,
+            error: Some("could not clone the probe log handle".to_string()),
+        };
+    };
+
+    let mut command = std::process::Command::new(&program);
+    command
+        .args(args)
+        .current_dir(std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")))
+        .stdin(Stdio::null())
+        .stdout(Stdio::from(writer))
+        .stderr(Stdio::from(stderr))
+        // Never let the readiness probe look like it was started by an interactive Claude.
+        .env_remove("CLAUDECODE");
+    for key in &spec.strip_env {
+        command.env_remove(key);
+    }
+    let has_auth_token = std::env::var_os("ANTHROPIC_AUTH_TOKEN").is_some();
+    for key in harness_env_removals(&spec.harness.name, has_auth_token) {
+        command.env_remove(*key);
+    }
+    // Gemini is the one harness whose room launch injects a key Rigel already stores. A probe
+    // that skipped this would report a working room agent as unauthenticated.
+    if spec.harness.name == "gemini"
+        && std::env::var_os("GEMINI_API_KEY").is_none()
+        && let Ok(key) = crate::credentials::get(crate::credentials::GEMINI)
+    {
+        command.env("GEMINI_API_KEY", key);
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        command.creation_flags(0x0800_0000);
+    }
+
+    let mut child = match command.spawn() {
+        Ok(child) => child,
+        Err(error) => {
+            let _ = std::fs::remove_file(&log);
+            return ProbeRun {
+                output: String::new(),
+                code: None,
+                timed_out: false,
+                error: Some(format!("could not start `{}`: {error}", spec.command)),
+            };
+        }
+    };
+    let pid = child.id();
+    let started = Instant::now();
+    let mut code = None;
+    let mut timed_out = false;
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                code = status.code();
+                break;
+            }
+            Ok(None) if started.elapsed() < budget => {
+                std::thread::sleep(Duration::from_millis(100));
+            }
+            Ok(None) => {
+                timed_out = true;
+                let _ = kill_tree(pid);
+                let _ = child.wait();
+                break;
+            }
+            Err(error) => {
+                let _ = kill_tree(pid);
+                let _ = child.wait();
+                return ProbeRun {
+                    output: String::new(),
+                    code: None,
+                    timed_out: false,
+                    error: Some(format!("could not wait for `{}`: {error}", spec.command)),
+                };
+            }
+        }
+    }
+    let output = std::fs::read(&log)
+        .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
+        .unwrap_or_default();
+    let _ = std::fs::remove_file(&log);
+    ProbeRun {
+        output,
+        code,
+        timed_out,
+        error: None,
+    }
+}
+
+fn probe_harness(spec: HarnessSpec) -> ChatHarness {
+    let mut harness = spec.harness.clone();
+    if matches!(
+        harness.status,
+        HarnessStatus::Missing | HarnessStatus::MissingKey
+    ) {
+        return harness;
+    }
+    if harness.api {
+        harness.status = HarnessStatus::Usable;
+        harness.ready = true;
+        harness.evidence = "API agent; no CLI login is required".to_string();
+        return harness;
+    }
+    // Kilo's prompt path can sit on its model banner indefinitely when no provider credential
+    // exists. Its own auth command is a fast, explicit signal, so prefer it before spending the
+    // bounded prompt timeout.
+    if harness.name == "kilo" {
+        let check = run_probe(
+            &spec,
+            &["auth".to_string(), "list".to_string()],
+            PROBE_AUTH_TIMEOUT,
+        );
+        let check_output = clean_output(&check.output);
+        let missing = check_output.lines().map(clean_line).find(|line| {
+            let line = line.to_ascii_lowercase();
+            line.contains("0 credentials") || line.contains("no credentials")
+        });
+        if let Some(evidence) = missing {
+            harness.status = HarnessStatus::Unauthenticated;
+            harness.ready = false;
+            harness.evidence = evidence;
+            harness.remediation = Some("Run `kilo auth login`".to_string());
+            harness.credential = Some("Kilo provider credential".to_string());
+            return harness;
+        }
+    }
+    let Some(args) = probe_args(&harness.name) else {
+        harness.status = HarnessStatus::ProbeFailed;
+        harness.ready = false;
+        harness.evidence = format!(
+            "`{}` is installed, but Rigel has no readiness probe for it",
+            spec.command
+        );
+        return harness;
+    };
+    let budget = probe_budget(&harness.name);
+    let mut run = run_probe(&spec, &args, budget);
+    let mut output = clean_output(&run.output);
+
+    // A CLI can print its login diagnostic before it exits or times out; that answer is still
+    // the truth and outranks the clock.
+    if apply_auth_diagnosis(&mut harness, &output) {
+        return harness;
+    }
+    if apply_provider_block(&mut harness, &output) {
+        return harness;
+    }
+    let answered = run.error.is_none() && run.code == Some(0) && output_has_ok(&output);
+    if run.error.is_none() && !answered {
+        // Cold starts and provider hiccups can lose one attempt while the CLI is healthy. Give
+        // the same harness one more full attempt before publishing a timeout or a hard failure;
+        // only an answer, an auth diagnostic, or a second failure becomes the card's state.
+        run = run_probe(&spec, &args, budget);
+        output = clean_output(&run.output);
+    }
+    if let Some(error) = run.error {
+        harness.status = HarnessStatus::ProbeFailed;
+        harness.ready = false;
+        harness.evidence = error;
+        return harness;
+    }
+    if apply_auth_diagnosis(&mut harness, &output) {
+        return harness;
+    }
+    if apply_provider_block(&mut harness, &output) {
+        return harness;
+    }
+    if run.timed_out {
+        harness.status = HarnessStatus::ProbeTimeout;
+        harness.ready = false;
+        let tail = last_output_line(&output);
+        harness.evidence = if tail.is_empty() {
+            format!(
+                "probe did not finish within {}s, after two attempts; the CLI printed no output",
+                budget.as_secs()
+            )
+        } else {
+            format!(
+                "probe did not finish within {}s, after two attempts; last output: {tail}",
+                budget.as_secs()
+            )
+        };
+        harness.remediation = Some(format!(
+            "Run `{} -p \"{PROBE_PROMPT}\"` in a terminal to see what it is waiting on, then press Check again",
+            spec.command
+        ));
+        if harness.name == "kilo" {
+            harness.remediation = Some(format!(
+                "Run `kilo run \"{PROBE_PROMPT}\"` in a terminal to see what it is waiting on, fix any provider error it prints, then press Check again"
+            ));
+        }
+        return harness;
+    }
+    if run.code == Some(0) && output_has_ok(&output) {
+        harness.status = HarnessStatus::Usable;
+        harness.ready = true;
+        harness.evidence = format!("`{PROBE_PROMPT}` exited 0 and replied OK");
+        harness.remediation = None;
+        harness.credential = None;
+        return harness;
+    }
+
+    harness.status = HarnessStatus::ProbeFailed;
+    harness.ready = false;
+    let tail = last_output_line(&output);
+    harness.evidence = match run.code {
+        Some(code) if tail.is_empty() => {
+            format!("prompt probe exited {code} without a reply")
+        }
+        Some(code) => format!("prompt probe exited {code}: {tail}"),
+        None => format!("prompt probe ended without an exit code: {tail}"),
+    };
+    harness
+}
+
+/// Apply a vendor's own sign-in diagnostic to the card, when the captured output contains one.
+fn apply_auth_diagnosis(harness: &mut ChatHarness, output: &str) -> bool {
+    let Some((evidence, remediation, credential)) = auth_diagnosis(&harness.name, output) else {
+        return false;
+    };
+    harness.status = HarnessStatus::Unauthenticated;
+    harness.ready = false;
+    harness.evidence = evidence;
+    harness.remediation = remediation;
+    harness.credential = credential;
+    true
+}
+
+/// Provider billing refusals are not probe failures. Gemini prints an opaque critical error with
+/// `status: 402`; Kilo prints the same refusal as depleted AI Studio prepayment credits. Surface
+/// the provider's own line and send the user to the billing page instead of retrying a login.
+fn apply_provider_block(harness: &mut ChatHarness, output: &str) -> bool {
+    let Some((evidence, remediation)) = provider_billing_diagnosis(output) else {
+        return false;
+    };
+    harness.status = HarnessStatus::ProviderBlocked;
+    harness.ready = false;
+    harness.evidence = evidence;
+    harness.remediation = Some(remediation);
+    harness.credential = Some("Provider billing (Google AI Studio)".to_string());
+    true
+}
+
+fn provider_billing_diagnosis(output: &str) -> Option<(String, String)> {
+    let lower = output.to_ascii_lowercase();
+    let blocked = lower.contains("prepayment credits are depleted")
+        || lower.contains("credits are depleted")
+        || lower.contains("status: 402")
+        || lower.contains("payment required")
+        || lower.contains("billing#prepay");
+    if !blocked {
+        return None;
+    }
+    let evidence = output
+        .lines()
+        .map(clean_line)
+        .find(|line| {
+            let line = line.to_ascii_lowercase();
+            line.contains("402")
+                || line.contains("credit")
+                || line.contains("billing")
+                || line.contains("payment")
+        })
+        .unwrap_or_else(|| last_output_line(output));
+    let url = first_url(output).unwrap_or_else(|| "https://ai.studio/projects".to_string());
+    Some((
+        evidence,
+        format!("Top up or restore billing at {url}, then press Check again"),
+    ))
+}
+
+/// The CLI's own sign-in diagnostic, in the order the vendors print it. Evidence is the exact
+/// line captured from this run; remediation names the command that line says will fix it.
+fn auth_diagnosis(name: &str, output: &str) -> Option<(String, Option<String>, Option<String>)> {
+    let lower = output.to_ascii_lowercase();
+    let evidence = |needles: &[&str]| {
+        output
+            .lines()
+            .map(clean_line)
+            .find(|line| {
+                let line = line.to_ascii_lowercase();
+                needles.iter().any(|needle| line.contains(needle))
+            })
+            .unwrap_or_else(|| last_output_line(output))
+    };
+
+    if name == "kimi"
+        && (lower.contains("subscription does not have access")
+            || lower.contains("provider.auth_error"))
+    {
+        let evidence = evidence(&["subscription does not have access", "provider.auth_error"]);
+        let url = first_url(output);
+        let remediation = match url {
+            Some(url) => format!(
+                "Upgrade the Kimi Code plan at {url}, then run `kimi` and `/login` if the account is not signed in"
+            ),
+            None => "Upgrade the Kimi Code plan, then run `kimi` and `/login`".to_string(),
+        };
+        return Some((
+            evidence,
+            Some(remediation),
+            Some("Kimi Code subscription".to_string()),
+        ));
+    }
+    if name == "kimi" && lower.contains("no model configured") {
+        return Some((
+            evidence(&["no model configured"]),
+            Some("Run `kimi`, then `/login`, and choose a model".to_string()),
+            Some("Kimi Code account login".to_string()),
+        ));
+    }
+    if name == "codebuddy"
+        && (lower.contains("authentication required") || lower.contains("please use /login"))
+    {
+        return Some((
+            evidence(&["authentication required", "please use /login"]),
+            Some("Run `codebuddy`, then `/login`".to_string()),
+            Some("CodeBuddy account login".to_string()),
+        ));
+    }
+    if name == "kilo"
+        && (lower.contains("you need to sign in")
+            || lower.contains("not signed in")
+            || lower.contains("run kilo auth login"))
+    {
+        return Some((
+            evidence(&[
+                "you need to sign in",
+                "not signed in",
+                "run kilo auth login",
+            ]),
+            Some("Run `kilo auth login`".to_string()),
+            Some("Kilo provider credential".to_string()),
+        ));
+    }
+    if name == "copilot"
+        && (lower.contains("no authentication information found")
+            || lower.contains("not logged in"))
+    {
+        return Some((
+            evidence(&["no authentication information found", "not logged in"]),
+            Some("Run `copilot login`, or set `COPILOT_GITHUB_TOKEN`".to_string()),
+            Some("GitHub Copilot login or COPILOT_GITHUB_TOKEN".to_string()),
+        ));
+    }
+    if lower.contains("gemini_api_key")
+        && (lower.contains("must specify") || lower.contains("not set"))
+    {
+        return Some((
+            evidence(&["gemini_api_key"]),
+            Some(
+                "Set GEMINI_API_KEY or run `rigel keys set gemini` to store it in Rigel"
+                    .to_string(),
+            ),
+            Some("GEMINI_API_KEY".to_string()),
+        ));
+    }
+    if lower.contains("not authenticated")
+        || lower.contains("please login")
+        || lower.contains("please log in")
+        || lower.contains("invalid api key")
+    {
+        return Some((
+            evidence(&[
+                "not authenticated",
+                "please login",
+                "please log in",
+                "invalid api key",
+            ]),
+            Some(format!("Run `{name}` and complete its login")),
+            Some(format!("{name} account login")),
+        ));
+    }
+    None
+}
+
+fn clean_output(text: &str) -> String {
+    text.lines()
+        .map(clean_line)
+        .filter(|line| !line.is_empty())
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// Strip ANSI control sequences from one captured line and keep evidence short enough for a
+/// roster tooltip. CLI output is untrusted, so it is only ever displayed as text.
+fn clean_line(line: &str) -> String {
+    let mut out = String::new();
+    let mut escape = false;
+    for ch in line.chars() {
+        if escape {
+            if ch.is_ascii_alphabetic() {
+                escape = false;
+            }
+        } else if ch == '\u{1b}' {
+            escape = true;
+        } else if !ch.is_control() {
+            out.push(ch);
+            if out.chars().count() >= 260 {
+                out.push('…');
+                break;
+            }
+        }
+    }
+    out.trim().to_string()
+}
+
+fn last_output_line(output: &str) -> String {
+    output
+        .lines()
+        .rev()
+        .map(clean_line)
+        .find(|line| !line.is_empty())
+        .unwrap_or_default()
+}
+
+fn output_has_ok(output: &str) -> bool {
+    output.lines().any(|line| {
+        let line = line.trim();
+        line == "OK" || line.ends_with(" OK")
+    })
+}
+
+fn first_url(text: &str) -> Option<String> {
+    let start = text.find("https://")?;
+    let rest = &text[start..];
+    let end = rest
+        .find(|ch: char| ch.is_whitespace() || matches!(ch, ')' | ']' | ',' | '"'))
+        .unwrap_or(rest.len());
+    Some(rest[..end].to_string())
+}
+
+/// A CLI must be installed; an API agent must also have its key available, or it would join the
+/// roster only to fail every turn. MiniMax is the one API agent whose key Rigel stores itself;
+/// the room injects the keychain value into that child at spawn.
 fn harness_ready(api: bool, command: &str, api_key_env: Option<&str>) -> bool {
     if api {
         return match api_key_env {
-            Some(name) => std::env::var_os(name).is_some(),
+            Some(name) => api_agent_key_present(name),
             None => true,
         };
     }
     which(command).is_some()
+}
+
+fn api_agent_key_present(name: &str) -> bool {
+    std::env::var_os(name).is_some()
+        || (name == "MINIMAX_API_KEY" && crate::credentials::present(crate::credentials::MINIMAX))
 }
 
 /// A hidden console cannot answer a permission prompt, so the harnesses that have such prompts
@@ -1157,9 +1970,32 @@ fn unattended_flag(name: &str) -> Option<&'static str> {
     match name {
         "claude" => Some("--dangerously-skip-permissions"),
         "codex" => Some("--dangerously-bypass-approvals-and-sandbox"),
+        // agy otherwise stops on its first MCP tool call, so a queued room mention is typed
+        // into an approval dialog and never answered.
+        "antigravity" => Some("--dangerously-skip-permissions"),
         // Muse Code keeps its OS sandbox; only the interactive approval prompt is turned off.
         "muse" => Some("--disable-approval"),
         _ => None,
+    }
+}
+
+/// Room-only CLI arguments a harness needs to work unattended. Codex's global config may point
+/// at a local proxy that is not running; the room uses the ChatGPT session that is already
+/// signed in, and clearing that override is the only way to choose it per launch. The wrapper
+/// ignores an `args` key in `config.toml`, so these travel with the argv Rigel builds.
+fn room_args(name: &str) -> &'static [&'static str] {
+    match name {
+        // The update panel is not modal, but the alternate screen makes the first frame race the
+        // prompt on cold starts. Linear rendering keeps the composer visible from the beginning.
+        "codex" => &["-c", "openai_base_url=", "--no-alt-screen"],
+        // A headless room cannot answer Gemini's folder-trust prompt or its per-tool approval.
+        // --skip-trust is session-scoped; the folder remains untrusted for interactive runs.
+        "gemini" => &["--skip-trust", "--yolo"],
+        // Qwen's own /auth choice must remain authoritative. Do not force
+        // `qwen-subscription`: that is the Qwen Plus/Pro subscription OAuth path,
+        // while Alibaba Cloud Coding Plan is a separate API-key setup. Let Qwen's
+        // own /auth selection decide so stored credentials and user-chosen plans work.
+        _ => &[],
     }
 }
 
@@ -1174,6 +2010,11 @@ fn harness_argv(harness: &ChatHarness) -> Vec<String> {
     if let Some(flag) = unattended_flag(&harness.name) {
         argv.push(flag.to_string());
     }
+    argv.extend(
+        room_args(&harness.name)
+            .iter()
+            .map(|arg| (*arg).to_string()),
+    );
     argv
 }
 
@@ -1188,24 +2029,48 @@ fn concord_agent_id(name: &str) -> String {
 }
 
 fn spawn_harness(dir: &Path, harness: &ChatHarness) -> Result<ChatProcess, String> {
+    spawn_harness_env(dir, harness, &[])
+}
+
+fn spawn_harness_env(
+    dir: &Path,
+    harness: &ChatHarness,
+    env: &[(&str, String)],
+) -> Result<ChatProcess, String> {
     let python = chat_python(dir).ok_or("no python found on PATH to start an agent")?;
-    launch_hidden(
+    launch_hidden_env(
         &python,
         &harness_argv(harness),
         dir,
         &harness.name,
         &harness.label,
+        env,
     )
+}
+
+/// Variables the harness must not inherit.
+///
+/// Interactive Claude refuses to start when both `ANTHROPIC_API_KEY` and `ANTHROPIC_AUTH_TOKEN`
+/// are set: it prints an approval message and waits, so every room prompt typed into its console
+/// is discarded. When the local proxy token is present, drop the conflicting API key for Claude
+/// only; other harnesses and a token-less setup are untouched.
+fn harness_env_removals(name: &str, has_auth_token: bool) -> &'static [&'static str] {
+    if name == "claude" && has_auth_token {
+        &["ANTHROPIC_API_KEY"]
+    } else {
+        &[]
+    }
 }
 
 /// The CreateProcess half, split from the harness table so a test can drive it with a stub
 /// wrapper. Everything that decides whether the console is visible lives here.
-fn launch_hidden(
+fn launch_hidden_env(
     program: &Path,
     argv: &[String],
     dir: &Path,
     name: &str,
     label: &str,
+    env: &[(&str, String)],
 ) -> Result<ChatProcess, String> {
     let mut command = std::process::Command::new(program);
     command
@@ -1221,6 +2086,31 @@ fn launch_hidden(
         .stdin(Stdio::inherit())
         .stdout(Stdio::inherit())
         .stderr(Stdio::inherit());
+    for (key, value) in env {
+        command.env(key, value);
+    }
+    // A CLI that talks to its vendor directly needs the key Rigel already stores. Gemini is the
+    // one interactive harness with that requirement; its CLI refuses to start without either an
+    // OAuth login or this variable, and the wrapper inherits what we put here.
+    if name == "gemini"
+        && std::env::var_os("GEMINI_API_KEY").is_none()
+        && let Ok(key) = crate::credentials::get(crate::credentials::GEMINI)
+    {
+        command.env("GEMINI_API_KEY", key);
+    }
+    // MiniMax's room entry is an API agent (`type = "api"`), not a CLI with its own login.
+    // The wrapper reads this variable, so a key stored in Settings has to cross only into that
+    // one child. An explicit environment value still wins for a shell or CI run.
+    if name == "minimax"
+        && std::env::var_os("MINIMAX_API_KEY").is_none()
+        && let Ok(key) = crate::credentials::get(crate::credentials::MINIMAX)
+    {
+        command.env("MINIMAX_API_KEY", key);
+    }
+    let has_auth_token = std::env::var_os("ANTHROPIC_AUTH_TOKEN").is_some();
+    for key in harness_env_removals(name, has_auth_token) {
+        command.env_remove(*key);
+    }
 
     #[cfg(windows)]
     {
@@ -1382,11 +2272,259 @@ pub async fn stop_agent(name: &str) -> Result<String, String> {
     ))
 }
 
+/// The names actually present in the room. `/api/status` is a flat map that also carries
+/// `paused`, and a crashed slot can linger with `available: false` until its heartbeat expires;
+/// neither is an agent a caller can address.
 fn online_names(status: &Value) -> Vec<String> {
     status
         .as_object()
-        .map(|map| map.keys().cloned().collect())
+        .map(|map| {
+            map.iter()
+                .filter(|(name, row)| {
+                    name.as_str() != "paused"
+                        && row.get("available").and_then(Value::as_bool) == Some(true)
+                })
+                .map(|(name, _)| name.clone())
+                .collect()
+        })
         .unwrap_or_default()
+}
+
+/// True when the status object still lists this agent family, even if it is not answering yet.
+fn status_has_agent(status: &Value, name: &str) -> bool {
+    status
+        .as_object()
+        .map(|map| {
+            map.keys()
+                .any(|key| key != "paused" && same_agent(key, name))
+        })
+        .unwrap_or(false)
+}
+
+/// True when this process started the wrapper behind `name` (including a suffixed slot).
+pub fn owns(name: &str) -> bool {
+    launched()
+        .iter()
+        .any(|process| same_agent(name, &process.name))
+}
+
+/// Restart a wrapper this process owns: kill its tree, wait for the room to free the name, then
+/// launch the configured harness again. A wrapper another process started is refused, because
+/// this process has no pid for it and killing a guessed pid is worse than reporting the state.
+pub async fn restart_agent(project_root: Option<&str>, name: &str) -> Result<String, String> {
+    let client = http_client();
+    if !healthy(&client).await {
+        return Err("the room is not running".to_string());
+    }
+    let ours = launched();
+    let process = ours
+        .iter()
+        .find(|process| same_agent(name, &process.name))
+        .cloned()
+        .ok_or_else(|| {
+            format!("Rigel did not start `{name}` in this process, so it cannot restart it")
+        })?;
+    let dir = dir_for(project_root).ok_or_else(missing_checkout)?;
+    let harness = harnesses(&dir)
+        .into_iter()
+        .find(|harness| same_agent(name, &harness.name))
+        .ok_or_else(|| format!("`{name}` is no longer configured"))?;
+    kill_tree(process.pid)?;
+
+    // The room removes a dead wrapper from `/api/status` immediately, but its registry keeps the
+    // slot for the 15 s crash timeout and then reserves the name for a 30 s grace period. A launch
+    // during that window registers as `name-2`, which is how the room accumulated duplicate
+    // agents. Wait both out (45 s) with margin, then require the status key to be gone as well.
+    let stopped = Instant::now();
+    let deadline = stopped + Duration::from_secs(70);
+    loop {
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        let freed = api_call(reqwest::Method::GET, "/api/status", None)
+            .await
+            .map(|status| !status_has_agent(&status, name))
+            .unwrap_or(false);
+        if freed && stopped.elapsed() >= Duration::from_secs(50) {
+            break;
+        }
+        if Instant::now() >= deadline {
+            return Err(format!(
+                "{} was stopped but the room still holds @{name}; the slot frees on its heartbeat expiry",
+                process.label
+            ));
+        }
+    }
+
+    ensure_project_mcps(project_root)?;
+    let started = spawn_harness(&dir, &harness)?;
+    Ok(format!("restarted {} (pid {})", started.label, started.pid))
+}
+
+/// One automatic restart, kept for the `/v1/room/watchdog` view.
+#[derive(Debug, Clone, Serialize)]
+pub struct WatchdogRestart {
+    pub name: String,
+    pub label: String,
+    pub at_ms: i64,
+    pub outcome: String,
+}
+
+/// Detects a harness that has been `busy` for too long without posting a room message.
+///
+/// Busy alone is not a fault: a real turn can run for minutes and never post until it ends. The
+/// clock starts when the agent first appears busy, resets whenever it posts something new, and
+/// only then does `stuck_after` mean the wrapper is wedged rather than working.
+#[derive(Default)]
+pub struct Watchdog {
+    busy_since: HashMap<String, Instant>,
+    last_id: HashMap<String, u64>,
+    cooldown: HashMap<String, Instant>,
+    stuck: Vec<String>,
+    last_check_ms: i64,
+    restarts: VecDeque<WatchdogRestart>,
+}
+
+impl Watchdog {
+    /// Update the clocks and return the agents that have been silent past the threshold.
+    pub fn inspect(
+        &mut self,
+        status: &Value,
+        messages: &[ChatMessage],
+        now: Instant,
+        stuck_after: Duration,
+    ) -> Vec<String> {
+        let busy = busy_agents(status);
+        self.busy_since.retain(|name, _| busy.contains(name));
+        self.last_id.retain(|name, _| busy.contains(name));
+        let mut stuck = Vec::new();
+        for name in &busy {
+            let max_id = messages
+                .iter()
+                .filter(|message| message.sender == *name)
+                .map(|message| message.id)
+                .max()
+                .unwrap_or(0);
+            match self.last_id.get(name).copied() {
+                None => {
+                    self.last_id.insert(name.clone(), max_id);
+                    self.busy_since.insert(name.clone(), now);
+                }
+                Some(previous) if max_id > previous => {
+                    self.last_id.insert(name.clone(), max_id);
+                    self.busy_since.insert(name.clone(), now);
+                }
+                Some(_) => {
+                    let since = *self.busy_since.entry(name.clone()).or_insert(now);
+                    let cooled = self
+                        .cooldown
+                        .get(name)
+                        .is_none_or(|last| now.duration_since(*last) >= stuck_after);
+                    if cooled && now.duration_since(since) >= stuck_after {
+                        stuck.push(name.clone());
+                    }
+                }
+            }
+        }
+        self.stuck = stuck.clone();
+        self.last_check_ms = crate::now_ms();
+        stuck
+    }
+
+    /// Remember the outcome and hold this agent back for one more full threshold, so a restart
+    /// that needs a moment to come online is not restarted again immediately.
+    pub fn record(&mut self, name: &str, label: &str, outcome: String, now: Instant) {
+        self.cooldown.insert(name.to_string(), now);
+        self.busy_since.remove(name);
+        self.restarts.push_back(WatchdogRestart {
+            name: name.to_string(),
+            label: label.to_string(),
+            at_ms: crate::now_ms(),
+            outcome,
+        });
+        while self.restarts.len() > 20 {
+            self.restarts.pop_front();
+        }
+    }
+
+    pub fn snapshot(&self, stuck_after: Duration, owned: Vec<String>) -> Value {
+        serde_json::json!({
+            "stuck_after_secs": stuck_after.as_secs(),
+            "last_check_ms": self.last_check_ms,
+            "stuck": self.stuck,
+            "owned": owned,
+            "restarts": self.restarts,
+        })
+    }
+}
+
+/// The agents the room reports as both present and busy.
+fn busy_agents(status: &Value) -> Vec<String> {
+    status
+        .as_object()
+        .map(|map| {
+            map.iter()
+                .filter(|(name, row)| {
+                    name.as_str() != "paused"
+                        && row.get("available").and_then(Value::as_bool) == Some(true)
+                        && row.get("busy").and_then(Value::as_bool) == Some(true)
+                })
+                .map(|(name, _)| name.clone())
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Run the watchdog for the life of this process. Each process watches only the wrappers it
+/// started, because only those pids are known; the window and `rigel serve` therefore each run
+/// this and together cover every agent launched through either surface.
+pub fn spawn_watchdog<F>(
+    state: Arc<Mutex<Watchdog>>,
+    project: F,
+    stuck_after: Duration,
+    interval: Duration,
+) where
+    F: Fn() -> Option<String> + Send + 'static,
+{
+    std::thread::Builder::new()
+        .name("rigel-room-watchdog".to_string())
+        .spawn(move || {
+            let Ok(runtime) = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+            else {
+                return;
+            };
+            loop {
+                let now = Instant::now();
+                if let Some(root) = project() {
+                    let status = runtime.block_on(agents());
+                    let messages = runtime.block_on(messages(None, 0, 100));
+                    if let (Ok(status), Ok(messages)) = (status, messages) {
+                        let stuck = state
+                            .lock()
+                            .map(|mut guard| guard.inspect(&status, &messages, now, stuck_after))
+                            .unwrap_or_default();
+                        for name in stuck {
+                            if !owns(&name) {
+                                continue;
+                            }
+                            let label = launched()
+                                .into_iter()
+                                .find(|process| same_agent(&name, &process.name))
+                                .map(|process| process.label)
+                                .unwrap_or_else(|| name.clone());
+                            let outcome = runtime
+                                .block_on(restart_agent(Some(&root), &name))
+                                .unwrap_or_else(|error| error);
+                            if let Ok(mut guard) = state.lock() {
+                                guard.record(&name, &label, outcome, Instant::now());
+                            }
+                        }
+                    }
+                }
+                std::thread::sleep(interval);
+            }
+        })
+        .ok();
 }
 
 /// Start every configured agent that is not already in the room, hidden. Returns the labels
@@ -1405,13 +2543,31 @@ fn ensure_obscura(project_root: Option<&str>) -> Result<(), String> {
     obscura::ensure_project_mcp(root).map(|_| ())
 }
 
-/// Add the project-scoped MCP servers a Chat room needs. Rigel b is the browser; Concord is the
-/// shared work-state layer across harnesses; AgentCAD is the optional CAD tool. Existing user
-/// entries are preserved, but a malformed `.mcp.json` is reported rather than silently ignored.
+/// Add the project-scoped MCP servers a Chat room needs. Rigel b is the browser; Roblox Studio
+/// is the official local MCP server when Studio is installed; Concord is the shared work-state
+/// layer across harnesses; AgentCAD is the optional CAD tool. Existing user entries are
+/// preserved, but a malformed `.mcp.json` is reported rather than silently ignored.
 fn ensure_project_mcps(project_root: Option<&str>) -> Result<(), String> {
     ensure_obscura(project_root)?;
+    ensure_roblox(project_root)?;
     ensure_concord(project_root)?;
     ensure_agentcad(project_root)
+}
+
+/// Studio ships its own MCP server. Register the exact local launch recipe only when it is
+/// installed, so a machine without Studio does not get a Chat agent that always fails at spawn.
+fn ensure_roblox(project_root: Option<&str>) -> Result<(), String> {
+    let Some(root) = project_root.map(str::trim).filter(|root| !root.is_empty()) else {
+        return Ok(());
+    };
+    let root = Path::new(root);
+    if !root.is_dir() {
+        return Ok(());
+    }
+    let Some(server) = roblox::mcp_server() else {
+        return Ok(());
+    };
+    ensure_project_server(root, roblox::SERVER_NAME, server)
 }
 
 /// Concord needs a unique `CONCORD_AGENT_ID` per live session, so the server entry itself carries
@@ -1566,13 +2722,25 @@ fn concord_server(root: &Path) -> Value {
 }
 
 pub async fn start_agents(project_root: Option<&str>) -> Result<Vec<String>, String> {
+    start_agents_with_free(project_root, None).await
+}
+
+/// Start every configured agent, plus the managed Free-mode agent when one is supplied.
+/// Free mode's API agent has no key in Rigel's environment, so its readiness is explicit: the
+/// key travels to the child only.
+pub async fn start_agents_with_free(
+    project_root: Option<&str>,
+    free: Option<&FreeAgent>,
+) -> Result<Vec<String>, String> {
     let client = http_client();
     if !healthy(&client).await {
         return Err("the room is not running — start it first".to_string());
     }
     let dir = dir_for(project_root).ok_or_else(missing_checkout)?;
     ensure_project_mcps(project_root)?;
-    ensure_muse_agent(&dir, project_root)?;
+    if let Some(free) = free {
+        install_free_agent(&dir, free)?;
+    }
 
     let present = api_call(reqwest::Method::GET, "/api/status", None)
         .await
@@ -1582,13 +2750,22 @@ pub async fn start_agents(project_root: Option<&str>) -> Result<Vec<String>, Str
     let mut started = Vec::new();
     let mut problems = Vec::new();
     for harness in harnesses(&dir) {
-        if !harness.ready {
+        let managed = free.is_some() && harness.name == FREE_AGENT_NAME;
+        if !harness.ready && !managed {
             continue;
         }
         if present.iter().any(|name| same_agent(name, &harness.name)) {
             continue;
         }
-        match spawn_harness(&dir, &harness) {
+        let env = match (managed, free) {
+            (true, Some(free)) => free
+                .api_key
+                .clone()
+                .map(|key| vec![(FREE_AGENT_API_KEY_ENV, key)])
+                .unwrap_or_default(),
+            _ => Vec::new(),
+        };
+        match spawn_harness_env(&dir, &harness, &env) {
             Ok(process) => started.push(process.label),
             Err(problem) => problems.push(problem),
         }
@@ -1598,6 +2775,41 @@ pub async fn start_agents(project_root: Option<&str>) -> Result<Vec<String>, Str
         return Err(problems.join("; "));
     }
     Ok(started)
+}
+
+/// Start just the managed Free-mode agent. Idempotent: an already-online agent is left alone.
+pub async fn start_free_agent(
+    project_root: Option<&str>,
+    free: &FreeAgent,
+) -> Result<String, String> {
+    let client = http_client();
+    if !healthy(&client).await {
+        return Err("the room is not running — start it first".to_string());
+    }
+    let dir = dir_for(project_root).ok_or_else(missing_checkout)?;
+    install_free_agent(&dir, free)?;
+    let present = api_call(reqwest::Method::GET, "/api/status", None)
+        .await
+        .map(|value| online_names(&value))
+        .unwrap_or_default();
+    if present.iter().any(|name| same_agent(name, FREE_AGENT_NAME)) {
+        return Ok(format!(
+            "Rigel Free is already in the room as @{FREE_AGENT_NAME}"
+        ));
+    }
+    let harness = harnesses(&dir)
+        .into_iter()
+        .find(|harness| harness.name == FREE_AGENT_NAME)
+        .ok_or_else(|| {
+            "the managed Free-mode agent is missing from config.local.toml".to_string()
+        })?;
+    let env = free
+        .api_key
+        .clone()
+        .map(|key| vec![(FREE_AGENT_API_KEY_ENV, key)])
+        .unwrap_or_default();
+    let process = spawn_harness_env(&dir, &harness, &env)?;
+    Ok(format!("{} started (pid {})", process.label, process.pid))
 }
 
 /// Start one configured harness by name — the roster's per-agent button. Same readiness rules as
@@ -1610,7 +2822,6 @@ pub async fn start_agent(project_root: Option<&str>, name: &str) -> Result<Strin
     }
     let dir = dir_for(project_root).ok_or_else(missing_checkout)?;
     ensure_project_mcps(project_root)?;
-    ensure_muse_agent(&dir, project_root)?;
     let harness = harnesses(&dir)
         .into_iter()
         .find(|harness| same_agent(name, &harness.name))
@@ -1646,8 +2857,24 @@ pub async fn start_agent(project_root: Option<&str>, name: &str) -> Result<Strin
 /// there is no checkout; the Chat tab explains that case separately.
 pub fn configured(project_root: Option<&str>) -> Vec<ChatHarness> {
     dir_for(project_root)
-        .map(|dir| harnesses(&dir))
+        .map(|dir| probed_harnesses(&dir))
         .unwrap_or_default()
+}
+
+/// Re-probe the room after a setup change. The readiness cache is deliberately short, but a
+/// user who has just signed in or added a key should not have to wait for it to expire.
+pub fn configured_fresh(project_root: Option<&str>) -> Vec<ChatHarness> {
+    clear_readiness_cache();
+    configured(project_root)
+}
+
+/// Drop every cached readiness answer. Settings calls this after a keychain write; the Chat tab
+/// and the settings guide then see the new credential on their next read.
+pub fn clear_readiness_cache() {
+    READINESS_GENERATION.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    if let Ok(mut cache) = readiness_cache().lock() {
+        cache.clear();
+    }
 }
 
 /// One message for both spawn paths, so the Chat tab can say the same thing everywhere.
@@ -1659,6 +2886,169 @@ fn missing_checkout() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn readiness_verdicts_are_cached_and_can_be_cleared() {
+        let dir = PathBuf::from("readiness-cache-test");
+        let row = ChatHarness {
+            name: "minimax".to_string(),
+            label: "MiniMax".to_string(),
+            api: true,
+            ready: false,
+            status: HarnessStatus::MissingKey,
+            evidence: "no key".to_string(),
+            remediation: None,
+            credential: Some("MINIMAX_API_KEY".to_string()),
+        };
+        clear_readiness_cache();
+        let generation = READINESS_GENERATION.load(std::sync::atomic::Ordering::SeqCst);
+        remember_readiness(&dir, std::slice::from_ref(&row), generation);
+        let cached = cached_readiness(&dir).expect("a stored verdict is returned within the TTL");
+        assert_eq!(cached.len(), 1);
+        assert_eq!(cached[0].status, HarnessStatus::MissingKey);
+        // A probe that started before the clear must not write its stale answer back.
+        clear_readiness_cache();
+        assert!(cached_readiness(&dir).is_none());
+        remember_readiness(&dir, std::slice::from_ref(&row), generation);
+        assert!(cached_readiness(&dir).is_none());
+        let fresh = READINESS_GENERATION.load(std::sync::atomic::Ordering::SeqCst);
+        remember_readiness(&dir, std::slice::from_ref(&row), fresh);
+        assert!(cached_readiness(&dir).is_some());
+        clear_readiness_cache();
+    }
+
+    #[test]
+    fn slow_clis_get_a_longer_budget_and_timeouts_are_their_own_state() {
+        assert!(probe_budget("antigravity") >= Duration::from_secs(60));
+        assert!(probe_budget("qwen") >= Duration::from_secs(60));
+        assert!(probe_budget("kilo") > probe_budget("claude"));
+        assert_eq!(
+            serde_json::to_string(&HarnessStatus::ProbeTimeout).unwrap(),
+            "\"probe_timeout\""
+        );
+        assert_eq!(
+            serde_json::to_string(&HarnessStatus::ProviderBlocked).unwrap(),
+            "\"provider_blocked\""
+        );
+        assert!(provider_billing_diagnosis("status: 402").is_some());
+        assert!(provider_billing_diagnosis("Your prepayment credits are depleted").is_some());
+    }
+
+    #[test]
+    fn the_room_passes_the_arguments_each_cli_needs_to_run_unattended() {
+        let harness = |name: &str| ChatHarness {
+            name: name.to_string(),
+            label: name.to_string(),
+            api: false,
+            ready: true,
+            status: HarnessStatus::Unknown,
+            evidence: String::new(),
+            remediation: None,
+            credential: None,
+        };
+        let codex = harness_argv(&harness("codex"));
+        assert!(
+            codex
+                .windows(2)
+                .any(|pair| pair == ["-c", "openai_base_url="])
+        );
+        let antigravity = harness_argv(&harness("antigravity"));
+        assert!(
+            antigravity
+                .iter()
+                .any(|arg| arg == "--dangerously-skip-permissions")
+        );
+        assert_eq!(
+            harness_argv(&harness("gemini")),
+            vec!["wrapper.py", "gemini", "--skip-trust", "--yolo"]
+        );
+    }
+
+    #[test]
+    fn claude_drops_the_conflicting_api_key_only_when_a_token_is_present() {
+        assert!(harness_env_removals("claude", true).contains(&"ANTHROPIC_API_KEY"));
+        assert!(harness_env_removals("claude", false).is_empty());
+        assert!(harness_env_removals("codex", true).is_empty());
+    }
+
+    #[test]
+    fn only_live_agents_count_as_online() {
+        let status = serde_json::json!({
+            "paused": false,
+            "claude": { "available": true, "busy": false },
+            "codex": { "available": false, "busy": false }
+        });
+        assert_eq!(online_names(&status), vec!["claude".to_string()]);
+    }
+
+    #[test]
+    fn a_busy_agent_without_a_reply_becomes_stuck() {
+        let status = serde_json::json!({
+            "claude": { "available": true, "busy": true }
+        });
+        let threshold = Duration::from_secs(600);
+        let mut watchdog = Watchdog::default();
+        let start = Instant::now();
+        assert!(watchdog.inspect(&status, &[], start, threshold).is_empty());
+        assert_eq!(
+            watchdog.inspect(
+                &status,
+                &[],
+                start + threshold + Duration::from_secs(1),
+                threshold
+            ),
+            vec!["claude".to_string()]
+        );
+    }
+
+    #[test]
+    fn a_room_reply_resets_the_stuck_clock() {
+        let status = serde_json::json!({
+            "claude": { "available": true, "busy": true }
+        });
+        let threshold = Duration::from_secs(600);
+        let mut watchdog = Watchdog::default();
+        let start = Instant::now();
+        assert!(watchdog.inspect(&status, &[], start, threshold).is_empty());
+        let reply = ChatMessage {
+            id: 7,
+            sender: "claude".to_string(),
+            text: "still here".to_string(),
+            time: String::new(),
+            kind: "chat".to_string(),
+            channel: "general".to_string(),
+            attachments: Vec::new(),
+        };
+        assert!(
+            watchdog
+                .inspect(
+                    &status,
+                    &[reply],
+                    start + threshold - Duration::from_secs(1),
+                    threshold
+                )
+                .is_empty()
+        );
+        assert!(
+            watchdog
+                .inspect(
+                    &status,
+                    &[],
+                    start + threshold + Duration::from_secs(1),
+                    threshold
+                )
+                .is_empty()
+        );
+        assert_eq!(
+            watchdog.inspect(
+                &status,
+                &[],
+                start + threshold * 2 + Duration::from_secs(1),
+                threshold
+            ),
+            vec!["claude".to_string()]
+        );
+    }
 
     #[test]
     fn agent_tables_read_through_quotes_and_comments() {
@@ -1691,6 +3081,60 @@ label = "Phi4 (local)"
         assert_eq!(field(0, "color").as_deref(), Some("#da7756"));
         assert_eq!(field(1, "type").as_deref(), Some("api"));
         assert_eq!(tables[1].0, "phi4");
+    }
+
+    #[test]
+    fn multiline_strip_env_keeps_every_name_for_the_probe() {
+        let tables = parse_agents(
+            r#"
+[agents.kimi]
+command = "kimi"
+strip_env = [
+  "ANTHROPIC_API_KEY",
+  "GH_TOKEN",
+]
+
+[agents.qwen]
+command = "qwen"
+"#,
+        );
+        assert_eq!(tables.len(), 2);
+        let list = tables[0]
+            .1
+            .iter()
+            .find(|(key, _)| key == "strip_env")
+            .map(|(_, value)| env_list(value))
+            .unwrap();
+        assert_eq!(list, vec!["ANTHROPIC_API_KEY", "GH_TOKEN"]);
+    }
+
+    #[test]
+    fn an_auth_line_beats_a_zero_exit_status() {
+        let (evidence, remediation, credential) = auth_diagnosis(
+            "codebuddy",
+            "Authentication required. Please use /login command to sign in to your account\n",
+        )
+        .expect("CodeBuddy's auth line is recognised");
+        assert!(evidence.contains("Authentication required"), "{evidence}");
+        assert!(remediation.unwrap().contains("/login"));
+        assert!(credential.unwrap().contains("CodeBuddy"));
+        assert!(!output_has_ok("OKAY"));
+        assert!(output_has_ok("warning: stale config\nOK\n"));
+    }
+
+    #[test]
+    fn kimi_and_kilo_diagnostics_name_their_real_fixes() {
+        let kimi = auth_diagnosis(
+            "kimi",
+            "error: provider.auth_error: Your current subscription does not have access to Kimi Code right now. Upgrade your plan: https://www.kimi.com/code/#pricing\n",
+        )
+        .expect("Kimi's subscription error is recognised");
+        assert!(kimi.1.unwrap().contains("kimi.com/code"));
+        assert!(kimi.2.unwrap().contains("subscription"));
+
+        let kilo = auth_diagnosis("kilo", "You need to sign in to use this model.\n")
+            .expect("Kilo's sign-in line is recognised");
+        assert!(kilo.1.unwrap().contains("kilo auth login"));
     }
 
     #[test]
@@ -1732,12 +3176,59 @@ label = "Phi4 (local)"
     }
 
     #[test]
+    fn the_free_agent_table_is_managed_without_touching_user_tables() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("config.local.toml");
+        std::fs::write(
+            &path,
+            "[agents.phi4]\ntype = \"api\"\nbase_url = \"http://localhost:8189/v1\"\n\
+             model = \"qwen3-4b\"\n",
+        )
+        .unwrap();
+        let first = FreeAgent {
+            base_url: "https://openrouter.ai/api/v1".to_string(),
+            model: "deepseek/deepseek-r1:free".to_string(),
+            api_key: Some("secret-value".to_string()),
+        };
+        assert!(!format!("{first:?}").contains("secret-value"));
+        install_free_agent(tmp.path(), &first).unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.contains("[agents.phi4]"));
+        assert_eq!(text.matches("[agents.rigel-free]").count(), 1);
+        assert!(text.contains("deepseek/deepseek-r1:free"));
+        assert!(
+            !text.contains("secret-value"),
+            "the key travels in the child's environment, never the config"
+        );
+
+        let second = FreeAgent {
+            model: "openai/gpt-oss-120b:free".to_string(),
+            ..first
+        };
+        install_free_agent(tmp.path(), &second).unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(text.matches("[agents.rigel-free]").count(), 1);
+        assert!(text.contains("openai/gpt-oss-120b:free"));
+        assert!(!text.contains("deepseek/deepseek-r1:free"));
+        assert!(
+            harnesses(tmp.path())
+                .iter()
+                .any(|harness| harness.name == FREE_AGENT_NAME),
+            "the managed table is visible to the launch path"
+        );
+    }
+
+    #[test]
     fn a_harness_sets_its_own_script_and_unattended_flag() {
         let claude = ChatHarness {
             name: "claude".into(),
             label: "Claude".into(),
             api: false,
             ready: true,
+            status: HarnessStatus::Unknown,
+            evidence: String::new(),
+            remediation: None,
+            credential: None,
         };
         assert_eq!(
             harness_argv(&claude),
@@ -1748,6 +3239,10 @@ label = "Phi4 (local)"
             label: "Phi4".into(),
             api: true,
             ready: true,
+            status: HarnessStatus::Unknown,
+            evidence: String::new(),
+            remediation: None,
+            credential: None,
         };
         assert_eq!(harness_argv(&phi4), vec!["wrapper_api.py", "phi4"]);
     }
@@ -1836,38 +3331,6 @@ label = "Phi4 (local)"
     }
 
     #[test]
-    fn a_room_start_adds_muse_once_and_keeps_the_users_table() {
-        let root = tempfile::tempdir().unwrap();
-        let project = tempfile::tempdir().unwrap();
-        let project_path = project.path().to_str().unwrap();
-
-        ensure_muse_agent(root.path(), Some(project_path)).unwrap();
-        let text = std::fs::read_to_string(root.path().join("config.local.toml")).unwrap();
-        assert!(text.contains("[agents.muse]"), "{text}");
-        assert!(text.contains("command = \"muse\""), "{text}");
-        assert!(text.contains("label = \"Muse\""), "{text}");
-        // The TOML string escapes Windows separators, so compare the escaped path.
-        let cwd = project_path.replace('\\', "\\\\");
-        assert!(text.contains(&cwd), "the cwd is the open project: {text}");
-
-        // A second start is a no-op.
-        ensure_muse_agent(root.path(), Some(project_path)).unwrap();
-        assert_eq!(
-            text,
-            std::fs::read_to_string(root.path().join("config.local.toml")).unwrap()
-        );
-
-        // A user's own table wins, flags included.
-        let custom = "[agents.muse]\ncommand = \"muse\"\nargs = \"--yolo\"\n";
-        std::fs::write(root.path().join("config.local.toml"), custom).unwrap();
-        ensure_muse_agent(root.path(), Some(project_path)).unwrap();
-        assert_eq!(
-            custom,
-            std::fs::read_to_string(root.path().join("config.local.toml")).unwrap()
-        );
-    }
-
-    #[test]
     fn a_chat_start_adds_obscura_and_concord_to_the_project_mcp_file() {
         let project = tempfile::tempdir().unwrap();
         ensure_project_mcps(Some(project.path().to_str().unwrap())).unwrap();
@@ -1889,6 +3352,14 @@ label = "Phi4 (local)"
         );
         let args = config["mcpServers"]["concord"]["args"].as_array().unwrap();
         assert!(args.iter().any(|arg| arg == "@concord-ai/concord-mcp"));
+        if roblox::mcp_server().is_some() {
+            assert!(
+                config["mcpServers"]["roblox_studio"]["command"]
+                    .as_str()
+                    .is_some(),
+                "an installed Studio server is written into .mcp.json"
+            );
+        }
 
         // A second start is a no-op and does not rewrite the user's existing entry.
         let before = std::fs::read_to_string(project.path().join(".mcp.json")).unwrap();
@@ -2030,6 +3501,47 @@ label = "Phi4 (local)"
     }
 
     #[test]
+    fn the_sidecar_installer_refuses_the_rigel_data_root() {
+        let root = std::env::temp_dir().join(format!(
+            "rigel-sidecar-guard-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let source = root.join("source");
+        std::fs::create_dir_all(source.join("agentchattr")).expect("source dir");
+        std::fs::write(source.join("agentchattr/run.py"), "").expect("run.py");
+        let index = root.join("index");
+        std::fs::create_dir_all(&index).expect("index dir");
+        std::fs::write(index.join("api.json"), "{}").expect("api.json");
+        let error = install_sidecar(&source, &index).expect_err("must refuse the data root");
+        assert!(error.contains("data root"), "{error}");
+        assert!(index.join("api.json").exists());
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn the_installed_sidecar_is_found_beside_the_binary() {
+        let root = std::env::temp_dir().join(format!(
+            "rigel-packaged-sidecar-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        std::fs::create_dir_all(root.join("sidecar/agentchattr")).expect("sidecar dir");
+        std::fs::write(root.join("sidecar/agentchattr/run.py"), "").expect("run.py");
+        assert_eq!(packaged_sidecar_dir(&root), Some(root.join("sidecar")));
+
+        std::fs::remove_dir_all(root.join("sidecar")).expect("remove sidecar");
+        std::fs::create_dir_all(root.join("resources/sidecar/agentchattr")).expect("resource dir");
+        std::fs::write(root.join("resources/sidecar/agentchattr/run.py"), "")
+            .expect("resource run.py");
+        assert_eq!(
+            packaged_sidecar_dir(&root),
+            Some(root.join("resources/sidecar"))
+        );
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
     fn the_bundled_python_only_answers_for_the_bundled_copy() {
         let root = std::env::temp_dir().join(format!(
             "rigel-sidecar-python-{}-{:?}",
@@ -2155,6 +3667,10 @@ except BaseException:
             label: "Claude".to_string(),
             api: false,
             ready: true,
+            status: HarnessStatus::Unknown,
+            evidence: String::new(),
+            remediation: None,
+            credential: None,
         });
         assert_eq!(
             argv,
@@ -2166,7 +3682,7 @@ except BaseException:
             "the harness table is what the spawn is given"
         );
 
-        let process = launch_hidden(&python, &argv, &dir, "claude", "Claude")
+        let process = launch_hidden_env(&python, &argv, &dir, "claude", "Claude", &[])
             .expect("the stub wrapper starts");
         let report = dir.join("report.txt");
         let failure = dir.join("error.txt");

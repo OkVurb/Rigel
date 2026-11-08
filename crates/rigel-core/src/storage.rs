@@ -14,7 +14,9 @@ use std::time::Duration;
 use sqlx::SqlitePool;
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions, SqliteSynchronous};
 
-use crate::migrate::{INDEX_MIGRATIONS, MigrateError, Migration, PROJECT_MIGRATIONS, apply};
+use crate::migrate::{
+    INDEX_MIGRATIONS, MigrateError, Migration, PROJECT_MIGRATIONS, apply, now_ms,
+};
 
 #[derive(Debug, thiserror::Error)]
 pub enum StorageError {
@@ -51,7 +53,12 @@ impl Store {
         let dir = root.join(".rigel");
         create_dir(&dir)?;
         write_gitignore(&dir)?;
-        Self::open(dir.join("rigel.db"), PROJECT_MIGRATIONS).await
+        let store = Self::open(dir.join("rigel.db"), PROJECT_MIGRATIONS).await?;
+        // Q273: one copy a day, three kept. A backup that cannot be written must not stop the
+        // project from opening; the next launch tries again, and diagnostics still reports the
+        // database's own health.
+        let _ = store.backup_daily().await;
+        Ok(store)
     }
 
     /// Open (creating if needed) the global index database.
@@ -100,6 +107,67 @@ impl Store {
     pub fn path(&self) -> &Path {
         &self.path
     }
+
+    /// Q273: a daily copy of the project database, three kept.
+    ///
+    /// The copy is made by SQLite itself (`VACUUM INTO`), never by copying the file: WAL mode
+    /// keeps committed pages in the `-wal` sidecar, and a raw file copy can capture a torn
+    /// database. One file per UTC day means a restart loop cannot fill the disk, and pruning
+    /// happens only after the new copy exists.
+    pub async fn backup_daily(&self) -> Result<Option<PathBuf>, StorageError> {
+        self.backup_at(now_ms()).await
+    }
+
+    async fn backup_at(&self, now: i64) -> Result<Option<PathBuf>, StorageError> {
+        let Some(dir) = self.path.parent() else {
+            return Ok(None);
+        };
+        // Only the project database is precious; the index is rebuildable and lives elsewhere.
+        if self.path.file_stem().and_then(|stem| stem.to_str()) != Some("rigel") {
+            return Ok(None);
+        }
+        let backups = dir.join("backups");
+        create_dir(&backups)?;
+        let day = now.div_euclid(24 * 60 * 60 * 1000);
+        let target = backups.join(format!("rigel-{day}.db"));
+        if !target.exists() {
+            let escaped = target.to_string_lossy().replace('\'', "''");
+            sqlx::query(&format!("VACUUM INTO '{escaped}'"))
+                .execute(&self.pool)
+                .await?;
+        }
+        prune_backups(&backups, 3)?;
+        Ok(Some(target))
+    }
+}
+
+/// Keep the newest `keep` daily copies, identified by the day encoded in the file name.
+fn prune_backups(dir: &Path, keep: usize) -> Result<(), StorageError> {
+    let mut days: Vec<(i64, PathBuf)> = fs::read_dir(dir)
+        .map_err(|source| StorageError::Io {
+            path: dir.to_path_buf(),
+            source,
+        })?
+        .filter_map(|entry| entry.ok())
+        .filter_map(|entry| {
+            let path = entry.path();
+            let name = path.file_name()?.to_str()?;
+            let day = name
+                .strip_prefix("rigel-")?
+                .strip_suffix(".db")?
+                .parse::<i64>()
+                .ok()?;
+            Some((day, path))
+        })
+        .collect();
+    days.sort_by_key(|(day, _)| *day);
+    while days.len() > keep {
+        let (_, path) = days.remove(0);
+        if let Err(source) = fs::remove_file(&path) {
+            return Err(StorageError::Io { path, source });
+        }
+    }
+    Ok(())
 }
 
 /// Put the database in WAL mode if it is not already, with retries.
@@ -167,4 +235,52 @@ fn write_gitignore(dir: &Path) -> Result<(), StorageError> {
                 snapshots/\n\
                 worktrees/\n";
     fs::write(&path, body).map_err(|source| StorageError::Io { path, source })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::TempDir;
+
+    #[tokio::test]
+    async fn daily_backups_keep_three_and_survive_a_reopen() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join(".rigel").join("rigel.db");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let store = Store::open(&path, PROJECT_MIGRATIONS).await.unwrap();
+        sqlx::query(
+            "INSERT INTO sessions (id, project_root, status, created_at) VALUES ('s1', '.', 'active', 0)",
+        )
+        .execute(store.pool())
+        .await
+        .unwrap();
+
+        for day in 1..=4 {
+            store.backup_at(day * 86_400_000).await.unwrap();
+        }
+        let mut names: Vec<String> = std::fs::read_dir(tmp.path().join(".rigel/backups"))
+            .unwrap()
+            .filter_map(|entry| entry.ok())
+            .map(|entry| entry.file_name().to_string_lossy().into_owned())
+            .collect();
+        names.sort();
+        assert_eq!(
+            names,
+            vec!["rigel-2.db", "rigel-3.db", "rigel-4.db"],
+            "the oldest copy is pruned once there are four"
+        );
+
+        let backup = Store::open(
+            tmp.path().join(".rigel/backups/rigel-4.db"),
+            PROJECT_MIGRATIONS,
+        )
+        .await
+        .unwrap();
+        let sessions: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM sessions")
+            .fetch_one(backup.pool())
+            .await
+            .unwrap();
+        assert_eq!(sessions, 1, "the copy is a readable database with the row");
+        backup.pool().close().await;
+    }
 }

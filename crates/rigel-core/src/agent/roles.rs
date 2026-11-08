@@ -30,6 +30,8 @@ pub const PRESETS: &[RolePreset] = &[
             "edit_file",
             "write_file",
             "run_command",
+            "roblox_studio",
+            "roblox_sound",
             "skills_search",
             "skill_load",
             "budget",
@@ -67,6 +69,8 @@ pub const PRESETS: &[RolePreset] = &[
         tools: &[
             "read_file",
             "list_files",
+            "web_search",
+            "web_fetch",
             "fetch_url",
             "browser_open",
             "skills_search",

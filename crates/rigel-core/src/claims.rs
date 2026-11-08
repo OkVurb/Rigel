@@ -1343,4 +1343,35 @@ mod tests {
         assert!(held.iter().all(|claim| claim.agent == "writer"));
         assert_ne!(held[0].id, held[1].id);
     }
+
+    #[tokio::test]
+    async fn the_roster_counts_held_and_stale_claims_per_agent() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join("a.txt"), "a\n").unwrap();
+        let sessions = SessionService::open(tmp.path()).await.unwrap();
+        let session = sessions.start(Some("claims"), None).await.unwrap();
+        let agent = sessions
+            .register_agent(&session.id, "native", Some("writer"))
+            .await
+            .unwrap();
+        let claims = ClaimService::new(sessions.pool().clone(), tmp.path());
+        claims
+            .acquire(&agent.id, &["a.txt".to_string()], "edit")
+            .await
+            .unwrap();
+
+        let roster = sessions.agents(&session.id).await.unwrap();
+        assert_eq!(roster[0].claims_held, 1);
+        assert_eq!(roster[0].claims_stale, 0);
+
+        let old = now_ms() - STALE_AFTER.as_millis() as i64 - 1_000;
+        sqlx::query("UPDATE claims SET heartbeat_at = ?")
+            .bind(old)
+            .execute(claims.pool())
+            .await
+            .unwrap();
+        let roster = sessions.agents(&session.id).await.unwrap();
+        assert_eq!(roster[0].claims_held, 1, "a stale claim is still held");
+        assert_eq!(roster[0].claims_stale, 1);
+    }
 }

@@ -8,17 +8,53 @@
 //! Transport is newline-delimited JSON-RPC 2.0 on stdin/stdout, which is what MCP stdio
 //! servers use. Notifications have no `id` and get no response.
 
+use std::collections::HashMap;
 use std::io;
 use std::path::PathBuf;
+use std::sync::Arc;
 
-use rigel_core::agent::approval::{ApprovalBus, PendingApproval};
+pub mod project_mcp;
+
+use async_trait::async_trait;
+use rigel_core::agent::approval::{ApprovalBus, ApprovalScope, PendingApproval};
 use rigel_core::budget::BudgetService;
-use rigel_core::memory::{MemoryService, WriteMode};
+use rigel_core::memory::{MemoryApprover, MemoryDecision, MemoryRequest, MemoryService, WriteMode};
 use rigel_core::patches::{PatchError, PatchPipeline};
 use rigel_core::{ClaimService, Scopes};
 use rigel_core::{SessionService, SkillIndex};
 use serde_json::{Value, json};
 use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncWrite, AsyncWriteExt};
+
+/// Q251: the harness's MCP process publishes memory writes on the shared approval channel.
+/// The window card is the same one a native command uses; no answer is a refusal.
+struct BusMemoryApprover {
+    bus: ApprovalBus,
+    project_root: PathBuf,
+    session_id: String,
+    agent_id: String,
+    wait: std::time::Duration,
+}
+
+#[async_trait]
+impl MemoryApprover for BusMemoryApprover {
+    async fn approve(&self, request: &MemoryRequest) -> MemoryDecision {
+        let key = format!("memory:{}:{}", request.agent_id, request.topic);
+        let pending = PendingApproval::now("memory", &key, format!("write {}", request.path))
+            .in_project(&self.project_root)
+            .in_session(&self.session_id, &self.agent_id)
+            .with_detail(json!({
+                "agent_id": request.agent_id,
+                "topic": request.topic,
+                "mode": request.mode,
+                "path": request.path,
+                "content": request.content,
+            }));
+        match self.bus.ask(pending, self.wait).await {
+            Ok(_) => MemoryDecision::Allow,
+            Err(_) => MemoryDecision::Deny,
+        }
+    }
+}
 
 pub const SERVER_NAME: &str = "rigel";
 pub const PROTOCOL_VERSION: &str = "2025-06-18";
@@ -69,6 +105,12 @@ pub struct McpContext {
     /// How long `rigel_approve` waits for a human before refusing. A question with no surface
     /// listening must not hold the harness open forever.
     pub approval_wait: std::time::Duration,
+    /// Q242: the turn that opened this MCP process, when the caller knows it. Decisions are
+    /// written to this turn's transcript; a direct `rigel mcp` launch may have no turn.
+    pub turn_id: Option<String>,
+    /// Q242: real `tools/list` results read before the first project-tool question. The cache
+    /// is per MCP process, so an approved server is not launched again for every call.
+    pub tool_lists: Arc<tokio::sync::Mutex<HashMap<String, Vec<Value>>>>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -305,6 +347,32 @@ async fn call(ctx: &McpContext, name: &str, args: Value) -> Result<Value, Value>
                 .and_then(Value::as_str)
                 .ok_or_else(|| failure("BAD_ARGUMENTS", "tool_name is required"))?;
             let input = args.get("input").cloned().unwrap_or_else(|| json!({}));
+            // Q242: a project server declared in `.mcp.json` is not consented to by the
+            // declaration. `mcp__server__tool` names are the harness's permission names, so
+            // this is the one point every harness reaches before that tool runs.
+            if let Some((server_name, project_tool)) = project_mcp::tool_ref(tool_name) {
+                let servers = project_mcp::servers(&ctx.project_root)
+                    .map_err(|error| failure("MCP_CONFIG", error))?;
+                if let Some(server) = servers.get(&server_name).cloned() {
+                    return approve_project_tool(
+                        ctx,
+                        &service,
+                        server,
+                        &project_tool,
+                        tool_name,
+                        input,
+                    )
+                    .await;
+                }
+                if ctx.project_root.join(".mcp.json").is_file() {
+                    return Ok(json!({
+                        "behavior": "deny",
+                        "code": "MCP_SERVER_UNKNOWN",
+                        "server": server_name,
+                        "message": format!("{server_name} is not a stdio server in .mcp.json; nothing ran"),
+                    }));
+                }
+            }
             let key = format!(
                 "claude:{tool_name}:{}",
                 serde_json::to_string(&input).unwrap_or_default()
@@ -530,7 +598,14 @@ async fn call(ctx: &McpContext, name: &str, args: Value) -> Result<Value, Value>
                 .and_then(Value::as_str)
                 .and_then(WriteMode::parse)
                 .unwrap_or(WriteMode::Append);
-            let memory = MemoryService::new(&ctx.project_root, service.pool().clone());
+            let memory = MemoryService::new(&ctx.project_root, service.pool().clone())
+                .with_approval(Arc::new(BusMemoryApprover {
+                    bus: ApprovalBus::new(&ctx.index_dir),
+                    project_root: ctx.project_root.clone(),
+                    session_id: ctx.session_id.clone(),
+                    agent_id: ctx.agent_id.clone(),
+                    wait: ctx.approval_wait,
+                }));
             match memory.write(&ctx.agent_id, topic, content, mode).await {
                 Ok(file) => Ok(json!({
                     "ok": true,
@@ -557,6 +632,258 @@ async fn call(ctx: &McpContext, name: &str, args: Value) -> Result<Value, Value>
         }
 
         other => Err(failure("UNKNOWN_TOOL", format!("unknown tool {other}"))),
+    }
+}
+
+/// Q242: the approval path for one project MCP tool. The server question carries the real
+/// tool list; the tool question carries the selected schema. Both use the same `Scopes` and
+/// `ApprovalBus` as commands, and both decisions are written to the transcript when a turn is
+/// known.
+async fn approve_project_tool(
+    ctx: &McpContext,
+    service: &SessionService,
+    server: project_mcp::ServerSpec,
+    tool: &str,
+    tool_name: &str,
+    input: Value,
+) -> Result<Value, Value> {
+    let scopes = Scopes::new(&ctx.project_root, &ctx.index_dir);
+    let server_key = format!("mcp-server:{}", server.name);
+    let tool_key = format!("mcp-tool:{}:{}", server.name, tool);
+
+    let mut server_scope = scopes.granted(&server_key);
+    let mut tool_scope = scopes.granted(&tool_key);
+    let mut tools = ctx
+        .tool_lists
+        .lock()
+        .await
+        .get(&server.name)
+        .cloned()
+        .unwrap_or_default();
+
+    // Listing is the one launch before consent. It is bounded, uses only the declared local
+    // command, and is skipped when the process already read this server's list.
+    if tools.is_empty() {
+        match project_mcp::list_tools(
+            &server,
+            ctx.approval_wait.min(std::time::Duration::from_secs(15)),
+        )
+        .await
+        {
+            Ok(list) => {
+                tools = list;
+                ctx.tool_lists
+                    .lock()
+                    .await
+                    .insert(server.name.clone(), tools.clone());
+            }
+            Err(error) => {
+                record_mcp_decision(
+                    ctx,
+                    service,
+                    tool_name,
+                    &server,
+                    tool,
+                    "deny",
+                    None,
+                    &[],
+                    Some(&error),
+                )
+                .await;
+                return Ok(json!({
+                    "behavior": "deny",
+                    "code": "MCP_TOOLS_UNAVAILABLE",
+                    "server": server.name,
+                    "tool": tool,
+                    "message": format!("could not read the real tool list; nothing ran: {error}"),
+                }));
+            }
+        }
+    }
+
+    let tool_info = tools
+        .iter()
+        .find(|entry| entry.get("name").and_then(Value::as_str) == Some(tool))
+        .cloned();
+    if tool_info.is_none() {
+        let message = format!(
+            "{tool} is not in {}'s current tools/list; nothing ran",
+            server.name
+        );
+        record_mcp_decision(
+            ctx,
+            service,
+            tool_name,
+            &server,
+            tool,
+            "deny",
+            None,
+            &tools,
+            Some(&message),
+        )
+        .await;
+        return Ok(json!({
+            "behavior": "deny",
+            "code": "MCP_TOOL_UNKNOWN",
+            "server": server.name,
+            "tool": tool,
+            "message": message,
+        }));
+    }
+
+    let bus = ApprovalBus::new(&ctx.index_dir);
+    if server_scope.is_none() {
+        let pending = PendingApproval::now(
+            "mcp_server",
+            &server_key,
+            format!("start MCP server {}", server.name),
+        )
+        .in_project(&ctx.project_root)
+        .in_session(&ctx.session_id, &ctx.agent_id)
+        .with_detail(json!({
+            "server": server.name,
+            "command": server.command_line(),
+            "cwd": ctx.project_root.display().to_string(),
+            "tools": tools,
+            "note": "The tool list above was read from this server after the declaration in .mcp.json. Every tool is still asked for separately.",
+        }));
+        match bus.ask(pending, ctx.approval_wait).await {
+            Ok(scope) => {
+                server_scope = Some(scope);
+                if scopes.remember(&server_key, scope).is_err() {
+                    server_scope = Some(ApprovalScope::Once);
+                }
+            }
+            Err(_) => {
+                record_mcp_decision(
+                    ctx,
+                    service,
+                    tool_name,
+                    &server,
+                    tool,
+                    "deny",
+                    None,
+                    &tools,
+                    Some("the user did not approve starting this MCP server"),
+                )
+                .await;
+                return Ok(json!({
+                    "behavior": "deny",
+                    "code": "MCP_SERVER_DENIED",
+                    "server": server.name,
+                    "tool": tool,
+                    "message": "the user did not approve starting this MCP server; nothing ran",
+                }));
+            }
+        }
+    }
+
+    if tool_scope.is_none() {
+        let info = tool_info.clone().unwrap_or_else(|| json!({ "name": tool }));
+        let pending = PendingApproval::now(
+            "mcp_tool",
+            &tool_key,
+            format!("use {} on {}", tool, server.name),
+        )
+        .in_project(&ctx.project_root)
+        .in_session(&ctx.session_id, &ctx.agent_id)
+        .with_detail(json!({
+            "server": server.name,
+            "tool": tool,
+            "description": info.get("description"),
+            "input_schema": info.get("inputSchema"),
+            "input": input,
+            "tools": tools,
+            "note": "This is the first use of this tool in this session. The server approval does not approve any individual tool.",
+        }));
+        match bus.ask(pending, ctx.approval_wait).await {
+            Ok(scope) => {
+                tool_scope = Some(scope);
+                if scopes.remember(&tool_key, scope).is_err() {
+                    tool_scope = Some(ApprovalScope::Once);
+                }
+            }
+            Err(_) => {
+                record_mcp_decision(
+                    ctx,
+                    service,
+                    tool_name,
+                    &server,
+                    tool,
+                    "deny",
+                    None,
+                    &tools,
+                    Some("the user did not approve this MCP tool"),
+                )
+                .await;
+                return Ok(json!({
+                    "behavior": "deny",
+                    "code": "MCP_TOOL_DENIED",
+                    "server": server.name,
+                    "tool": tool,
+                    "message": "the user did not approve this MCP tool; nothing ran",
+                }));
+            }
+        }
+    }
+
+    let scope = tool_scope.or(server_scope).unwrap_or(ApprovalScope::Once);
+    record_mcp_decision(
+        ctx,
+        service,
+        tool_name,
+        &server,
+        tool,
+        "allow",
+        Some(scope),
+        &tools,
+        None,
+    )
+    .await;
+    Ok(json!({
+        "behavior": "allow",
+        "updatedInput": input,
+        "scope": scope.as_str(),
+        "server": server.name,
+        "tool": tool,
+        "tools": tools.iter().filter_map(|entry| entry.get("name").cloned()).collect::<Vec<_>>(),
+    }))
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn record_mcp_decision(
+    ctx: &McpContext,
+    service: &SessionService,
+    tool_name: &str,
+    server: &project_mcp::ServerSpec,
+    tool: &str,
+    decision: &str,
+    scope: Option<ApprovalScope>,
+    tools: &[Value],
+    reason: Option<&str>,
+) {
+    let body = json!({
+        "tool": tool_name,
+        "server": server.name,
+        "mcp_tool": tool,
+        "decision": decision,
+        "scope": scope.map(ApprovalScope::as_str),
+        "tools": tools.iter().filter_map(|entry| entry.get("name").cloned()).collect::<Vec<_>>(),
+        "reason": reason,
+        "gate": "Q242",
+    });
+    match &ctx.turn_id {
+        Some(turn) => {
+            let status = if decision == "allow" { "ok" } else { "denied" };
+            let _ = service
+                .append_item(turn, "approval", status, &body, &body)
+                .await;
+        }
+        None => {
+            let _ = service
+                .record_intervention(&ctx.session_id, "mcp_approval", body)
+                .await;
+        }
     }
 }
 
@@ -719,6 +1046,8 @@ mod tests {
             agent_id: agent.id,
             index_dir: tmp.path().join("index"),
             approval_wait: std::time::Duration::from_millis(150),
+            turn_id: None,
+            tool_lists: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
         };
         (tmp, ctx)
     }

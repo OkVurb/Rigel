@@ -27,6 +27,7 @@ pub mod github;
 pub mod http;
 pub mod hub;
 pub mod index;
+pub mod run;
 pub mod scan;
 pub mod search;
 pub mod skillssh;

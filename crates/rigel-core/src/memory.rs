@@ -9,7 +9,9 @@
 use std::fs;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
+use async_trait::async_trait;
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 use sqlx::SqlitePool;
@@ -38,6 +40,9 @@ pub enum MemoryError {
     #[error("memory content is {size} bytes; the limit is {MAX_CONTENT}")]
     TooLarge { size: usize },
 
+    #[error("the user did not approve this memory write; nothing was written")]
+    NotApproved,
+
     #[error("json error: {0}")]
     Json(#[from] serde_json::Error),
 
@@ -52,7 +57,7 @@ impl MemoryError {
     /// A leak is a policy refusal, not a bug in the caller's arguments.
     pub fn exit_code(&self) -> u8 {
         match self {
-            Self::PathLeak { .. } | Self::Secret { .. } => 3,
+            Self::PathLeak { .. } | Self::Secret { .. } | Self::NotApproved => 3,
             Self::InvalidTopic(_) | Self::InvalidAgent(_) | Self::TooLarge { .. } => 1,
             Self::Io(_) | Self::Database(_) | Self::Json(_) => 2,
         }
@@ -84,6 +89,61 @@ impl WriteMode {
             "replace" => Some(Self::Replace),
             _ => None,
         }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Append => "append",
+            Self::Replace => "replace",
+        }
+    }
+}
+
+/// The exact bytes an approval is for. The write commits [`after`](Self::after), never a
+/// recomputation, so a file that changes between the question and the click cannot make the
+/// approved preview a lie.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct MemoryPreview {
+    pub before: String,
+    pub after: String,
+    /// A path-labelled line diff, enough for the card to show what will land.
+    pub diff: String,
+    pub sha256: String,
+    pub bytes: usize,
+}
+
+/// Q251: one committed-memory write, exactly as the human sees it before it lands.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct MemoryRequest {
+    pub agent_id: String,
+    pub topic: String,
+    pub content: String,
+    pub mode: &'static str,
+    /// The project-relative file the write targets.
+    pub path: String,
+    pub preview: MemoryPreview,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MemoryDecision {
+    Allow,
+    Deny,
+}
+
+/// Who answers a [`MemoryRequest`]. Implementations must fail closed: an error, EOF or a
+/// closed window denies.
+#[async_trait]
+pub trait MemoryApprover: Send + Sync {
+    async fn approve(&self, request: &MemoryRequest) -> MemoryDecision;
+}
+
+/// Refuses every memory write. This is the default for a caller with no approval surface.
+pub struct DenyMemory;
+
+#[async_trait]
+impl MemoryApprover for DenyMemory {
+    async fn approve(&self, _request: &MemoryRequest) -> MemoryDecision {
+        MemoryDecision::Deny
     }
 }
 
@@ -166,6 +226,7 @@ pub fn validate(content: &str) -> Result<(), MemoryError> {
 pub struct MemoryService {
     root: PathBuf,
     pool: SqlitePool,
+    approvals: Arc<dyn MemoryApprover>,
 }
 
 impl MemoryService {
@@ -173,7 +234,15 @@ impl MemoryService {
         Self {
             root: root.to_path_buf(),
             pool,
+            approvals: Arc::new(DenyMemory),
         }
+    }
+
+    /// Install the Q251 approval surface. Without one every write is refused; validation still
+    /// runs first, so a path leak or secret is reported as itself rather than as a refusal.
+    pub fn with_approval(mut self, approver: Arc<dyn MemoryApprover>) -> Self {
+        self.approvals = approver;
+        self
     }
 
     fn agent_dir(&self, agent_id: &str) -> Result<PathBuf, MemoryError> {
@@ -225,22 +294,36 @@ impl MemoryService {
         validate(content)?;
 
         let (path, relative) = self.path_for(agent_id, topic)?;
-        if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent)?;
-        }
-
         let existing = match fs::read_to_string(&path) {
             Ok(text) => text,
             Err(error) if error.kind() == io::ErrorKind::NotFound => String::new(),
             Err(error) => return Err(MemoryError::Io(error)),
         };
-        let body = match mode {
-            WriteMode::Replace => content.to_string(),
-            WriteMode::Append if existing.is_empty() => content.to_string(),
-            WriteMode::Append if existing.ends_with('\n') => format!("{existing}\n{content}"),
-            WriteMode::Append => format!("{existing}\n\n{content}"),
+        let after = composed(&existing, content, mode);
+        let preview = MemoryPreview {
+            before: existing.clone(),
+            diff: preview_diff(&relative, &existing, &after),
+            sha256: sha256_hex(after.as_bytes()),
+            bytes: after.len(),
+            after: after.clone(),
         };
+        let request = MemoryRequest {
+            agent_id: agent_id.to_string(),
+            topic: topic.to_string(),
+            content: content.to_string(),
+            mode: mode.as_str(),
+            path: relative.clone(),
+            preview,
+        };
+        if self.approvals.approve(&request).await == MemoryDecision::Deny {
+            return Err(MemoryError::NotApproved);
+        }
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)?;
+        }
 
+        // The approved bytes, not a second composition: the preview is the contract.
+        let body = request.preview.after;
         {
             let mut file = fs::File::create(&path)?;
             file.write_all(body.as_bytes())?;
@@ -287,6 +370,37 @@ impl MemoryService {
     }
 }
 
+fn composed(existing: &str, content: &str, mode: WriteMode) -> String {
+    match mode {
+        WriteMode::Replace => content.to_string(),
+        WriteMode::Append if existing.is_empty() => content.to_string(),
+        WriteMode::Append if existing.ends_with('\n') => format!("{existing}\n{content}"),
+        WriteMode::Append => format!("{existing}\n\n{content}"),
+    }
+}
+
+fn preview_diff(path: &str, before: &str, after: &str) -> String {
+    if before == after {
+        return format!("--- a/{path}\n+++ b/{path}\n(no change)\n");
+    }
+    let mut out = format!("--- a/{path}\n+++ b/{path}\n");
+    if !before.is_empty() {
+        for line in before.lines() {
+            out.push('-');
+            out.push_str(line);
+            out.push('\n');
+        }
+    }
+    if !after.is_empty() {
+        for line in after.lines() {
+            out.push('+');
+            out.push_str(line);
+            out.push('\n');
+        }
+    }
+    out
+}
+
 fn sha256_hex(bytes: &[u8]) -> String {
     let mut hasher = Sha256::new();
     hasher.update(bytes);
@@ -300,6 +414,76 @@ fn sha256_hex(bytes: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex;
+
+    use crate::session::SessionService;
+
+    struct Recorder {
+        decision: MemoryDecision,
+        seen: Mutex<Vec<MemoryRequest>>,
+    }
+
+    #[async_trait]
+    impl MemoryApprover for Recorder {
+        async fn approve(&self, request: &MemoryRequest) -> MemoryDecision {
+            self.seen.lock().unwrap().push(request.clone());
+            self.decision
+        }
+    }
+
+    async fn service(dir: &tempfile::TempDir) -> MemoryService {
+        let sessions = SessionService::open(dir.path()).await.unwrap();
+        MemoryService::new(dir.path(), sessions.pool().clone())
+    }
+
+    #[tokio::test]
+    async fn the_default_is_deny_and_writes_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let service = service(&dir).await;
+        let error = service
+            .write("agent", "notes", "a safe line", WriteMode::Append)
+            .await
+            .unwrap_err();
+        assert!(matches!(error, MemoryError::NotApproved));
+        assert!(
+            !dir.path()
+                .join(".rigel/memory/agent/topics/notes.md")
+                .exists()
+        );
+    }
+
+    #[tokio::test]
+    async fn the_approved_bytes_are_exactly_the_previewed_bytes() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join(".rigel/memory/agent/topics/notes.md");
+        std::fs::create_dir_all(target.parent().unwrap()).unwrap();
+        std::fs::write(&target, "old line\n").unwrap();
+
+        let recorder = Arc::new(Recorder {
+            decision: MemoryDecision::Allow,
+            seen: Mutex::new(Vec::new()),
+        });
+        let service = service(&dir).await.with_approval(recorder.clone());
+        let written = service
+            .write("agent", "notes", "new line", WriteMode::Append)
+            .await
+            .unwrap();
+
+        let request = recorder.seen.lock().unwrap()[0].clone();
+        assert_eq!(request.preview.before, "old line\n");
+        assert_eq!(request.preview.after, "old line\n\nnew line");
+        assert!(request.preview.diff.contains("-old line"));
+        assert!(request.preview.diff.contains("+new line"));
+        assert_eq!(request.preview.bytes, request.preview.after.len());
+
+        let on_disk = std::fs::read_to_string(&target).unwrap();
+        assert_eq!(
+            on_disk, request.preview.after,
+            "the approval is the contract"
+        );
+        assert_eq!(written.sha256, sha256_hex(on_disk.as_bytes()));
+        assert_eq!(written.sha256, request.preview.sha256);
+    }
 
     #[test]
     fn ordinary_prose_passes() {

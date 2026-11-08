@@ -9,7 +9,6 @@
 //! | [`vertex`] | Gemini on Vertex: project, location and an OAuth access token |
 //! | [`providers`] | the table of adapters, and which model id each one may be sent |
 //! | [`catalog`] | the model rosters every provider with a credential offers |
-//! | [`omniroute`] | the local router, its health probe and autostart |
 //! | [`agentchat`] | the vendor chat server behind the Chat tab, its health and token |
 //! | [`scripted`] | a deterministic model for tests and the offline QA run |
 //! | [`pricing`] | the local price fallback, marked `estimated` |
@@ -23,32 +22,55 @@
 //! itself (D19).
 
 pub mod agentchat;
+pub mod aliases;
 pub mod anthropic;
 pub mod approval;
+pub mod approval_batch;
+pub mod capabilities;
 pub mod catalog;
+pub mod compact;
 pub mod coordinator;
+pub mod custom;
+pub mod dag;
 pub mod deliberation;
 pub mod destructive;
+pub mod dry_run;
 pub mod egress;
+pub mod exa;
+pub mod exec;
+pub mod freemode;
 pub mod gemini;
+pub mod health;
+pub mod limiter;
+pub mod local;
 pub mod model;
 pub mod obscura;
 pub mod omniroute;
 pub mod openrouter;
 pub mod pricing;
+pub mod prompt;
 pub mod providers;
 pub mod refine;
+pub mod retry;
+pub mod rigel;
+pub mod roblox;
 pub mod roles;
+pub mod routing;
 pub mod scripted;
+pub mod secret_scan;
+pub mod steer;
 pub mod subagents;
 pub mod team;
+pub mod tokens;
+pub mod tool_repair;
 pub mod tools;
+pub mod untrusted;
 pub mod vertex;
 
 pub use approval::{
     ApprovalScope, CommandApprover, CommandDecision, CommandRequest, DenyCommands, DenyMail,
     DenyPlans, MailApprover, MailDecision, MailRequest, PlanAgent, PlanApprover, PlanDecision,
-    PlanRequest, Scopes,
+    PlanRequest, Scopes, SkillScript,
 };
 pub use catalog::{MAX_CATALOGS, ModelOption};
 pub use coordinator::{
@@ -56,10 +78,15 @@ pub use coordinator::{
     REVIEW_MODEL, SUBAGENT_MODELS, StopReason, SubagentPolicy, TurnRun, fixed_context_chars,
 };
 pub use deliberation::{Deliberation, Deliberator, ModelDeliberator, NoDeliberation, Position};
-pub use destructive::{Finding, POLICIES, Policy, classify};
-pub use egress::{
-    DenyOrigins, Egress, EgressError, Fetched, OriginApprover, OriginDecision, OriginRequest,
+pub use destructive::{
+    BlastRadius, BlastTarget, Finding, POLICIES, Policy, blast_radius, classify,
 };
+pub use egress::{
+    DenyOrigins, Egress, EgressError, Fetched, NetworkPolicy, OriginApprover, OriginDecision,
+    OriginRequest,
+};
+pub use freemode::{FreeAttempt, FreeChoice};
+pub use limiter::{Permit, RateLimiter};
 pub use model::{
     ChatMessage, ChatRequest, Delta, DeltaSink, Model, ModelError, RawUsage, SseDecoder, ToolCall,
     ToolCallBuilder, ToolSpec,
@@ -68,6 +95,8 @@ pub use omniroute::ServerStatus;
 pub use openrouter::{DEFAULT_BASE_URL, DEFAULT_MODEL, OpenRouterModel};
 pub use providers::{PROVIDERS as PROVIDER_SPECS, ProviderSpec};
 pub use refine::{MAX_ROUNDS, PromptRefiner, RefineRequest, Refinement};
+pub use retry::{RetryClass, RetryEvent};
 pub use roles::{PRESETS as ROLE_PRESETS, RolePreset};
+pub use routing::{Route, RouteExplanation, RouteReason};
 pub use scripted::{Script, ScriptedModel};
 pub use tools::{ToolOutcome, Tools};

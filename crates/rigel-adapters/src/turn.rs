@@ -285,7 +285,7 @@ impl Recorded {
             )
             .await;
 
-        if let Some(usage) = usage {
+        if let Some(usage) = usage.as_ref() {
             let _ = self
                 .service
                 .append_item(
@@ -298,7 +298,7 @@ impl Recorded {
                 .await;
             let budget = BudgetService::with_null_interrupt(self.service.pool().clone());
             if let Ok(rigel_core::BudgetOutcome::Exceeded) =
-                budget.account(&self.agent.id, &self.turn.id, &usage).await
+                budget.account(&self.agent.id, &self.turn.id, usage).await
             {
                 eprintln!("rigel: this turn crossed the session cap; no further turn will start");
             }
@@ -333,6 +333,7 @@ impl Recorded {
                     ),
                     provider_micros: None,
                     source: CostSource::Estimated,
+                    served_model: None,
                 });
                 self.close_turn(
                     TurnEnd::Answer(turn.text.clone()),
@@ -379,23 +380,30 @@ impl Recorded {
     ) -> Option<rigel_core::Usage> {
         match result {
             Ok(turn) => {
-                let usage = turn.usage.map(|reported| rigel_core::Usage {
-                    input_tokens: reported.input_tokens,
-                    cached_input_tokens: reported.cached_input_tokens,
-                    output_tokens: reported.output_tokens,
-                    reasoning_tokens: 0,
-                    cost_micros: rigel_core::agent::pricing::cost_micros(
+                let usage = turn.usage.map(|reported| {
+                    // Claude's CLI reports `total_cost_usd`; that figure is the bill. The local
+                    // table is only a fallback for a turn that reported no cost, so a cached
+                    // turn is never re-estimated after the fact.
+                    let estimate = rigel_core::agent::pricing::cost_micros(
                         model,
                         reported.input_tokens,
                         reported.cached_input_tokens,
                         reported.output_tokens,
-                    ),
-                    provider_micros: reported.cost_micros,
-                    source: if reported.cost_micros.is_some() {
-                        CostSource::Provider
-                    } else {
-                        CostSource::Estimated
-                    },
+                    );
+                    rigel_core::Usage {
+                        input_tokens: reported.input_tokens,
+                        cached_input_tokens: reported.cached_input_tokens,
+                        output_tokens: reported.output_tokens,
+                        reasoning_tokens: 0,
+                        cost_micros: reported.cost_micros.unwrap_or(estimate),
+                        provider_micros: reported.cost_micros,
+                        source: if reported.cost_micros.is_some() {
+                            CostSource::Provider
+                        } else {
+                            CostSource::Estimated
+                        },
+                        served_model: None,
+                    }
                 });
                 self.close_turn(
                     TurnEnd::Answer(turn.text.clone()),
@@ -421,6 +429,7 @@ pub fn write_mcp_config(
     project: &Path,
     session: &str,
     agent: &str,
+    turn: Option<&str>,
 ) -> Result<PathBuf, String> {
     let exe =
         std::env::current_exe().map_err(|error| format!("could not find this binary: {error}"))?;
@@ -434,6 +443,7 @@ pub fn write_mcp_config(
                     "--project", project.display().to_string(),
                     "--session", session,
                     "--agent", agent,
+                    "--turn", turn.unwrap_or_default(),
                 ],
             }
         }
@@ -575,9 +585,17 @@ mod session_tests {
         assert_eq!(
             usage.provider_micros,
             Some(4_500),
-            "the CLI's own cost is recorded, not replaced by the table"
+            "the CLI's own cost is recorded"
         );
-        assert!(usage.cost_micros > 0, "a local price is attached as well");
+        assert_eq!(
+            usage.cost_micros, 4_500,
+            "the provider's figure is the bill, not a local re-estimate"
+        );
+        assert_eq!(
+            usage.source,
+            CostSource::Provider,
+            "a provider cost is marked as one"
+        );
 
         let stored = recorded
             .service
@@ -594,6 +612,23 @@ mod session_tests {
             .as_ref()
             .expect("the item keeps its provenance");
         assert_eq!(raw["harness"], "claude");
+
+        // Reload the turn the way the transcript and the cost preflight read it: the cached
+        // row keeps the provider's bill and cached-token count, with no re-estimate.
+        let cached = recorded
+            .service
+            .turn(&recorded.turn.id)
+            .await
+            .unwrap()
+            .usage
+            .expect("usage_json survives the round trip");
+        assert_eq!(
+            cached.cost_micros, 4_500,
+            "a cached turn keeps the provider's figure"
+        );
+        assert_eq!(cached.provider_micros, Some(4_500));
+        assert_eq!(cached.source, CostSource::Provider);
+        assert_eq!(cached.cached_input_tokens, 200);
     }
 
     #[tokio::test]
@@ -651,6 +686,7 @@ mod session_tests {
             Path::new("C:/work/project"),
             "session-1",
             "agent-1",
+            Some("turn-1"),
         )
         .expect("the config is written");
 

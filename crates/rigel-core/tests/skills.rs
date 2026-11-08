@@ -417,6 +417,14 @@ async fn a_missing_cached_body_is_refetched_instead_of_failing() {
 async fn an_offline_source_with_no_cache_fails_loudly_instead_of_inventing_rows() {
     let tmp = TempDir::new().unwrap();
     let index = SkillIndex::open(tmp.path()).await.unwrap();
+    // Port 9 is not reliably closed: a local service can answer it, which turned this test into a
+    // 404 assertion on one machine. Reserve an ephemeral port, release it, and use that address —
+    // nothing is listening there by construction.
+    let port = {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.local_addr().unwrap().port()
+    };
+    let base = format!("http://127.0.0.1:{port}");
     let source = GitHubSource::new(
         index.store().pool().clone(),
         index.blobs().clone(),
@@ -424,12 +432,12 @@ async fn an_offline_source_with_no_cache_fails_loudly_instead_of_inventing_rows(
     )
     .await
     .unwrap()
-    .with_endpoints("http://127.0.0.1:9", "http://127.0.0.1:9/raw");
+    .with_endpoints(&base, &format!("{base}/raw"));
 
     let error = source
         .fetch_repo("acme/skills", SyncPolicy::normal())
         .await
-        .expect_err("nothing is listening on port 9");
+        .expect_err("nothing is listening on the released port");
     assert!(error.to_string().contains("could not reach"), "{error}");
 }
 

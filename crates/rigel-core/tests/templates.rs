@@ -1,6 +1,6 @@
 //! D152: templates are project-local, atomic, and never guessed at when the file is missing.
 
-use rigel_core::{SessionTemplates, TemplateAgent, TemplateError};
+use rigel_core::{SessionTemplates, TemplateAgent, TemplateError, TemplateSkill};
 
 fn template(name: &str) -> rigel_core::SessionTemplate {
     rigel_core::SessionTemplate {
@@ -13,6 +13,10 @@ fn template(name: &str) -> rigel_core::SessionTemplate {
             harness: "native".to_string(),
             role: Some("writer".to_string()),
             model: Some("openai/gpt-5.4-mini".to_string()),
+        }],
+        skills: vec![TemplateSkill {
+            skill_id: "github:acme/skills:pdf/SKILL.md".to_string(),
+            body_sha: "a".repeat(64),
         }],
         prompt: "Fix the flaky resume test.\n".to_string(),
         created_at: 0,
@@ -35,6 +39,7 @@ fn a_template_round_trips_and_survives_a_reopen() {
         saved.prompt, "Fix the flaky resume test.",
         "the trailing newline is trimmed"
     );
+    assert_eq!(saved.skills.len(), 1);
 
     let reopened = SessionTemplates::open(tmp.path());
     let listed = reopened.list().unwrap();
@@ -50,6 +55,27 @@ fn a_template_round_trips_and_survives_a_reopen() {
         })
         .unwrap();
     assert_eq!(reopened.list().unwrap(), vec![edited]);
+}
+
+#[test]
+fn a_template_written_before_skills_still_loads() {
+    let tmp = tempfile::tempdir().unwrap();
+    let store = SessionTemplates::open(tmp.path());
+    store.save(template("old shape")).unwrap();
+
+    // What a 0.1.x template file looks like: no `skills` key at all.
+    let path = store.path();
+    let mut rows: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+    rows[0].as_object_mut().unwrap().remove("skills");
+    std::fs::write(path, serde_json::to_string_pretty(&rows).unwrap()).unwrap();
+
+    let listed = SessionTemplates::open(tmp.path()).list().unwrap();
+    assert_eq!(listed.len(), 1);
+    assert!(
+        listed[0].skills.is_empty(),
+        "a missing skills field is an empty list"
+    );
 }
 
 #[test]

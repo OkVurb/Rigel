@@ -82,6 +82,10 @@ pub struct Agent {
     pub spend_micros: i64,
     pub tokens_in: i64,
     pub tokens_out: i64,
+    /// Q267: live claims this agent holds, stale ones included. The roster links them to Diff.
+    pub claims_held: i64,
+    /// Q267: held claims whose heartbeat is older than [`crate::claims::STALE_AFTER`].
+    pub claims_stale: i64,
 }
 
 /// D150: a kept line. `label` is the snapshot the inspector draws; `target_id` is what a jump
@@ -94,6 +98,15 @@ pub struct Bookmark {
     pub target_id: String,
     pub label: String,
     pub created_at: i64,
+}
+
+/// D140: one skill pinned to a session at the body hash it first loaded. The hash is the
+/// version boundary: a changed shelf body does not change what this session reads.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct SkillPin {
+    pub skill_id: String,
+    pub body_sha: String,
+    pub pinned_at: i64,
 }
 
 /// A writable subagent as the Diff view lists it (D80/D114/D115): who it is, what it was
@@ -119,6 +132,13 @@ pub struct TeamAgent {
     pub files: Vec<String>,
     pub task: String,
     pub status: String,
+}
+
+/// One parent turn's subagent graph, as the session view renders it.
+#[derive(Debug, Clone, Serialize)]
+pub struct SubagentGraph {
+    pub parent_turn_id: String,
+    pub nodes: Vec<crate::agent::dag::DagNode>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -158,6 +178,23 @@ pub struct TurnTranscript {
     pub items: Vec<Item>,
 }
 
+/// The crash-recovery choice for a session: every turn whose process died while it was still
+/// `running`. The window names these turns exactly; it never offers an unnamed "resume".
+#[derive(Debug, Clone, Serialize)]
+pub struct RecoveryOffer {
+    pub session_id: String,
+    pub turns: Vec<Turn>,
+}
+
+/// A discarded running turn. The row remains for audit, but it can never become live again.
+#[derive(Debug, Clone, Serialize)]
+pub struct Tombstone {
+    pub turn_id: String,
+    pub session_id: String,
+    pub reason: String,
+    pub discarded_at: i64,
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct Checkpoint {
     pub id: String,
@@ -189,6 +226,9 @@ pub enum SessionError {
 
     #[error("bookmark kind `{0}` is not one of item or hunk")]
     InvalidBookmarkKind(String),
+
+    #[error("session {0} is not archived; archive it before permanent deletion")]
+    NotArchived(String),
 
     #[error("json error: {0}")]
     Json(#[from] serde_json::Error),
@@ -357,6 +397,22 @@ impl SessionService {
             return Err(SessionError::SessionNotFound(id.to_string()));
         }
         self.get(id).await
+    }
+
+    /// Q274: permanent deletion, archive first. The delete cascades through the schema
+    /// (`agents`, `turns`, `items`, claims and checkpoints), so a session that is gone cannot
+    /// leave rows behind; the archive step is what stops a stray call from erasing a live
+    /// transcript.
+    pub async fn delete_permanently(&self, id: &str) -> Result<(), SessionError> {
+        let session = self.get(id).await?;
+        if session.archived_at.is_none() {
+            return Err(SessionError::NotArchived(id.to_string()));
+        }
+        sqlx::query("DELETE FROM sessions WHERE id = ?")
+            .bind(id)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
     }
 
     /// D150: newest first. A star is a note to the reader, so the list is read like one.
@@ -548,7 +604,27 @@ impl SessionService {
         .bind(session_id)
         .fetch_all(&self.pool)
         .await?;
-        Ok(rows.into_iter().map(agent_from_row).collect())
+        let mut agents: Vec<Agent> = rows.into_iter().map(agent_from_row).collect();
+
+        // Q267: one query for the roster rather than one per row. A stale claim is still held:
+        // it is reported, never released automatically, so the count says "held" and the
+        // separate stale count is what turns the row amber.
+        let stale_before = now_ms() - crate::claims::STALE_AFTER.as_millis() as i64;
+        let counts: Vec<(String, i64, i64)> = sqlx::query_as(
+            "SELECT agent_id, COUNT(*),
+                    COALESCE(SUM(CASE WHEN heartbeat_at < ? THEN 1 ELSE 0 END), 0)
+             FROM claims WHERE released_at IS NULL GROUP BY agent_id",
+        )
+        .bind(stale_before)
+        .fetch_all(&self.pool)
+        .await?;
+        for agent in &mut agents {
+            if let Some((_, held, stale)) = counts.iter().find(|(id, _, _)| id == &agent.id) {
+                agent.claims_held = *held;
+                agent.claims_stale = *stale;
+            }
+        }
+        Ok(agents)
     }
 
     /// Record one file-scoped assignment on the session's work board. Re-assigning the same
@@ -610,6 +686,77 @@ impl SessionService {
         .execute(&self.pool)
         .await?;
         Ok(())
+    }
+
+    /// Replace the persisted graph for one parent turn. The coordinator calls this whenever a
+    /// node starts, finishes, fails or is blocked, so a reload shows the same states.
+    pub async fn save_dag(
+        &self,
+        session_id: &str,
+        parent_turn_id: &str,
+        nodes: &[crate::agent::dag::DagNode],
+    ) -> Result<(), SessionError> {
+        let now = now_ms();
+        let mut tx = self.pool.begin().await?;
+        sqlx::query("DELETE FROM subagent_nodes WHERE session_id = ? AND parent_turn_id = ?")
+            .bind(session_id)
+            .bind(parent_turn_id)
+            .execute(&mut *tx)
+            .await?;
+        for node in nodes {
+            let depends_on = serde_json::to_string(&node.depends_on).unwrap_or_default();
+            sqlx::query(
+                "INSERT INTO subagent_nodes
+                    (session_id, parent_turn_id, node_id, role, depends_on_json, state, detail, updated_at)
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            )
+            .bind(session_id)
+            .bind(parent_turn_id)
+            .bind(&node.id)
+            .bind(&node.role)
+            .bind(depends_on)
+            .bind(node.state.as_str())
+            .bind(&node.detail)
+            .bind(now)
+            .execute(&mut *tx)
+            .await?;
+        }
+        tx.commit().await?;
+        Ok(())
+    }
+
+    /// Every parent turn's graph in this session, dependencies before dependents.
+    pub async fn dag(&self, session_id: &str) -> Result<Vec<SubagentGraph>, SessionError> {
+        type DagRow = (String, String, String, String, String, Option<String>);
+        let rows: Vec<DagRow> = sqlx::query_as(
+            "SELECT parent_turn_id, node_id, role, depends_on_json, state, detail
+             FROM subagent_nodes WHERE session_id = ? ORDER BY parent_turn_id, updated_at, rowid",
+        )
+        .bind(session_id)
+        .fetch_all(&self.pool)
+        .await?;
+        let mut graphs: Vec<SubagentGraph> = Vec::new();
+        for (parent_turn_id, node_id, role, depends_on_json, state, detail) in rows {
+            let node = crate::agent::dag::DagNode {
+                id: node_id,
+                role,
+                depends_on: serde_json::from_str(&depends_on_json).unwrap_or_default(),
+                state: crate::agent::dag::NodeState::parse(&state)
+                    .unwrap_or(crate::agent::dag::NodeState::Pending),
+                detail,
+            };
+            match graphs
+                .iter_mut()
+                .find(|graph| graph.parent_turn_id == parent_turn_id)
+            {
+                Some(graph) => graph.nodes.push(node),
+                None => graphs.push(SubagentGraph {
+                    parent_turn_id,
+                    nodes: vec![node],
+                }),
+            }
+        }
+        Ok(graphs)
     }
 
     /// The work board, in the order assignments were first made.
@@ -811,7 +958,9 @@ impl SessionService {
         })
     }
 
-    /// Close a turn. Exactly one of completed/failed/cancelled is allowed (I1).
+    /// Close a turn. Exactly one of completed/failed/cancelled/incomplete is allowed (I1).
+    /// `incomplete` (Q248) is a turn whose provider stream died after delivering output: it is
+    /// closed, not running, but it is neither a finished answer nor an empty failure.
     pub async fn finish_turn(&self, turn_id: &str, status: &str) -> Result<Turn, SessionError> {
         self.finish_turn_with_reason(turn_id, status, None).await
     }
@@ -824,7 +973,7 @@ impl SessionService {
         status: &str,
         stop_reason: Option<&str>,
     ) -> Result<Turn, SessionError> {
-        if !matches!(status, "completed" | "failed" | "cancelled") {
+        if !matches!(status, "completed" | "failed" | "cancelled" | "incomplete") {
             return Err(SessionError::InvalidTurnStatus(status.to_string()));
         }
 
@@ -1059,6 +1208,45 @@ impl SessionService {
             .collect()
     }
 
+    /// The previous turns of one agent, oldest first. This is the real history compaction
+    /// consumes: current turn excluded, child turns excluded, running turns excluded.
+    pub async fn history_for_agent(
+        &self,
+        session_id: &str,
+        agent_id: &str,
+        current_turn: &str,
+        limit: usize,
+    ) -> Result<Vec<TurnTranscript>, SessionError> {
+        self.get(session_id).await?;
+        let (seq,): (i64,) = sqlx::query_as("SELECT seq FROM turns WHERE id = ? AND agent_id = ?")
+            .bind(current_turn)
+            .bind(agent_id)
+            .fetch_one(&self.pool)
+            .await?;
+        let limit = limit.clamp(1, 2_048) as i64;
+        let rows: Vec<TurnRow> = sqlx::query_as(
+            "SELECT t.id, t.agent_id, t.seq, t.status, t.prompt, t.started_at, t.completed_at,
+                    t.usage_json, t.stop_reason, t.parent_turn_id
+             FROM turns t JOIN agents a ON a.id = t.agent_id
+             WHERE a.session_id = ? AND t.agent_id = ? AND t.seq < ?
+               AND t.parent_turn_id IS NULL AND t.status != 'running'
+             ORDER BY t.seq DESC LIMIT ?",
+        )
+        .bind(session_id)
+        .bind(agent_id)
+        .bind(seq)
+        .bind(limit)
+        .fetch_all(&self.pool)
+        .await?;
+        let mut out = Vec::with_capacity(rows.len());
+        for row in rows.into_iter().rev() {
+            let turn = turn_from_row(row)?;
+            let items = self.items(&turn.id).await?;
+            out.push(TurnTranscript { turn, items });
+        }
+        Ok(out)
+    }
+
     /// Everything the session surface renders, newest turn last, with raw included so the
     /// debug toggle costs no extra round trip.
     pub async fn transcript(&self, session_id: &str) -> Result<Vec<TurnTranscript>, SessionError> {
@@ -1140,6 +1328,79 @@ impl SessionService {
         .transpose()
     }
 
+    /// Turns that were left running by a dead process. An empty result is not an error: the
+    /// normal steady state has nothing to recover.
+    pub async fn recovery_offer(
+        &self,
+        session_id: &str,
+    ) -> Result<Option<RecoveryOffer>, SessionError> {
+        self.get(session_id).await?;
+        let turns = self.running_turns(session_id).await?;
+        Ok((!turns.is_empty()).then(|| RecoveryOffer {
+            session_id: session_id.to_string(),
+            turns,
+        }))
+    }
+
+    /// Discard one crashed turn. The tombstone and the turn closure share a transaction: a
+    /// discard that cannot be recorded leaves the turn exactly as it was.
+    pub async fn discard_turn(&self, turn_id: &str, reason: &str) -> Result<Turn, SessionError> {
+        let mut tx = self.pool.begin().await?;
+        let row: Option<(String, String)> = sqlx::query_as(
+            "SELECT a.session_id, t.status FROM turns t JOIN agents a ON a.id = t.agent_id
+             WHERE t.id = ?",
+        )
+        .bind(turn_id)
+        .fetch_optional(&mut *tx)
+        .await?;
+        let (session_id, status) =
+            row.ok_or_else(|| SessionError::TurnNotFound(turn_id.to_string()))?;
+        if status != "running" {
+            return Err(SessionError::InvalidTurnStatus(status));
+        }
+        let now = now_ms();
+        sqlx::query(
+            "INSERT INTO turn_tombstones (turn_id, session_id, reason, discarded_at)
+             VALUES (?, ?, ?, ?)
+             ON CONFLICT(turn_id) DO UPDATE SET reason = excluded.reason,
+                                                discarded_at = excluded.discarded_at",
+        )
+        .bind(turn_id)
+        .bind(&session_id)
+        .bind(reason)
+        .bind(now)
+        .execute(&mut *tx)
+        .await?;
+        let changed = sqlx::query(
+            "UPDATE turns SET status = 'cancelled', completed_at = ?, stop_reason = 'discarded'
+             WHERE id = ? AND status = 'running'",
+        )
+        .bind(now)
+        .bind(turn_id)
+        .execute(&mut *tx)
+        .await?;
+        if changed.rows_affected() != 1 {
+            return Err(SessionError::InvalidTurnStatus("running".to_string()));
+        }
+        tx.commit().await?;
+        self.turn(turn_id).await
+    }
+
+    pub async fn tombstone(&self, turn_id: &str) -> Result<Option<Tombstone>, SessionError> {
+        let row: Option<(String, String, String, i64)> = sqlx::query_as(
+            "SELECT turn_id, session_id, reason, discarded_at FROM turn_tombstones WHERE turn_id = ?",
+        )
+        .bind(turn_id)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(row.map(|row| Tombstone {
+            turn_id: row.0,
+            session_id: row.1,
+            reason: row.2,
+            discarded_at: row.3,
+        }))
+    }
+
     pub async fn running_turns(&self, session_id: &str) -> Result<Vec<Turn>, SessionError> {
         let rows: Vec<TurnRow> = sqlx::query_as(
             "SELECT t.id, t.agent_id, t.seq, t.status, t.prompt, t.started_at, t.completed_at,
@@ -1194,6 +1455,44 @@ impl SessionService {
             .execute(&self.pool)
             .await?;
         Ok(())
+    }
+
+    /// D140: every skill this session pinned, oldest first. The window draws this list beside
+    /// the composer; a template copies it so a new session starts on the same bodies.
+    pub async fn skill_pins(&self, session_id: &str) -> Result<Vec<SkillPin>, SessionError> {
+        self.get(session_id).await?;
+        let rows: Vec<(String, String, i64)> = sqlx::query_as(
+            "SELECT skill_id, body_sha, pinned_at FROM session_skills
+             WHERE session_id = ? ORDER BY pinned_at, skill_id",
+        )
+        .bind(session_id)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows
+            .into_iter()
+            .map(|(skill_id, body_sha, pinned_at)| SkillPin {
+                skill_id,
+                body_sha,
+                pinned_at,
+            })
+            .collect())
+    }
+
+    /// D140: remove one pin. `false` means it was not pinned, which is not an error: the
+    /// window's button may have raced a second click.
+    pub async fn unpin_skill(
+        &self,
+        session_id: &str,
+        skill_id: &str,
+    ) -> Result<bool, SessionError> {
+        self.get(session_id).await?;
+        let result =
+            sqlx::query("DELETE FROM session_skills WHERE session_id = ? AND skill_id = ?")
+                .bind(session_id)
+                .bind(skill_id)
+                .execute(&self.pool)
+                .await?;
+        Ok(result.rows_affected() > 0)
     }
 
     /// The body hash this session pinned for a skill, without changing anything.
@@ -1289,6 +1588,8 @@ fn agent_from_row(row: AgentRow) -> Agent {
         spend_micros: row.9,
         tokens_in: row.10,
         tokens_out: row.11,
+        claims_held: 0,
+        claims_stale: 0,
     }
 }
 

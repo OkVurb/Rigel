@@ -38,6 +38,10 @@ pub struct ScriptStep {
     /// Simulate the provider failing instead of answering.
     #[serde(default)]
     pub error: Option<String>,
+    /// Simulate the stream dying after the content above was delivered. Unlike `error`, this
+    /// exercises the partial-answer path: the text and usage arrive, then the call fails.
+    #[serde(default)]
+    pub error_after: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -170,7 +174,12 @@ impl Model for ScriptedModel {
                 output_tokens: usage.output_tokens,
                 reasoning_tokens: usage.reasoning_tokens,
                 cost_usd: usage.cost_usd,
+                served_model: None,
             }));
+        }
+
+        if let Some(error) = step.error_after {
+            return Err(ModelError::Other(error));
         }
 
         on_delta(Delta::Finish(if step.tool_calls.is_empty() {

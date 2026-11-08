@@ -81,6 +81,9 @@ pub struct Refinement {
 pub struct PromptRefiner {
     model: Arc<dyn Model>,
     model_name: String,
+    /// The effort the caller chose for this draft. `None` leaves the provider default; a tiered
+    /// model uses it as the tier.
+    effort: Option<String>,
 }
 
 impl PromptRefiner {
@@ -88,7 +91,17 @@ impl PromptRefiner {
         Self {
             model,
             model_name: model_name.into(),
+            effort: None,
         }
+    }
+
+    /// Carry the composer's effort setting into the refinement call. A tiered model uses this
+    /// as its tier; other models ignore it, exactly as a turn does.
+    pub fn with_effort(mut self, effort: impl Into<String>) -> Self {
+        let effort = effort.into();
+        let effort = effort.trim().to_string();
+        self.effort = (!effort.is_empty()).then_some(effort);
+        self
     }
 
     /// One refinement round. `round` 0 may read files; later rounds only see the draft, context
@@ -187,7 +200,7 @@ impl PromptRefiner {
             tools: Vec::new(),
             max_tokens: Some(700),
             temperature: 0.2,
-            effort: None,
+            effort: self.effort.clone(),
         };
         let cancel = CancellationToken::new();
         let mut text = String::new();
@@ -481,6 +494,7 @@ mod tests {
                 output_tokens: 20,
                 reasoning_tokens: 0,
                 cost_usd: Some(0.0001),
+                served_model: None,
             }));
             Ok(())
         }
@@ -595,6 +609,21 @@ mod tests {
                 .any(|note| note.contains("first round only"))
         );
         assert_eq!(model.seen().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn the_refiner_sends_the_effort_it_was_given() {
+        let (refiner, model) = refiner(vec![
+            r#"{"questions":[],"refined":"Make it faster.","reads":[]}"#.to_string(),
+        ]);
+        let outcome = refiner
+            .with_effort("high")
+            .refine(&request("make it faster", 0), None)
+            .await
+            .unwrap();
+
+        assert_eq!(outcome.refined, "Make it faster.");
+        assert_eq!(model.seen()[0].effort.as_deref(), Some("high"));
     }
 
     #[tokio::test]

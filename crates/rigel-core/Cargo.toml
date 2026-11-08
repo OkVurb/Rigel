@@ -36,3 +36,6 @@ keyring = { workspace = true, features = ["sync-secret-service"] }
 
 [dev-dependencies]
 tempfile = { workspace = true }
+
+# `start_paused` makes the limiter's refill and Retry-After tests deterministic.
+tokio = { workspace = true, features = ["test-util"] }

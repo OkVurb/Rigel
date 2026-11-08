@@ -21,11 +21,14 @@
 
 use std::path::PathBuf;
 use std::process::Stdio;
-use std::sync::{OnceLock, RwLock};
-use std::time::Duration;
+use std::sync::{Arc, Mutex, OnceLock, RwLock};
+use std::time::{Duration, Instant};
+
+use tokio_util::sync::CancellationToken;
 
 use crate::credentials::{self, CredentialStore};
 
+use super::model::{ChatRequest, Delta, DeltaSink, Model, ModelError};
 use super::openrouter::OpenRouterModel;
 
 /// The location the OpenAI-compatible route is served from by default. `global` is what Google's
@@ -37,6 +40,53 @@ pub const DEFAULT_MODEL: &str = "google/gemini-4-argon";
 
 const TOKEN_COMMAND: [&str; 2] = ["auth", "print-access-token"];
 const TOKEN_TIMEOUT: Duration = Duration::from_secs(20);
+
+/// Google access tokens live an hour. `gcloud` prints the token without its expiry, so the only
+/// honest clock starts when the command answered.
+const TOKEN_LIFETIME: Duration = Duration::from_secs(3600);
+/// The last five minutes of a token's life are treated as expired: a request that starts then
+/// can still be running when the endpoint would refuse it.
+const REFRESH_MARGIN: Duration = Duration::from_secs(300);
+
+struct CachedToken {
+    token: String,
+    fetched_at: Instant,
+}
+
+/// One gcloud token with the instant it was read. A token pasted into Settings is not cached:
+/// it has no expiry Rigel can read, and it is re-read from the keychain on every turn.
+#[derive(Default)]
+pub struct TokenCache {
+    inner: Mutex<Option<CachedToken>>,
+}
+
+impl TokenCache {
+    /// The cached token when it is still outside the refresh margin.
+    pub fn token(&self, now: Instant) -> Option<String> {
+        let guard = self.inner.lock().expect("vertex token cache");
+        let cached = guard.as_ref()?;
+        let age = now.saturating_duration_since(cached.fetched_at);
+        (age + REFRESH_MARGIN < TOKEN_LIFETIME).then(|| cached.token.clone())
+    }
+
+    pub fn store(&self, token: String, fetched_at: Instant) {
+        *self.inner.lock().expect("vertex token cache") = Some(CachedToken { token, fetched_at });
+    }
+
+    pub fn clear(&self) {
+        *self.inner.lock().expect("vertex token cache") = None;
+    }
+}
+
+fn token_cache() -> &'static TokenCache {
+    static CACHE: OnceLock<TokenCache> = OnceLock::new();
+    CACHE.get_or_init(TokenCache::default)
+}
+
+/// Where a fresh token comes from after the endpoint refuses the cached one. Injectable so the
+/// refresh path can be tested without a Google Cloud CLI on the machine.
+pub type TokenRefresher =
+    Arc<dyn Fn() -> futures::future::BoxFuture<'static, Result<String, String>> + Send + Sync>;
 
 /// The project the endpoint is billed to: an explicit variable first, then the value saved in
 /// Settings, then the project the Google Cloud CLI is already pointed at.
@@ -213,14 +263,143 @@ pub fn model_at(token: impl Into<String>, base: impl Into<String>) -> OpenRouter
 /// A token, from the stored credential or from `gcloud`. The error names both ways to get one.
 pub async fn resolve_token(store: &dyn CredentialStore) -> Result<String, String> {
     if let Ok(secret) = credentials::get_from(store, credentials::VERTEX) {
-        return Ok(secret.expose().to_string());
+        let token = secret.expose().trim().to_string();
+        // The three credentials people paste where an OAuth token belongs are all the same 401:
+        // a Google API key, a service-account JSON, or an ID token. Vertex answers
+        // `ACCESS_TOKEN_TYPE_UNSUPPORTED` and never says which one it was. Name it before the
+        // request leaves, with the exact remedy the user needs.
+        if !looks_like_access_token(&token) {
+            return Err(
+                "the stored `vertex` credential is not an OAuth access token (a Google API key, \
+                 a service-account JSON and an ID token are all rejected with \
+                 ACCESS_TOKEN_TYPE_UNSUPPORTED). Switch the provider to `gemini` to use an AI \
+                 Studio key, or store a token from `gcloud auth print-access-token`"
+                    .to_string(),
+            );
+        }
+        return Ok(token);
     }
-    gcloud_token().await.map_err(|error| {
+    if let Some(token) = token_cache().token(Instant::now()) {
+        return Ok(token);
+    }
+    let token = gcloud_token().await.map_err(|error| {
         format!(
             "no Vertex access token: set VERTEX_ACCESS_TOKEN, or store one for `vertex` in \
              Settings, or let Rigel read one from the Google Cloud CLI ({error})"
         )
-    })
+    })?;
+    token_cache().store(token.clone(), Instant::now());
+    Ok(token)
+}
+
+/// The Vertex door. It rebuilds its inner model from the current token on each call so a 401 can
+/// be answered by one refresh and one retry, never a second blind attempt.
+pub struct RefreshingModel {
+    token: RwLock<String>,
+    base: String,
+    refresh: TokenRefresher,
+}
+
+impl RefreshingModel {
+    pub fn new(token: impl Into<String>, base: impl Into<String>) -> Self {
+        Self::with_refresher(
+            token,
+            base,
+            Arc::new(|| {
+                let future: futures::future::BoxFuture<'static, Result<String, String>> =
+                    Box::pin(gcloud_token());
+                future
+            }),
+        )
+    }
+
+    pub fn with_refresher(
+        token: impl Into<String>,
+        base: impl Into<String>,
+        refresh: TokenRefresher,
+    ) -> Self {
+        Self {
+            token: RwLock::new(token.into()),
+            base: base.into(),
+            refresh,
+        }
+    }
+
+    fn current(&self) -> String {
+        self.token.read().expect("vertex token lock").clone()
+    }
+
+    fn replace(&self, token: String) {
+        *self.token.write().expect("vertex token lock") = token;
+    }
+}
+
+#[async_trait::async_trait]
+impl Model for RefreshingModel {
+    fn id(&self) -> String {
+        "vertex".to_string()
+    }
+
+    async fn chat(
+        &self,
+        request: ChatRequest,
+        cancel: &CancellationToken,
+        on_delta: &mut DeltaSink<'_>,
+    ) -> Result<(), ModelError> {
+        // At most one refresh and one retry for a call. A second 401 is the answer, not a
+        // reason to spend another request.
+        let mut refreshed = false;
+        loop {
+            let inner = model_at(self.current(), &self.base);
+            let mut saw_content = false;
+            let result = {
+                let mut forward = |delta: Delta| {
+                    if matches!(
+                        delta,
+                        Delta::Text(_) | Delta::Reasoning(_) | Delta::ToolCall { .. }
+                    ) {
+                        saw_content = true;
+                    }
+                    on_delta(delta);
+                };
+                inner.chat(request.clone(), cancel, &mut forward).await
+            };
+            match result {
+                Ok(()) => return Ok(()),
+                Err(error @ ModelError::Status { status: 401, .. })
+                    if !saw_content && !refreshed =>
+                {
+                    refreshed = true;
+                    token_cache().clear();
+                    let token = (self.refresh)().await.map_err(|refresh| {
+                        ModelError::Other(format!(
+                            "{error}; the Vertex token was refused and a fresh one could not be \
+                             read: {refresh}"
+                        ))
+                    })?;
+                    token_cache().store(token.clone(), Instant::now());
+                    self.replace(token);
+                }
+                Err(error) => return Err(error),
+            }
+        }
+    }
+}
+
+/// An OAuth access token is opaque, but the credentials people mix it up with are not:
+/// an API key starts `AIza`, a service-account file starts `{`, and an ID token is a JWT with
+/// two dots. Anything else is given to the endpoint, which is the only authority on tokens.
+fn looks_like_access_token(token: &str) -> bool {
+    if token.is_empty() {
+        return false;
+    }
+    if token.starts_with("AIza") || token.starts_with('{') {
+        return false;
+    }
+    if token.starts_with("eyJ") && token.matches('.').count() == 2 {
+        return false;
+    }
+    true
 }
 
 /// `gcloud auth print-access-token`, with a timeout so a CLI that hangs on a login prompt cannot
@@ -438,10 +617,216 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn an_ai_studio_key_is_not_mistaken_for_a_vertex_oauth_token() {
+        let store = MemoryCredentialStore::with(credentials::VERTEX, "AIzaSyExampleKey");
+        let error = resolve_token(&store)
+            .await
+            .expect_err("an API key cannot authenticate Vertex's OAuth endpoint");
+        assert!(error.contains("OAuth"), "{error}");
+        assert!(
+            error.contains("gemini"),
+            "the fix is to use the AI Studio door: {error}"
+        );
+        assert!(
+            error.contains("gcloud auth print-access-token"),
+            "the other remedy is named: {error}"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_id_token_or_service_account_file_is_also_refused_before_sending() {
+        let jwt = MemoryCredentialStore::with(
+            credentials::VERTEX,
+            "eyJhbGciOiJSUzI1NiJ9.eyJzdWIiOiIxIn0.c2ln",
+        );
+        let error = resolve_token(&jwt).await.expect_err("a JWT is an ID token");
+        assert!(error.contains("OAuth access token"), "{error}");
+
+        let json =
+            MemoryCredentialStore::with(credentials::VERTEX, "{\"type\":\"service_account\"}");
+        let error = resolve_token(&json)
+            .await
+            .expect_err("a key file is not a token");
+        assert!(error.contains("service-account JSON"), "{error}");
+    }
+
+    #[tokio::test]
     async fn a_stored_token_is_used_without_asking_gcloud() {
         let store = MemoryCredentialStore::with(credentials::VERTEX, "ya29.stored");
         let token = resolve_token(&store).await.unwrap();
         assert_eq!(token, "ya29.stored");
+    }
+
+    #[test]
+    fn a_cached_token_is_reused_until_the_refresh_margin() {
+        let cache = TokenCache::default();
+        let start = Instant::now();
+        assert!(cache.token(start).is_none(), "an empty cache has no token");
+        cache.store("ya29.one".to_string(), start);
+        assert_eq!(
+            cache.token(start + Duration::from_secs(60)).as_deref(),
+            Some("ya29.one")
+        );
+        // 3,299 seconds is still inside the token's life; 3,300 enters the five-minute margin.
+        assert_eq!(
+            cache.token(start + Duration::from_secs(3_299)).as_deref(),
+            Some("ya29.one")
+        );
+        assert_eq!(cache.token(start + Duration::from_secs(3_300)), None);
+        cache.clear();
+        assert_eq!(cache.token(start + Duration::from_secs(1)), None);
+    }
+
+    /// A Vertex endpoint that refuses the first token and accepts the next. Every authorization
+    /// header is kept so the test can prove which token each request carried.
+    async fn refusing_then_accepting(refusals: usize) -> (String, Arc<Mutex<Vec<String>>>) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let log = seen.clone();
+
+        tokio::spawn(async move {
+            for attempt in 0..=refusals {
+                let Ok((mut socket, _)) = listener.accept().await else {
+                    return;
+                };
+                let mut request = Vec::new();
+                let mut buffer = vec![0u8; 4096];
+                loop {
+                    let read = socket.read(&mut buffer).await.unwrap_or(0);
+                    if read == 0 {
+                        break;
+                    }
+                    request.extend_from_slice(&buffer[..read]);
+                    if let Some(end) = find_headers_end(&request) {
+                        let head = String::from_utf8_lossy(&request[..end]).to_string();
+                        if request.len() >= end + content_length(&head).unwrap_or(0) {
+                            break;
+                        }
+                    }
+                }
+                let text = String::from_utf8_lossy(&request).to_string();
+                let authorization = text
+                    .lines()
+                    .find(|line| line.to_lowercase().starts_with("authorization:"))
+                    .unwrap_or("")
+                    .trim()
+                    .to_string();
+                log.lock().unwrap().push(authorization);
+
+                if attempt < refusals {
+                    let body = "{\"error\":{\"message\":\"token expired\"}}";
+                    let header = format!(
+                        "HTTP/1.1 401 Unauthorized\r\nContent-Type: application/json\r\n\
+                         Content-Length: {}\r\nConnection: close\r\n\r\n",
+                        body.len()
+                    );
+                    let _ = socket.write_all(header.as_bytes()).await;
+                    let _ = socket.write_all(body.as_bytes()).await;
+                } else {
+                    let events = concat!(
+                        "data: {\"choices\":[{\"delta\":{\"content\":\"po\"}}]}\n\n",
+                        "data: {\"choices\":[{\"delta\":{\"content\":\"ng\"}}]}\n\n",
+                        "data: [DONE]\n\n",
+                    );
+                    let header = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n\
+                         Content-Length: {}\r\nConnection: close\r\n\r\n",
+                        events.len()
+                    );
+                    let _ = socket.write_all(header.as_bytes()).await;
+                    let _ = socket.write_all(events.as_bytes()).await;
+                }
+                let _ = socket.shutdown().await;
+            }
+        });
+
+        (format!("http://{address}"), seen)
+    }
+
+    fn counting_refresher() -> (TokenRefresher, Arc<Mutex<u32>>) {
+        let calls = Arc::new(Mutex::new(0u32));
+        let counter = calls.clone();
+        let refresher: TokenRefresher = Arc::new(move || {
+            *counter.lock().unwrap() += 1;
+            let token = "ya29.fresh".to_string();
+            let future: futures::future::BoxFuture<'static, Result<String, String>> =
+                Box::pin(async move { Ok(token) });
+            future
+        });
+        (refresher, calls)
+    }
+
+    fn pong_request() -> ChatRequest {
+        ChatRequest {
+            model: DEFAULT_MODEL.to_string(),
+            messages: vec![ChatMessage::user("say pong")],
+            tools: vec![],
+            max_tokens: Some(64),
+            temperature: 0.0,
+            effort: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn a_refused_token_refreshes_once_and_the_retry_uses_the_new_one() {
+        let (base, seen) = refusing_then_accepting(1).await;
+        let (refresher, calls) = counting_refresher();
+        let model = RefreshingModel::with_refresher("ya29.old", base, refresher);
+
+        let cancel = CancellationToken::new();
+        let mut text = String::new();
+        let mut sink = |delta: Delta| {
+            if let Delta::Text(chunk) = delta {
+                text.push_str(&chunk);
+            }
+        };
+        model
+            .chat(pong_request(), &cancel, &mut sink)
+            .await
+            .unwrap();
+
+        assert_eq!(text, "pong");
+        assert_eq!(*calls.lock().unwrap(), 1, "exactly one refresh");
+        let seen = seen.lock().unwrap().clone();
+        assert_eq!(seen.len(), 2, "one retry, never a loop");
+        assert!(
+            seen[0].to_lowercase().contains("bearer ya29.old"),
+            "{seen:?}"
+        );
+        assert!(
+            seen[1].to_lowercase().contains("bearer ya29.fresh"),
+            "the retry carries the refreshed token: {seen:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_second_401_is_the_answer_not_another_retry() {
+        let (base, seen) = refusing_then_accepting(2).await;
+        let (refresher, calls) = counting_refresher();
+        let model = RefreshingModel::with_refresher("ya29.old", base, refresher);
+
+        let cancel = CancellationToken::new();
+        let mut sink = |_delta: Delta| {};
+        let error = model
+            .chat(pong_request(), &cancel, &mut sink)
+            .await
+            .expect_err("the endpoint still refuses the token");
+
+        assert!(
+            matches!(error, ModelError::Status { status: 401, .. }),
+            "{error}"
+        );
+        assert_eq!(
+            *calls.lock().unwrap(),
+            1,
+            "one refresh, not one per attempt"
+        );
+        assert_eq!(
+            seen.lock().unwrap().len(),
+            2,
+            "the second 401 ends the call instead of buying a third request"
+        );
     }
 
     #[tokio::test]

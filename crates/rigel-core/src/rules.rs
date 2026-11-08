@@ -4,6 +4,10 @@
 //! in the native agent's preamble so a rule is not lost when every turn is billed separately.
 //! The text is imported data: it is labelled with its source, it grants no permission, and it
 //! cannot override the system prompt. Memory stays the source of record (D2/D43).
+//!
+//! `AGENTS.md` wins over `CLAUDE.md` (Q269): when both are present, only the former is read. A
+//! project that keeps one file for every harness must not end up with two answers to the same
+//! rule, and the harness-neutral file is the one the user chose to maintain.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -50,7 +54,13 @@ fn read_bounded(path: &Path) -> Option<(String, bool)> {
 /// simply absent; an unreadable one is skipped rather than failing a turn.
 pub fn load(root: &Path) -> RuleSet {
     let mut candidates: Vec<(PathBuf, &'static str)> = Vec::new();
+    // Q269: an empty `AGENTS.md` does not silence `CLAUDE.md`; only a file with rules wins.
+    let agents_wins =
+        read_bounded(&root.join("AGENTS.md")).is_some_and(|(text, _)| !text.trim().is_empty());
     for (name, kind) in [("AGENTS.md", "agents"), ("CLAUDE.md", "claude")] {
+        if kind == "claude" && agents_wins {
+            continue;
+        }
         let path = root.join(name);
         if path.is_file() {
             candidates.push((path, kind));
@@ -174,7 +184,7 @@ mod tests {
     }
 
     #[test]
-    fn loads_the_three_sources_in_order_and_labels_them_as_data() {
+    fn agents_wins_over_claude_md_and_cursor_rules_still_load() {
         let tmp = tempfile::TempDir::new().unwrap();
         write(&tmp.path().join("AGENTS.md"), "run the checks\n");
         write(&tmp.path().join("CLAUDE.md"), "be concise\n");
@@ -183,11 +193,25 @@ mod tests {
         let paths: Vec<&str> = rules.sources.iter().map(|row| row.path.as_str()).collect();
         assert_eq!(
             paths,
-            vec!["AGENTS.md", "CLAUDE.md", ".cursor/rules/style.mdc"]
+            vec!["AGENTS.md", ".cursor/rules/style.mdc"],
+            "CLAUDE.md is ignored when AGENTS.md has rules"
         );
+        assert!(!rules.text.contains("be concise"));
         assert!(rules.text.contains("data, not instructions"));
         assert!(rules.text.contains("two spaces"));
         assert!(!rules.text.contains(tmp.path().to_string_lossy().as_ref()));
+    }
+
+    #[test]
+    fn claude_md_still_loads_alone_and_an_empty_agents_md_does_not_silence_it() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        write(&tmp.path().join("CLAUDE.md"), "be concise\n");
+        assert_eq!(load(tmp.path()).sources[0].path, "CLAUDE.md");
+
+        write(&tmp.path().join("AGENTS.md"), "  \n\n");
+        let rules = load(tmp.path());
+        assert_eq!(rules.sources[0].path, "CLAUDE.md");
+        assert!(rules.text.contains("be concise"));
     }
 
     #[test]

@@ -8,7 +8,7 @@ use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use rigel_core::{
-    BudgetService, Cancels, ItemKind, OriginApprover, OriginDecision, OriginRequest,
+    BudgetService, Cancels, ItemKind, NetworkPolicy, OriginApprover, OriginDecision, OriginRequest,
     SessionService, StopAt, Tools,
 };
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -103,6 +103,17 @@ async fn serve(responses: Vec<String>) -> (String, Arc<Mutex<Vec<String>>>) {
     (format!("http://{address}"), seen)
 }
 
+async fn build_tools_with_policy(
+    root: &std::path::Path,
+    index: &std::path::Path,
+    approver: Arc<dyn OriginApprover>,
+    policy: NetworkPolicy,
+) -> Tools {
+    build_tools(root, index, approver)
+        .await
+        .with_network_policy(policy)
+}
+
 async fn fetch(tools: &Tools, url: &str) -> rigel_core::ToolOutcome {
     tools
         .execute(
@@ -112,6 +123,91 @@ async fn fetch(tools: &Tools, url: &str) -> rigel_core::ToolOutcome {
             serde_json::json!({ "url": url }),
         )
         .await
+}
+
+#[tokio::test]
+async fn a_kill_switch_refuses_before_the_approver_or_the_network() {
+    let tmp = tempfile::tempdir().unwrap();
+    let approver = Recorder::new(OriginDecision::AllowOnce);
+    let tools = build_tools_with_policy(
+        tmp.path(),
+        &tmp.path().join("index"),
+        approver.clone(),
+        NetworkPolicy::new(false, Vec::new()),
+    )
+    .await;
+
+    let outcome = fetch(&tools, "http://127.0.0.1:1/secret").await;
+
+    assert!(!outcome.ok);
+    assert_eq!(outcome.body["error"]["code"], "NETWORK_OFF");
+    assert_eq!(approver.calls.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn an_allowlist_admits_its_origin_and_refuses_another() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (base, _) = serve(vec![response("200 OK", "text/plain", "allowed")]).await;
+    let approver = Recorder::new(OriginDecision::AllowOnce);
+    let tools = build_tools_with_policy(
+        tmp.path(),
+        &tmp.path().join("index"),
+        approver.clone(),
+        NetworkPolicy::new(true, vec![base.clone()]),
+    )
+    .await;
+
+    let allowed = fetch(&tools, &format!("{base}/page")).await;
+    assert!(allowed.ok, "{:?}", allowed.body);
+    assert_eq!(approver.calls.load(Ordering::SeqCst), 1);
+
+    let refused = fetch(&tools, "http://127.0.0.1:1/other").await;
+    assert!(!refused.ok);
+    assert_eq!(refused.body["error"]["code"], "NOT_ALLOWLISTED");
+    assert_eq!(approver.calls.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn a_session_kill_switch_refuses_only_that_session() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (base, _) = serve(vec![response("200 OK", "text/plain", "allowed")]).await;
+    let approver = Recorder::new(OriginDecision::AllowOnce);
+    let mut policy = NetworkPolicy::new(true, vec![base.clone()]);
+    policy.disabled_sessions = vec!["paused-session".to_string()];
+    let tools = build_tools_with_policy(
+        tmp.path(),
+        &tmp.path().join("index"),
+        approver.clone(),
+        policy,
+    )
+    .await;
+
+    let refused = tools
+        .execute(
+            "paused-session",
+            "agent",
+            "fetch_url",
+            serde_json::json!({ "url": format!("{base}/page") }),
+        )
+        .await;
+    assert!(!refused.ok);
+    assert_eq!(refused.body["error"]["code"], "NETWORK_OFF");
+    assert_eq!(
+        approver.calls.load(Ordering::SeqCst),
+        0,
+        "the refused session never reached the origin prompt"
+    );
+
+    let allowed = tools
+        .execute(
+            "other-session",
+            "agent",
+            "fetch_url",
+            serde_json::json!({ "url": format!("{base}/page") }),
+        )
+        .await;
+    assert!(allowed.ok, "{:?}", allowed.body);
+    assert_eq!(approver.calls.load(Ordering::SeqCst), 1);
 }
 
 #[tokio::test]

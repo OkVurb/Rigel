@@ -8,7 +8,50 @@
 //! This table is a floor, not a promise: models are added as they are used, and a model
 //! missing from it is priced at the conservative default rather than at zero.
 
+use serde::Serialize;
+
 use super::model::RawUsage;
+
+/// The day the rates below were last read from the vendors' own price pages.
+pub const FETCHED_ON: &str = "2026-11-05";
+/// Where the rates came from. Shown with the age when the table is old.
+pub const SOURCE: &str =
+    "vendor price pages (OpenAI, Anthropic, Google, DeepSeek, Meta, Fireworks)";
+/// Prices move rarely; a quarter is long enough for a stale row to be a real risk and short
+/// enough that the warning still means something.
+pub const STALE_AFTER_DAYS: i64 = 90;
+
+/// How old the table is, and whether that is old enough to warn about. The cost surface shows
+/// this beside the estimate so a stale number is never silently accepted as current.
+#[derive(Debug, Clone, Serialize)]
+pub struct Freshness {
+    pub fetched_on: String,
+    pub age_days: i64,
+    pub source: String,
+    pub stale: bool,
+}
+
+pub fn freshness(now_ms: i64) -> Freshness {
+    let fetched = days_from_civil(2026, 11, 5);
+    let age_days = (now_ms.div_euclid(86_400_000) - fetched).max(0);
+    Freshness {
+        fetched_on: FETCHED_ON.to_string(),
+        age_days,
+        source: SOURCE.to_string(),
+        stale: age_days > STALE_AFTER_DAYS,
+    }
+}
+
+/// Days since 1970-01-01 for a civil date (Howard Hinnant's algorithm).
+fn days_from_civil(year: i64, month: i64, day: i64) -> i64 {
+    let year = if month <= 2 { year - 1 } else { year };
+    let era = if year >= 0 { year } else { year - 399 } / 400;
+    let year_of_era = year - era * 400;
+    let month_prime = (month + 9) % 12;
+    let day_of_year = (153 * month_prime + 2) / 5 + day - 1;
+    let day_of_era = year_of_era * 365 + year_of_era / 4 - year_of_era / 100 + day_of_year;
+    era * 146_097 + day_of_era - 719_468
+}
 
 pub struct Price {
     /// Dollars per million input tokens.
@@ -213,6 +256,105 @@ const TABLE: &[(&str, Price)] = &[
             output: 1.10,
         },
     ),
+    // Fireworks' OpenAI-compatible endpoint accepts both the short id shown in its docs and the
+    // resource name its model roster returns. Keeping both rows means a direct call and a
+    // FireRouter turn that reports the served model are priced alike.
+    (
+        "glm-5p3-flash",
+        Price {
+            input: 0.15,
+            cached_input: 0.03,
+            output: 0.50,
+        },
+    ),
+    (
+        "accounts/fireworks/models/glm-5p3-flash",
+        Price {
+            input: 0.15,
+            cached_input: 0.03,
+            output: 0.50,
+        },
+    ),
+    (
+        "glm-5p3",
+        Price {
+            input: 1.40,
+            cached_input: 0.26,
+            output: 4.40,
+        },
+    ),
+    (
+        "accounts/fireworks/models/glm-5p3",
+        Price {
+            input: 1.40,
+            cached_input: 0.26,
+            output: 4.40,
+        },
+    ),
+    (
+        "deepseek-v4p1-flash",
+        Price {
+            input: 0.30,
+            cached_input: 0.006,
+            output: 1.20,
+        },
+    ),
+    (
+        "accounts/fireworks/models/deepseek-v4p1-flash",
+        Price {
+            input: 0.30,
+            cached_input: 0.006,
+            output: 1.20,
+        },
+    ),
+    (
+        "kimi-k3p1-pro",
+        Price {
+            input: 2.00,
+            cached_input: 0.20,
+            output: 10.00,
+        },
+    ),
+    (
+        "accounts/fireworks/models/kimi-k3p1-pro",
+        Price {
+            input: 2.00,
+            cached_input: 0.20,
+            output: 10.00,
+        },
+    ),
+    (
+        "qwen3p8-max",
+        Price {
+            input: 2.00,
+            cached_input: 0.25,
+            output: 6.00,
+        },
+    ),
+    (
+        "accounts/fireworks/models/qwen3p8-max",
+        Price {
+            input: 2.00,
+            cached_input: 0.25,
+            output: 6.00,
+        },
+    ),
+    (
+        "gpt-oss-120b",
+        Price {
+            input: 0.15,
+            cached_input: 0.015,
+            output: 0.60,
+        },
+    ),
+    (
+        "accounts/fireworks/models/gpt-oss-120b",
+        Price {
+            input: 0.15,
+            cached_input: 0.015,
+            output: 0.60,
+        },
+    ),
 ];
 
 pub fn price_for(model: &str) -> &'static Price {
@@ -268,6 +410,22 @@ mod tests {
     use super::*;
 
     #[test]
+    fn a_table_older_than_the_release_names_its_age_and_source() {
+        let fresh = freshness(days_from_civil(2026, 11, 6) * 86_400_000);
+        assert_eq!(fresh.age_days, 1, "one day after the fetch date");
+        assert!(!fresh.stale, "a day-old table is current");
+        assert_eq!(fresh.fetched_on, FETCHED_ON);
+
+        let old = freshness(days_from_civil(2027, 3, 1) * 86_400_000);
+        assert!(old.stale, "a table past the margin must warn");
+        assert!(old.age_days > STALE_AFTER_DAYS, "{}", old.age_days);
+        assert_eq!(
+            old.source, SOURCE,
+            "the warning names where the row came from"
+        );
+    }
+
+    #[test]
     fn a_known_model_prices_its_own_tokens() {
         let usage = RawUsage {
             input_tokens: 1_000_000,
@@ -286,6 +444,51 @@ mod tests {
             ..RawUsage::default()
         };
         assert_eq!(estimate("openai/gpt-5.4-mini", &usage), 75_000);
+    }
+
+    #[test]
+    fn fireworks_short_ids_and_resource_names_are_priced() {
+        for (short, full, input, cached, output) in [
+            (
+                "glm-5p3-flash",
+                "accounts/fireworks/models/glm-5p3-flash",
+                0.15,
+                0.03,
+                0.50,
+            ),
+            (
+                "deepseek-v4p1-flash",
+                "accounts/fireworks/models/deepseek-v4p1-flash",
+                0.30,
+                0.006,
+                1.20,
+            ),
+            (
+                "kimi-k3p1-pro",
+                "accounts/fireworks/models/kimi-k3p1-pro",
+                2.00,
+                0.20,
+                10.00,
+            ),
+        ] {
+            assert!(is_listed(short), "{short} has no Fireworks row");
+            assert!(is_listed(full), "{full} has no Fireworks row");
+            assert_eq!(price_for(short).input, input);
+            assert_eq!(price_for(full).cached_input, cached);
+            assert_eq!(price_for(full).output, output);
+        }
+
+        // 200k uncached + 800k cached input + 200k output for GLM 5.3 Flash:
+        // $0.03 + $0.024 + $0.10 = $0.154.
+        assert_eq!(
+            cost_micros(
+                "accounts/fireworks/models/glm-5p3-flash",
+                1_000_000,
+                800_000,
+                200_000
+            ),
+            154_000
+        );
     }
 
     #[test]

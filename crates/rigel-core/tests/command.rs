@@ -180,6 +180,23 @@ async fn a_destructive_command_records_its_policy_rows() {
     assert!(rows.contains(&"recursive-remove"), "{rows:?}");
     // The approver saw the same rows before deciding; the classifier never runs the command.
     assert_eq!(approver.requests()[0].destructive.len(), rows.len());
+    // Q239: the same request carries the resolved preview to the approval surface.
+    let blast = approver.requests()[0]
+        .blast_radius
+        .clone()
+        .expect("a destructive command has a preview");
+    assert!(!blast.commands.is_empty());
+    assert!(
+        blast
+            .targets
+            .iter()
+            .any(|target| target.path.contains("secrets"))
+            || blast
+                .cannot_determine
+                .iter()
+                .any(|row| row.contains("secrets")),
+        "the preview names the target or says it cannot determine it: {blast:?}"
+    );
     // The default deliberator records that advice was unavailable; it cannot change the gate.
     assert_eq!(
         outcome.body["deliberation"]["positions"],
@@ -253,12 +270,10 @@ async fn a_command_that_outlives_its_timeout_is_killed() {
     let approver = Recorder::new(CommandDecision::ALLOW_ONCE);
     let tools = tools(tmp.path(), approver.clone()).await;
 
-    // Both spend about five seconds doing nothing; the tool is told to allow one.
-    let command = if cfg!(windows) {
-        "ping -n 6 127.0.0.1 >NUL"
-    } else {
-        "sleep 5"
-    };
+    // Ping prints a line immediately and then keeps going, so the kill can be checked against
+    // output that already arrived rather than an empty stream. `-n` is the count flag on both
+    // Windows and the Unix implementations used by CI.
+    let command = "ping -n 6 127.0.0.1";
     let outcome = run(
         &tools,
         serde_json::json!({ "command": command, "timeout_secs": 1 }),
@@ -270,6 +285,21 @@ async fn a_command_that_outlives_its_timeout_is_killed() {
     assert_eq!(outcome.body["timed_out"], true);
     assert_eq!(outcome.body["exit_code"], serde_json::Value::Null);
     assert_eq!(outcome.body["timeout_secs"], 1);
+    assert_eq!(outcome.body["timeout_source"], "command");
+    assert!(
+        outcome.body["stdout"]
+            .as_str()
+            .unwrap()
+            .contains("127.0.0.1"),
+        "partial output survives the kill: {:?}",
+        outcome.body["stdout"]
+    );
+    let reason = outcome.body["kill_reason"].as_str().unwrap();
+    assert!(reason.contains("1s"), "the limit is named: {reason}");
+    assert!(
+        reason.contains("command timeout"),
+        "the source is named: {reason}"
+    );
 }
 
 #[tokio::test]
@@ -287,6 +317,19 @@ async fn the_timeout_is_clamped_to_the_documented_maximum() {
     // Denied, so the clamp is observed on the request rather than on the run.
     assert_eq!(outcome.body["error"]["code"], "DENIED");
     assert_eq!(approver.requests()[0].timeout_secs, 600);
+}
+
+#[tokio::test]
+async fn the_default_command_timeout_is_two_hundred_seconds() {
+    let tmp = tempfile::tempdir().unwrap();
+    let approver = Recorder::new(CommandDecision::Deny);
+    let tools = tools(tmp.path(), approver.clone()).await;
+
+    let outcome = run(&tools, serde_json::json!({ "command": "echo hi" })).await;
+
+    // Denied, so the default is observed on the request rather than on the run.
+    assert_eq!(outcome.body["error"]["code"], "DENIED");
+    assert_eq!(approver.requests()[0].timeout_secs, 200);
 }
 
 #[tokio::test]

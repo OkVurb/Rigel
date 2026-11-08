@@ -11,6 +11,8 @@
 //! allowlist of text-like types. Everything it returns is untrusted input, labelled as such.
 
 use std::collections::HashSet;
+use std::fs;
+use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -25,6 +27,109 @@ pub const MAX_FETCH_BYTES: usize = 256 * 1024;
 const MAX_REDIRECTS: usize = 5;
 const FETCH_TIMEOUT: Duration = Duration::from_secs(30);
 const APPROVED_FILE: &str = "approved-origins.json";
+const NETWORK_FILE: &str = ".rigel/network.json";
+
+/// Q240: the project's network policy, evaluated before a per-origin question is asked.
+///
+/// The policy is a kill switch plus an optional allowlist. The allowlist does not replace the
+/// origin prompt: an allowlisted origin still needs the normal once/session/always answer. An
+/// empty allowlist means "all origins may ask"; a non-empty one means every other origin is
+/// refused without asking.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NetworkPolicy {
+    /// `false` is the kill switch: no request leaves, even to an already-approved origin.
+    #[serde(default = "network_enabled")]
+    pub enabled: bool,
+    #[serde(default)]
+    pub allowlist: Vec<String>,
+    /// Sessions whose own kill switch is on. The project switch still applies to every turn;
+    /// this list refuses one session without silencing the others.
+    #[serde(default)]
+    pub disabled_sessions: Vec<String>,
+}
+
+fn network_enabled() -> bool {
+    true
+}
+
+impl Default for NetworkPolicy {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            allowlist: Vec::new(),
+            disabled_sessions: Vec::new(),
+        }
+    }
+}
+
+impl NetworkPolicy {
+    pub fn new(enabled: bool, allowlist: impl IntoIterator<Item = String>) -> Self {
+        Self {
+            enabled,
+            allowlist: allowlist.into_iter().collect(),
+            disabled_sessions: Vec::new(),
+        }
+    }
+
+    /// Read `<project>/.rigel/network.json`. A missing or malformed file is the safe default:
+    /// network enabled, no allowlist, and every origin still asks.
+    pub fn load(project_root: &Path) -> Self {
+        let path = project_root.join(NETWORK_FILE);
+        fs::read_to_string(path)
+            .ok()
+            .and_then(|text| serde_json::from_str(&text).ok())
+            .unwrap_or_default()
+    }
+
+    /// Write the project policy. The file is project-local and never contains a credential.
+    pub fn save(&self, project_root: &Path) -> Result<(), String> {
+        let path = project_root.join(NETWORK_FILE);
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)
+                .map_err(|error| format!("could not create {}: {error}", parent.display()))?;
+        }
+        let text = serde_json::to_string_pretty(self)
+            .map_err(|error| format!("could not encode the network policy: {error}"))?;
+        fs::write(&path, format!("{text}\n"))
+            .map_err(|error| format!("could not write {}: {error}", path.display()))
+    }
+
+    /// Whether this origin may be considered at all. This is not an approval.
+    pub fn allows(&self, origin: &str) -> bool {
+        if !self.enabled {
+            return false;
+        }
+        if self.allowlist.is_empty() {
+            return true;
+        }
+        let origin = normalize_origin(origin);
+        self.allowlist
+            .iter()
+            .any(|allowed| normalize_origin(allowed) == origin)
+    }
+
+    pub fn status(&self, origin: &str) -> &'static str {
+        if !self.enabled {
+            "network disabled"
+        } else if !self.allows(origin) {
+            "origin is not on this project's network allowlist"
+        } else {
+            "origin may ask for approval"
+        }
+    }
+
+    /// Whether this session's own kill switch is on. The project switch is checked separately,
+    /// so an allowlist refusal keeps its own error code and a session refusal is `NETWORK_OFF`.
+    pub fn session_disabled(&self, session_id: &str) -> bool {
+        self.disabled_sessions
+            .iter()
+            .any(|disabled| disabled == session_id)
+    }
+}
+
+fn normalize_origin(origin: &str) -> String {
+    origin.trim().trim_end_matches('/').to_ascii_lowercase()
+}
 
 /// What is being approved: one URL, belonging to one origin.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -110,6 +215,7 @@ pub struct Egress {
     store: std::path::PathBuf,
     session: Arc<Mutex<HashSet<String>>>,
     always: Arc<Mutex<Option<HashSet<String>>>>,
+    policy: Arc<Mutex<NetworkPolicy>>,
 }
 
 impl Egress {
@@ -132,12 +238,44 @@ impl Egress {
             store: index_dir.join(APPROVED_FILE),
             session: Arc::new(Mutex::new(HashSet::new())),
             always: Arc::new(Mutex::new(None)),
+            policy: Arc::new(Mutex::new(NetworkPolicy::default())),
         }
     }
 
     pub fn with_approver(mut self, approver: Arc<dyn OriginApprover>) -> Self {
         self.approver = approver;
         self
+    }
+
+    /// Install the project's Q240 policy. The policy is shared by every clone of this egress,
+    /// so a kill switch set for the turn also covers its subagents.
+    pub fn with_policy(mut self, policy: NetworkPolicy) -> Self {
+        self.policy = Arc::new(Mutex::new(policy));
+        self
+    }
+
+    pub fn set_policy(&self, policy: NetworkPolicy) {
+        if let Ok(mut current) = self.policy.lock() {
+            *current = policy;
+        }
+    }
+
+    pub fn policy(&self) -> NetworkPolicy {
+        self.policy
+            .lock()
+            .map(|policy| policy.clone())
+            .unwrap_or_else(|_| NetworkPolicy {
+                // A poisoned lock is not permission: fail closed.
+                enabled: false,
+                allowlist: Vec::new(),
+                disabled_sessions: Vec::new(),
+            })
+    }
+
+    /// The Q240 check, before the origin question and before any socket is opened.
+    pub fn policy_status(&self, origin: &str) -> (&'static str, bool) {
+        let policy = self.policy();
+        (policy.status(origin), policy.allows(origin))
     }
 
     /// Fetch one `http(s)` URL after its origin is approved. The whole operation is bounded, so
@@ -280,6 +418,21 @@ impl Egress {
     }
 
     async fn authorize(&self, origin: &str, url: &str) -> Result<(), EgressError> {
+        let policy = self.policy();
+        if !policy.enabled {
+            return Err(EgressError::new(
+                "NETWORK_OFF",
+                format!(
+                    "network access is switched off for this project; {origin} was not contacted"
+                ),
+            ));
+        }
+        if !policy.allows(origin) {
+            return Err(EgressError::new(
+                "NOT_ALLOWLISTED",
+                format!("{origin} is not on this project's network allowlist; nothing was sent"),
+            ));
+        }
         if self.granted(origin) {
             return Ok(());
         }
@@ -309,6 +462,9 @@ impl Egress {
     }
 
     fn granted(&self, origin: &str) -> bool {
+        // A session/always grant is not permission to ignore a later kill switch or a changed
+        // allowlist. `authorize` checks the policy before this, so this only answers whether the
+        // origin question can be skipped.
         self.session
             .lock()
             .map(|session| session.contains(origin))

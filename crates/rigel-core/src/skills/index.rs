@@ -528,6 +528,17 @@ impl SkillIndex {
     /// window. A failed walk does not move `last_sync_at`, so that is one retry per window
     /// rather than a loop against a dead URL.
     pub async fn refresh_stale(&self) -> Result<RefreshReport, SkillsError> {
+        self.refresh_sources(false).await
+    }
+
+    /// Re-sync every source now, ignoring the freshness window. The launch pass uses it, so a
+    /// GitHub shelf that was fresh when the window last closed is still compared with its remote
+    /// on this launch instead of waiting out the stale window.
+    pub async fn refresh_all(&self) -> Result<RefreshReport, SkillsError> {
+        self.refresh_sources(true).await
+    }
+
+    async fn refresh_sources(&self, force: bool) -> Result<RefreshReport, SkillsError> {
         let statuses = self.status().await?;
         let mut report = RefreshReport {
             checked: statuses.len(),
@@ -536,14 +547,15 @@ impl SkillIndex {
         };
 
         for status in statuses {
-            let due = match status.state {
-                SourceState::Ok => false,
-                SourceState::Stale => true,
-                SourceState::Broken => match status.last_sync_at {
-                    None => true,
-                    Some(at) => now_ms() - at >= super::STALE_AFTER_MS,
-                },
-            };
+            let due = force
+                || match status.state {
+                    SourceState::Ok => false,
+                    SourceState::Stale => true,
+                    SourceState::Broken => match status.last_sync_at {
+                        None => true,
+                        Some(at) => now_ms() - at >= super::STALE_AFTER_MS,
+                    },
+                };
             if !due {
                 report.sources.push(SourceRefresh {
                     id: status.id,
@@ -1033,6 +1045,28 @@ impl SkillIndex {
             return Ok(None);
         };
         Ok(Some((text, sha)))
+    }
+
+    /// The current hash even when its blob is missing. The pin review uses this to report a
+    /// changed index without treating a collected body as "not indexed".
+    pub async fn body_sha(&self, id: &str) -> Result<Option<String>, SkillsError> {
+        let row: Option<Option<String>> =
+            sqlx::query_scalar::<_, Option<String>>("SELECT body_sha FROM skills WHERE id = ?")
+                .bind(id)
+                .fetch_optional(self.store.pool())
+                .await?;
+        Ok(row.flatten())
+    }
+
+    /// Read any body ever written to the content-addressed store. A pinned hash is a version
+    /// address, so it is enough to recover the body the session read.
+    pub fn body_at(&self, sha: &str) -> Result<Option<String>, SkillsError> {
+        // A template may carry a hand-edited hash. Do not let `../` turn the version address
+        // into a file read outside the blob directory.
+        if sha.len() != 64 || !sha.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+            return Ok(None);
+        }
+        Ok(self.blobs.get_text(sha)?)
     }
 
     /// Copy one indexed skill into each harness store. The body is the exact indexed

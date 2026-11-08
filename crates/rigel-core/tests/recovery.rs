@@ -175,6 +175,47 @@ async fn resume_closes_a_running_turn_and_keeps_a_clean_tree_active() {
 }
 
 #[tokio::test]
+async fn a_crashed_turn_is_named_and_discard_writes_a_tombstone() {
+    let tmp = tempfile::tempdir().unwrap();
+    let service = SessionService::open(tmp.path()).await.unwrap();
+    let session = service.start(Some("discard"), None).await.unwrap();
+    let agent = service
+        .register_agent(&session.id, "native", Some("worker"))
+        .await
+        .unwrap();
+    let turn = service
+        .append_turn(&agent.id, Some("leave this unfinished"))
+        .await
+        .unwrap();
+
+    let offer = service
+        .recovery_offer(&session.id)
+        .await
+        .unwrap()
+        .expect("the running turn is offered");
+    assert_eq!(offer.turns.len(), 1);
+    assert_eq!(offer.turns[0].id, turn.id, "the offer names the exact turn");
+
+    let discarded = service
+        .discard_turn(&turn.id, "discarded after crash")
+        .await
+        .unwrap();
+    assert_eq!(discarded.status, "cancelled");
+    assert_eq!(discarded.stop_reason.as_deref(), Some("discarded"));
+    let tombstone = service.tombstone(&turn.id).await.unwrap().unwrap();
+    assert_eq!(tombstone.turn_id, turn.id);
+    assert_eq!(tombstone.reason, "discarded after crash");
+    assert!(
+        service.recovery_offer(&session.id).await.unwrap().is_none(),
+        "a tombstoned turn is no longer live"
+    );
+    assert!(
+        service.discard_turn(&turn.id, "again").await.is_err(),
+        "a closed turn cannot be discarded twice"
+    );
+}
+
+#[tokio::test]
 async fn a_tree_that_moved_after_the_checkpoint_needs_a_decision() {
     let tmp = tempfile::tempdir().unwrap();
     std::fs::write(tmp.path().join("notes.txt"), "before\n").unwrap();

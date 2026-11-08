@@ -408,6 +408,8 @@ mod tests {
             spend_micros: 0,
             tokens_in: 0,
             tokens_out: 0,
+            claims_held: 0,
+            claims_stale: 0,
         }
     }
 }

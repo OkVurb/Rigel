@@ -29,6 +29,7 @@
 //! reads live ids rather than a list written down here.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -36,10 +37,11 @@ use futures::StreamExt;
 use serde_json::{Value, json};
 use tokio_util::sync::CancellationToken;
 
+use super::limiter::RateLimiter;
 use super::model::{
     ChatMessage, ChatRequest, Delta, DeltaSink, Model, ModelError, RawUsage, SseDecoder,
-    jitter_delay,
 };
+use super::retry::{self, RetryClass};
 
 pub const DEFAULT_BASE_URL: &str = "https://api.anthropic.com/v1";
 
@@ -63,6 +65,8 @@ pub struct AnthropicModel {
     api_key: String,
     base_url: String,
     max_attempts: u32,
+    /// The process-wide bucket for this door: every instance shares it.
+    limiter: Arc<RateLimiter>,
 }
 
 impl AnthropicModel {
@@ -77,6 +81,7 @@ impl AnthropicModel {
             api_key: api_key.into(),
             base_url: DEFAULT_BASE_URL.to_string(),
             max_attempts: 3,
+            limiter: RateLimiter::shared(),
         }
     }
 
@@ -188,7 +193,7 @@ impl AnthropicModel {
                             + usage.cached_input_tokens;
                         usage.output_tokens = field("output_tokens");
                         emitted = true;
-                        on_delta(Delta::Usage(usage));
+                        on_delta(Delta::Usage(usage.clone()));
                     }
                     Some("content_block_start") => {
                         let index = value.get("index").and_then(Value::as_u64).unwrap_or(0) as u32;
@@ -302,7 +307,7 @@ impl AnthropicModel {
                             .and_then(Value::as_u64)
                             .unwrap_or(0);
                         emitted = true;
-                        on_delta(Delta::Usage(usage));
+                        on_delta(Delta::Usage(usage.clone()));
                     }
                     // `ping` and `message_stop` carry nothing a caller acts on.
                     _ => {}
@@ -338,6 +343,13 @@ impl Model for AnthropicModel {
 
         loop {
             attempt += 1;
+            let permit = self.limiter.acquire("anthropic").await;
+            if permit.waited >= Duration::from_millis(10) {
+                on_delta(Delta::RateLimit {
+                    provider: "anthropic".to_string(),
+                    waited_ms: permit.waited.as_millis() as u64,
+                });
+            }
             let send = self
                 .client
                 .post(format!("{}/messages", self.base_url))
@@ -361,11 +373,23 @@ impl Model for AnthropicModel {
                     let status = response.status().as_u16();
                     let retry_after = retry_after_header(&response);
                     // 429 is the rate limit; 529 is Anthropic's overloaded, and every 5xx is
-                    // worth one more try.
-                    if is_retryable(status) && attempt < self.max_attempts {
-                        let wait = retry_after
-                            .map(Duration::from_secs)
-                            .unwrap_or_else(|| jitter_delay(attempt, 250));
+                    // worth one more try. The success arm returns from `stream_response`, so a
+                    // retry is only possible before the first token.
+                    if let Some(event) = retry::decision(
+                        RetryClass::Chat,
+                        attempt,
+                        self.max_attempts,
+                        Some(status),
+                        false,
+                        false,
+                        retry_after.map(Duration::from_secs),
+                        250,
+                    ) {
+                        let wait = Duration::from_millis(event.delay_ms);
+                        if status == 429 {
+                            self.limiter.penalize("anthropic", wait);
+                        }
+                        on_delta(Delta::Retry(event));
                         tokio::time::sleep(wait).await;
                         continue;
                     }
@@ -380,9 +404,20 @@ impl Model for AnthropicModel {
                     });
                 }
                 Err(error) => {
-                    let retryable = error.is_timeout() || error.is_connect() || error.is_request();
-                    if retryable && attempt < self.max_attempts {
-                        tokio::time::sleep(jitter_delay(attempt, 250)).await;
+                    let transport = error.is_timeout() || error.is_connect() || error.is_request();
+                    if let Some(event) = retry::decision(
+                        RetryClass::Chat,
+                        attempt,
+                        self.max_attempts,
+                        None,
+                        transport,
+                        false,
+                        None,
+                        250,
+                    ) {
+                        let wait = Duration::from_millis(event.delay_ms);
+                        on_delta(Delta::Retry(event));
+                        tokio::time::sleep(wait).await;
                         continue;
                     }
                     return Err(ModelError::Http(error.to_string()));
@@ -462,10 +497,6 @@ fn encode_messages(messages: &[ChatMessage]) -> (Option<String>, Vec<Value>) {
         .collect();
     let system = (!system.is_empty()).then(|| system.join("\n\n"));
     (system, messages)
-}
-
-fn is_retryable(status: u16) -> bool {
-    status == 429 || status >= 500
 }
 
 fn retry_after_header(response: &reqwest::Response) -> Option<u64> {
@@ -764,7 +795,7 @@ mod tests {
         {
             let mut sink = |delta: Delta| {
                 match &delta {
-                    Delta::Usage(raw) => usage = *raw,
+                    Delta::Usage(raw) => usage = raw.clone(),
                     Delta::Finish(reason) => finished = Some(reason.clone()),
                     _ => {}
                 }

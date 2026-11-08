@@ -91,6 +91,26 @@ pub const PROJECT_MIGRATIONS: &[Migration] = &[
         name: "0013_bookmarks",
         sql: include_str!("../../../migrations/project/0013_bookmarks.sql"),
     },
+    Migration {
+        version: 14,
+        name: "0014_incomplete_turns",
+        sql: include_str!("../../../migrations/project/0014_incomplete_turns.sql"),
+    },
+    Migration {
+        version: 15,
+        name: "0015_recovery_and_pause",
+        sql: include_str!("../../../migrations/project/0015_recovery_and_pause.sql"),
+    },
+    Migration {
+        version: 16,
+        name: "0016_plan_tools",
+        sql: include_str!("../../../migrations/project/0016_plan_tools.sql"),
+    },
+    Migration {
+        version: 17,
+        name: "0017_subagent_dag",
+        sql: include_str!("../../../migrations/project/0017_subagent_dag.sql"),
+    },
 ];
 
 /// `%APPDATA%\Rigel\index.db`

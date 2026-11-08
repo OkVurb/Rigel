@@ -19,7 +19,8 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
 use super::deliberation::Deliberation;
-use super::destructive::Finding;
+use super::destructive::{BlastRadius, Finding};
+use super::dry_run::DryRun;
 
 /// How long an approval lasts, as N2 lists them.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -71,9 +72,27 @@ pub struct CommandRequest {
     /// Policy rows the deterministic classifier matched (D32). Empty for an ordinary command;
     /// a non-empty list is what requires deliberation and a snapshot.
     pub destructive: Vec<Finding>,
+    /// Q239: the resolved targets and counts behind those policy rows. Computed once before
+    /// the question and carried to every approval surface; `None` means the command was not
+    /// classified destructive, never that it was approved.
+    pub blast_radius: Option<BlastRadius>,
+    /// The tool's own read-only preview (for example `git clean -ndx`), or an explicit
+    /// `supported: false` when the tool has none. Always `Some` for a destructive command.
+    pub dry_run: Option<DryRun>,
+    /// Q243: scripts named by a skill body loaded in this session and referenced by this
+    /// command. A command grant is not a skill-script grant; both are shown and asked for
+    /// through this same request, so a skill cannot inherit a blanket command approval.
+    pub skill_scripts: Vec<SkillScript>,
     /// The three advisors' one round, when the command is destructive. Advisory: the gate does
     /// not read it, and `None` never means "allowed".
     pub deliberation: Option<Deliberation>,
+}
+
+/// One script a loaded skill names. `path` is project-relative and normalised with `/`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SkillScript {
+    pub skill_id: String,
+    pub path: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -328,6 +347,16 @@ pub struct PendingApproval {
     /// card can point back at the transcript row; a harness call may have no turn.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub turn_id: Option<String>,
+    /// Q246: when silence becomes a refusal, in milliseconds since the epoch. The bus stamps
+    /// this from the wait it was given, so every card counts down to the instant the asker
+    /// actually stops listening. Absent on a file written before Q246; a card then derives the
+    /// same deadline from `requested_at` and the ten-minute rule.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expires_at: Option<i64>,
+    /// 0 for the first question, 1 for the single republish after a timeout. A surface that
+    /// sees the same id again knows the first deadline lapsed rather than that it is a new ask.
+    #[serde(default)]
+    pub attempt: u8,
 }
 
 /// What a surface wrote back. `None` is a rejection, which is also what a timeout means.
@@ -341,6 +370,19 @@ pub struct AnsweredApproval {
     pub skip: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub note: Option<String>,
+}
+
+/// The audit row written when silence refuses a question. It keeps the deadline the human
+/// actually had, so a timeout can be told apart from a click on Deny after the fact.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DeniedApproval {
+    pub id: String,
+    pub key: String,
+    pub kind: String,
+    pub title: String,
+    pub deadline: i64,
+    pub attempt: u8,
+    pub reason: String,
 }
 
 /// The on-disk approval channel. Cheap to clone; every surface points at the same directory.
@@ -367,6 +409,10 @@ impl ApprovalBus {
         self.root.join("answered")
     }
 
+    fn denied_dir(&self) -> PathBuf {
+        self.root.join("denied")
+    }
+
     /// Ask a human. Returns their scope, or an error when nobody answered in `wait`; a caller
     /// must treat an error as a refusal (N2).
     pub async fn ask(
@@ -374,13 +420,34 @@ impl ApprovalBus {
         pending: PendingApproval,
         wait: std::time::Duration,
     ) -> Result<ApprovalScope, String> {
-        match self.ask_answered(pending, wait).await {
-            Ok(answered) => match answered.scope {
-                Some(scope) => Ok(scope),
-                None => Err("the request was rejected".to_string()),
-            },
-            Err(error) => Err(error),
+        self.ask_with_retry(pending, wait, 0).await
+    }
+
+    /// Ask, and after a timeout republish at most once. A timeout is still recorded as a
+    /// denial; the retry only gives the human one more chance to answer, never an approval.
+    pub async fn ask_with_retry(
+        &self,
+        pending: PendingApproval,
+        wait: std::time::Duration,
+        retries: u8,
+    ) -> Result<ApprovalScope, String> {
+        let retries = retries.min(1);
+        let mut last = String::new();
+        for attempt in 0..=retries {
+            let mut request = pending.clone();
+            request.attempt = attempt;
+            if attempt > 0 {
+                request.requested_at = now_ms();
+            }
+            match self.ask_answered(request, wait).await {
+                Ok(answered) => match answered.scope {
+                    Some(scope) => return Ok(scope),
+                    None => return Err("the request was rejected".to_string()),
+                },
+                Err(error) => last = error,
+            }
         }
+        Err(last)
     }
 
     /// Ask a plan question. A skip is only a skip when a surface said so; a timeout, a
@@ -407,6 +474,12 @@ impl ApprovalBus {
         pending: PendingApproval,
         wait: std::time::Duration,
     ) -> Result<AnsweredApproval, String> {
+        // Q246: the deadline is stamped by the surface that waits, not by each card, so a
+        // countdown in the window and the refusal in this loop name the same instant.
+        let pending = PendingApproval {
+            expires_at: Some(pending.requested_at + wait.as_millis() as i64),
+            ..pending
+        };
         self.publish(&pending)?;
         let deadline = std::time::Instant::now() + wait;
         loop {
@@ -418,9 +491,11 @@ impl ApprovalBus {
             if std::time::Instant::now() >= deadline {
                 let _ =
                     std::fs::remove_file(self.pending_dir().join(format!("{}.json", pending.id)));
+                self.record_denial(&pending, "timeout");
                 return Err(format!(
-                    "nobody answered within {}s",
-                    wait.as_secs_f32().round()
+                    "nobody answered within {}s; deadline {}ms",
+                    wait.as_secs_f32().round(),
+                    pending.expires_at.unwrap_or_default()
                 ));
             }
             tokio::time::sleep(std::time::Duration::from_millis(100)).await;
@@ -491,12 +566,54 @@ impl ApprovalBus {
         Ok(())
     }
 
+    fn record_denial(&self, pending: &PendingApproval, reason: &str) {
+        let dir = self.denied_dir();
+        let _ = std::fs::create_dir_all(&dir);
+        let row = DeniedApproval {
+            id: pending.id.clone(),
+            key: pending.key.clone(),
+            kind: pending.kind.clone(),
+            title: pending.title.clone(),
+            deadline: pending.expires_at.unwrap_or_default(),
+            attempt: pending.attempt,
+            reason: reason.to_string(),
+        };
+        if let Ok(text) = serde_json::to_string_pretty(&row) {
+            let _ = std::fs::write(
+                dir.join(format!("{}-{}.json", pending.id, pending.attempt)),
+                text,
+            );
+        }
+    }
+
+    /// Every timeout refusal, oldest deadline first. This is the audit trail behind "silence is
+    /// a no": a rejected click is not here, because a human did answer it.
+    pub fn denials(&self) -> Vec<DeniedApproval> {
+        let Ok(entries) = std::fs::read_dir(self.denied_dir()) else {
+            return Vec::new();
+        };
+        let mut rows = entries
+            .flatten()
+            .filter_map(|entry| std::fs::read_to_string(entry.path()).ok())
+            .filter_map(|text| serde_json::from_str::<DeniedApproval>(&text).ok())
+            .collect::<Vec<_>>();
+        rows.sort_by_key(|row| (row.deadline, row.attempt));
+        rows
+    }
+
     fn take_answer(&self, id: &str) -> Option<AnsweredApproval> {
         let path = self.answered_dir().join(format!("{id}.json"));
         let text = std::fs::read_to_string(&path).ok()?;
         let _ = std::fs::remove_file(path);
         serde_json::from_str(&text).ok()
     }
+}
+
+fn now_ms() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_millis() as i64)
+        .unwrap_or_default()
 }
 
 /// A fresh id that two agents asking at the same moment cannot share.
@@ -522,14 +639,13 @@ impl PendingApproval {
             kind: kind.into(),
             title: title.into(),
             detail: None,
-            requested_at: std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|elapsed| elapsed.as_millis() as i64)
-                .unwrap_or_default(),
+            requested_at: now_ms(),
             project_root: None,
             session_id: None,
             agent_id: None,
             turn_id: None,
+            expires_at: None,
+            attempt: 0,
         }
     }
 
@@ -677,18 +793,73 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn an_unanswered_request_is_a_refusal_and_leaves_nothing_behind() {
+    async fn an_unanswered_request_is_a_refusal_and_leaves_a_denial_with_its_deadline() {
         let dir = tempfile::tempdir().unwrap();
         let bus = ApprovalBus::new(dir.path());
+        let pending = PendingApproval::now("command", "command:rm -rf build", "rm -rf build");
+        let expected_deadline = pending.requested_at + 150;
         let outcome = bus
-            .ask(
-                PendingApproval::now("command", "command:rm -rf build", "rm -rf build"),
-                std::time::Duration::from_millis(150),
-            )
+            .ask(pending.clone(), std::time::Duration::from_millis(150))
             .await;
         assert!(outcome.is_err());
         assert!(bus.pending().is_empty());
         assert!(!dir.path().join("approvals/pending").join("x.json").exists());
+
+        let denials = bus.denials();
+        assert_eq!(denials.len(), 1);
+        assert_eq!(denials[0].id, pending.id);
+        assert_eq!(denials[0].deadline, expected_deadline);
+        assert_eq!(denials[0].attempt, 0);
+        assert_eq!(denials[0].reason, "timeout");
+    }
+
+    #[tokio::test]
+    async fn one_retry_republishes_the_question_and_can_still_be_approved() {
+        let dir = tempfile::tempdir().unwrap();
+        let bus = ApprovalBus::new(dir.path());
+        let pending = PendingApproval::now("command", "command:cargo test", "cargo test");
+        let first_deadline = pending.requested_at + 80;
+        let asker = bus.clone();
+        let handle = tokio::spawn(async move {
+            asker
+                .ask_with_retry(pending, std::time::Duration::from_millis(80), 1)
+                .await
+        });
+
+        // Let the first deadline lapse without answering. The denial is written before the
+        // retry is published, so a surface can show that the first attempt really expired.
+        let mut denied = Vec::new();
+        for _ in 0..60 {
+            denied = bus.denials();
+            if !denied.is_empty() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        assert_eq!(denied.len(), 1);
+        assert_eq!(denied[0].deadline, first_deadline);
+
+        let mut open = Vec::new();
+        for _ in 0..60 {
+            open = bus.pending();
+            if open.iter().any(|pending| pending.attempt == 1) {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        let retry = open
+            .iter()
+            .find(|pending| pending.attempt == 1)
+            .expect("the question is republished once");
+        assert!(retry.expires_at.unwrap() > first_deadline);
+        bus.answer(&retry.id, Some(ApprovalScope::Once)).unwrap();
+
+        assert_eq!(handle.await.unwrap(), Ok(ApprovalScope::Once));
+        assert_eq!(
+            bus.denials().len(),
+            1,
+            "an answer after the retry is not a denial"
+        );
     }
 
     #[tokio::test]
@@ -748,6 +919,45 @@ mod tests {
         assert_eq!(old.session_id, None);
         assert_eq!(old.agent_id, None);
         assert_eq!(old.turn_id, None);
+        assert_eq!(
+            old.expires_at, None,
+            "a file from before Q246 has no deadline"
+        );
+        assert_eq!(old.attempt, 0, "an older file is the first attempt");
+    }
+
+    #[tokio::test]
+    async fn a_question_names_the_instant_silence_refuses_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let bus = ApprovalBus::new(dir.path());
+        let asker = bus.clone();
+        let handle = tokio::spawn(async move {
+            asker
+                .ask(
+                    PendingApproval::now("command", "command:cargo test", "cargo test"),
+                    std::time::Duration::from_secs(600),
+                )
+                .await
+        });
+
+        let mut open = Vec::new();
+        for _ in 0..50 {
+            open = bus.pending();
+            if !open.is_empty() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        assert_eq!(open.len(), 1);
+        let pending = &open[0];
+        assert_eq!(
+            pending.expires_at,
+            Some(pending.requested_at + 600_000),
+            "the card counts down to the asker's own deadline"
+        );
+
+        bus.answer(&pending.id, Some(ApprovalScope::Once)).unwrap();
+        assert_eq!(handle.await.unwrap(), Ok(ApprovalScope::Once));
     }
 
     #[test]

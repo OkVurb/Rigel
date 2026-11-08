@@ -50,6 +50,14 @@ pub struct TemplateAgent {
     pub model: Option<String>,
 }
 
+/// Q270: a skill pin travels with the shape. The body hash is kept, not resolved again on
+/// create, so a template reproduces the exact version the original session read.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TemplateSkill {
+    pub skill_id: String,
+    pub body_sha: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SessionTemplate {
     pub id: String,
@@ -59,6 +67,9 @@ pub struct SessionTemplate {
     pub max_steps: Option<u16>,
     #[serde(default)]
     pub agents: Vec<TemplateAgent>,
+    /// Pinned skill bodies this session should keep. Missing on older template files.
+    #[serde(default)]
+    pub skills: Vec<TemplateSkill>,
     /// Left in the composer, never sent: starting from a template still needs a Send.
     #[serde(default)]
     pub prompt: String,

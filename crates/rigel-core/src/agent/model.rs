@@ -111,7 +111,7 @@ pub struct ChatRequest {
     pub effort: Option<String>,
 }
 
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Default)]
 pub struct RawUsage {
     pub input_tokens: u64,
     pub cached_input_tokens: u64,
@@ -119,6 +119,9 @@ pub struct RawUsage {
     pub reasoning_tokens: u64,
     /// `usage.cost` from the provider, in USD. OpenRouter reports this; most providers do not.
     pub cost_usd: Option<f64>,
+    /// The model the provider says actually served the request. FireRouter reports the routed
+    /// model here; a direct provider usually repeats the requested id.
+    pub served_model: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -132,6 +135,15 @@ pub enum Delta {
         arguments: String,
     },
     Usage(RawUsage),
+    /// A retry the provider is about to make. It is emitted only before the stream has produced
+    /// a token, so the coordinator can record it without risking a duplicated answer.
+    Retry(super::retry::RetryEvent),
+    /// The shared limiter held this attempt. The coordinator records it as a `rate_limit` row
+    /// instead of letting the delay happen silently.
+    RateLimit {
+        provider: String,
+        waited_ms: u64,
+    },
     Finish(String),
 }
 
@@ -175,6 +187,9 @@ pub enum ModelError {
 
     #[error("could not parse the stream: {0}")]
     Parse(String),
+
+    #[error("context estimate {estimated} tokens exceeds the {window}-token window before send")]
+    ContextOverflow { estimated: usize, window: usize },
 
     #[error("the model script has no step left")]
     ScriptExhausted,
@@ -337,9 +352,12 @@ pub fn chat_model_id(model: &str) -> &str {
 
 pub fn usage_from_raw(raw: RawUsage, model: &str) -> Usage {
     let provider_micros = raw.cost_usd.map(usd_to_micros);
-    // Price the id that was actually asked for, so a stored `…:batch` is billed as the model
-    // that served the turn.
-    let estimate = crate::agent::pricing::estimate(chat_model_id(model), &raw);
+    let served_model = raw.served_model.clone();
+    // A router reports the model it actually used. Price that id, not the router id, so a
+    // `firerouter` turn lands on GLM's or Kimi's row. A direct provider usually repeats the
+    // requested id; a stored `…:batch` is still priced as its chat twin.
+    let billing_model = served_model.as_deref().unwrap_or(model);
+    let estimate = crate::agent::pricing::estimate(chat_model_id(billing_model), &raw);
     Usage {
         input_tokens: raw.input_tokens,
         cached_input_tokens: raw.cached_input_tokens,
@@ -347,6 +365,7 @@ pub fn usage_from_raw(raw: RawUsage, model: &str) -> Usage {
         reasoning_tokens: raw.reasoning_tokens,
         cost_micros: provider_micros.unwrap_or(estimate),
         provider_micros,
+        served_model,
         source: if provider_micros.is_some() {
             crate::domain::CostSource::Provider
         } else {
@@ -358,6 +377,25 @@ pub fn usage_from_raw(raw: RawUsage, model: &str) -> Usage {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_router_turn_is_priced_and_recorded_by_the_served_model() {
+        let usage = usage_from_raw(
+            RawUsage {
+                input_tokens: 1_000_000,
+                output_tokens: 1_000_000,
+                served_model: Some("accounts/fireworks/models/glm-5p3-flash".to_string()),
+                ..RawUsage::default()
+            },
+            "firerouter",
+        );
+        assert_eq!(
+            usage.served_model.as_deref(),
+            Some("accounts/fireworks/models/glm-5p3-flash")
+        );
+        assert_eq!(usage.cost_micros, 650_000, "$0.15 in + $0.50 out");
+        assert_eq!(usage.source, crate::domain::CostSource::Estimated);
+    }
 
     #[test]
     fn sse_events_survive_arbitrary_chunk_boundaries() {

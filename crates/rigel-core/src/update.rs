@@ -174,7 +174,7 @@ pub fn settings_path(data_dir: &Path) -> PathBuf {
 pub fn load_settings(data_dir: &Path) -> UpdateSettings {
     std::fs::read_to_string(settings_path(data_dir))
         .ok()
-        .and_then(|text| serde_json::from_str(&text).ok())
+        .and_then(|text| parse_settings(&text).ok())
         .unwrap_or_default()
 }
 
@@ -229,6 +229,12 @@ pub fn verify_manifest(manifest: &UpdateManifest, key: &[u8; 32]) -> Result<(), 
 }
 
 pub fn parse_manifest(text: &str) -> Result<UpdateManifest, UpdateError> {
+    Ok(serde_json::from_str(text)?)
+}
+
+/// Parse the update settings body. Pure, so the fuzz target exercises the same parser the CLI
+/// and the window use.
+pub fn parse_settings(text: &str) -> Result<UpdateSettings, UpdateError> {
     Ok(serde_json::from_str(text)?)
 }
 
@@ -426,12 +432,18 @@ pub fn install_artifact(path: &Path) -> Result<(), UpdateError> {
     }
 }
 
-/// Verify a downloaded artifact against the signed hash.
-pub fn verify_artifact(path: &Path, manifest: &UpdateManifest) -> Result<(), UpdateError> {
+/// Verify a downloaded artifact against either signed hash. A release has a setup executable and
+/// an optional MSI; both hashes are covered by the manifest signature, so either file is accepted.
+pub fn verify_artifact(path: &Path, manifest: &UpdateManifest) -> Result<String, UpdateError> {
     let bytes = std::fs::read(path)?;
     let found = format!("{:x}", Sha256::digest(&bytes));
-    if found.eq_ignore_ascii_case(&manifest.sha256) {
-        Ok(())
+    let matches = found.eq_ignore_ascii_case(&manifest.sha256)
+        || manifest
+            .msi_sha256
+            .as_deref()
+            .is_some_and(|sha| found.eq_ignore_ascii_case(sha));
+    if matches {
+        Ok(found)
     } else {
         Err(UpdateError::HashMismatch {
             expected: manifest.sha256.clone(),
@@ -736,6 +748,28 @@ mod tests {
             }
             other => panic!("expected a hash mismatch, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn an_msi_artifact_is_checked_against_its_own_signed_hash() {
+        let dir = tempfile::tempdir().unwrap();
+        let artifact = dir.path().join("rigel.msi");
+        std::fs::write(&artifact, b"the MSI bytes").unwrap();
+        let msi_sha = format!("{:x}", Sha256::digest(b"the MSI bytes"));
+        let (mut manifest, _key) = signed_manifest(7, "0.2.0", &"a".repeat(64));
+        manifest.msi_url = Some("https://example.test/rigel.msi".into());
+        manifest.msi_sha256 = Some(msi_sha.clone());
+
+        assert_eq!(
+            verify_artifact(&artifact, &manifest).expect("matching MSI bytes"),
+            msi_sha
+        );
+
+        std::fs::write(&artifact, b"a different installer").unwrap();
+        assert!(matches!(
+            verify_artifact(&artifact, &manifest),
+            Err(UpdateError::HashMismatch { .. })
+        ));
     }
 
     #[test]

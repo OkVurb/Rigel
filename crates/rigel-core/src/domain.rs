@@ -24,7 +24,7 @@ pub enum CostSource {
     Estimated,
 }
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Usage {
     #[serde(default)]
     pub input_tokens: u64,
@@ -40,6 +40,10 @@ pub struct Usage {
     /// What the provider said, when it said anything at all.
     #[serde(default)]
     pub provider_micros: Option<i64>,
+    /// The concrete model the provider reports having served. FireRouter can route one request
+    /// to a model other than the router id, and that is the id pricing and the UI must show.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub served_model: Option<String>,
     #[serde(default)]
     pub source: CostSource,
 }
@@ -63,6 +67,13 @@ impl Usage {
             (Some(a), Some(b)) => Some(a + b),
             (a, b) => a.or(b),
         };
+        // Aggregate only names one model while every part agrees; a mixed total must not claim
+        // the first model served the whole turn.
+        match (&self.served_model, &other.served_model) {
+            (None, model) => self.served_model = model.clone(),
+            (Some(mine), Some(theirs)) if mine != theirs => self.served_model = None,
+            _ => {}
+        }
         // A total is only as honest as its weakest part.
         if other.source == CostSource::Estimated {
             self.source = CostSource::Estimated;

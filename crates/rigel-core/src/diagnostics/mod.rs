@@ -5,6 +5,8 @@
 //! beside the app data so it can be copied into an issue by hand. The crash log follows the same
 //! rules: local, and redacted before it is written.
 
+pub mod ring;
+
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -12,7 +14,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde_json::Value;
 
-use crate::credentials::{self, PROVIDERS, Secret};
+pub use crate::credentials::Secret;
+use crate::credentials::{self, PROVIDERS};
 use crate::session::TurnTranscript;
 
 const CRASH_LOG: &str = "crash.log";
@@ -29,16 +32,19 @@ pub fn secrets() -> Vec<Secret> {
         .collect()
 }
 
-/// Replace every known secret, longest first so one secret cannot hide inside another.
+/// Replace every known secret, longest first so one secret cannot hide inside another. Known
+/// credential shapes are then removed too (Q241), so a token Rigel never resolved — one a
+/// command printed, or a line in an old log — cannot ride along in the bundle or crash record.
 pub fn redact_text(text: &str, secrets: &[Secret]) -> String {
     let mut ordered: Vec<&str> = secrets.iter().map(Secret::expose).collect();
     ordered.sort_by_key(|secret| std::cmp::Reverse(secret.len()));
-    ordered
+    let out = ordered
         .into_iter()
         .filter(|secret| !secret.is_empty())
         .fold(text.to_string(), |out, secret| {
             out.replace(secret, "<redacted>")
-        })
+        });
+    crate::redaction::redact_text(&out)
 }
 
 fn redact_value(value: &Value, secrets: &[Secret]) -> Value {
@@ -167,11 +173,11 @@ pub fn append_crash(data_dir: &Path, message: &str) {
         let _ = fs::rename(&path, data_dir.join("crash.old.log"));
     }
     let secrets = secrets();
-    let body = format!(
-        "--- {} ---\n{}\n\n",
-        stamp(),
-        redact_text(message, &secrets)
-    );
+    let redacted = redact_text(message, &secrets);
+    // The ring is the in-memory tail a bundle can show without rereading the file; it redacts
+    // again on the way in, so the text stored here never holds a key even if this copy changes.
+    ring::shared_record(ring::Level::Error, Some("crash"), &redacted);
+    let body = format!("--- {} ---\n{}\n\n", stamp(), redacted);
     let _ = fs::OpenOptions::new()
         .create(true)
         .append(true)

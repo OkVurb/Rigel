@@ -2,7 +2,7 @@
 
 use std::path::Path;
 
-use rigel_core::{MigrateError, PROJECT_MIGRATIONS, StorageError, Store, apply};
+use rigel_core::{INDEX_MIGRATIONS, MigrateError, PROJECT_MIGRATIONS, StorageError, Store, apply};
 use tempfile::TempDir;
 
 async fn open_project(root: &Path) -> Store {
@@ -385,4 +385,155 @@ async fn widening_the_harness_check_keeps_existing_rows() {
         refused.is_err(),
         "the rebuilt CHECK still guards the harness column"
     );
+}
+
+/// 0014 rebuilds `turns` to admit `incomplete`. The drop would cascade into `items` if the
+/// runner left foreign keys on, so this seeds a turn and its transcript row, migrates, and
+/// asserts both survived and that only the new status was added.
+#[tokio::test]
+async fn widening_the_turn_status_check_keeps_the_transcript() {
+    let tmp = TempDir::new().unwrap();
+    let path = tmp.path().join(".rigel").join("rigel.db");
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+
+    let before = &PROJECT_MIGRATIONS[..PROJECT_MIGRATIONS.len() - 1];
+    let store = Store::open(&path, before).await.unwrap();
+    for statement in [
+        "INSERT INTO sessions (id, project_root, status, created_at) VALUES ('s1', '.', 'active', 0)",
+        "INSERT INTO agents (id, session_id, harness, status, started_at) VALUES ('a1', 's1', 'native', 'idle', 0)",
+        "INSERT INTO turns (id, agent_id, seq, status, prompt, started_at, completed_at, usage_json, stop_reason, parent_turn_id) VALUES ('t1', 'a1', 1, 'completed', 'fix it', 0, 1, '{\"cost_micros\":7}', 'completed', NULL)",
+        "INSERT INTO items (id, turn_id, seq, kind, status, body_json, raw_json, created_at) VALUES ('i1', 't1', 1, 'message', 'complete', '{}', '{}', 0)",
+    ] {
+        sqlx::query(statement).execute(store.pool()).await.unwrap();
+    }
+    store.pool().close().await;
+
+    let store = Store::open(&path, PROJECT_MIGRATIONS).await.unwrap();
+    let turn: (String, Option<String>, Option<String>) =
+        sqlx::query_as("SELECT status, stop_reason, usage_json FROM turns WHERE id = 't1'")
+            .fetch_one(store.pool())
+            .await
+            .expect("the turn survives the rebuild");
+    assert_eq!(turn.0, "completed");
+    assert_eq!(turn.1.as_deref(), Some("completed"));
+    assert_eq!(turn.2.as_deref(), Some("{\"cost_micros\":7}"));
+
+    let items: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM items WHERE turn_id = 't1'")
+        .fetch_one(store.pool())
+        .await
+        .unwrap();
+    assert_eq!(items, 1, "the drop must not cascade into the transcript");
+
+    sqlx::query(
+        "INSERT INTO turns (id, agent_id, seq, status, started_at) VALUES ('t2', 'a1', 2, 'incomplete', 0)",
+    )
+    .execute(store.pool())
+    .await
+    .expect("incomplete is accepted after 0014");
+
+    let refused = sqlx::query(
+        "INSERT INTO turns (id, agent_id, seq, status, started_at) VALUES ('t3', 'a1', 3, 'done-ish', 0)",
+    )
+    .execute(store.pool())
+    .await;
+    assert!(
+        refused.is_err(),
+        "the rebuilt CHECK still guards the status column"
+    );
+}
+
+/// Item 2: a database at any historical prefix must upgrade to the current schema with its rows
+/// intact. Every prefix is rehearsed, not just the one a hand-written fixture happens to name.
+#[tokio::test]
+async fn every_project_prefix_upgrades_with_its_rows_intact() {
+    let expected: Vec<(i64,)> = PROJECT_MIGRATIONS
+        .iter()
+        .map(|migration| (migration.version,))
+        .collect();
+
+    for boundary in 1..=PROJECT_MIGRATIONS.len() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join(".rigel").join("rigel.db");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+
+        let at = Store::open(&path, &PROJECT_MIGRATIONS[..boundary])
+            .await
+            .unwrap_or_else(|error| panic!("prefix {boundary} did not open: {error}"));
+        for statement in [
+            "INSERT INTO sessions (id, project_root, status, created_at) VALUES ('s1', '.', 'active', 0)",
+            "INSERT INTO agents (id, session_id, harness, status, started_at) VALUES ('a1', 's1', 'native', 'idle', 0)",
+        ] {
+            sqlx::query(statement).execute(at.pool()).await.unwrap();
+        }
+        at.pool().close().await;
+
+        let upgraded = Store::open(&path, PROJECT_MIGRATIONS)
+            .await
+            .unwrap_or_else(|error| panic!("prefix {boundary} did not upgrade: {error}"));
+        let versions: Vec<(i64,)> =
+            sqlx::query_as("SELECT version FROM schema_migrations ORDER BY version")
+                .fetch_all(upgraded.pool())
+                .await
+                .unwrap();
+        assert_eq!(
+            versions, expected,
+            "a database at prefix {boundary} did not reach every later migration"
+        );
+        println!("project prefix {boundary} -> {versions:?}");
+
+        let sessions: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM sessions")
+            .fetch_one(upgraded.pool())
+            .await
+            .unwrap();
+        let agents: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM agents")
+            .fetch_one(upgraded.pool())
+            .await
+            .unwrap();
+        assert_eq!(
+            (sessions, agents),
+            (1, 1),
+            "prefix {boundary} lost the rows it started with"
+        );
+
+        let again = apply(upgraded.pool(), PROJECT_MIGRATIONS).await.unwrap();
+        assert!(
+            again.is_empty(),
+            "prefix {boundary} left work for a second open"
+        );
+        upgraded.pool().close().await;
+    }
+}
+
+/// The same rehearsal for the index database, whose migrations are a separate list.
+#[tokio::test]
+async fn every_index_prefix_upgrades_to_the_current_schema() {
+    let expected: Vec<(i64,)> = INDEX_MIGRATIONS
+        .iter()
+        .map(|migration| (migration.version,))
+        .collect();
+
+    for boundary in 1..=INDEX_MIGRATIONS.len() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("index.db");
+
+        let at = Store::open(&path, &INDEX_MIGRATIONS[..boundary])
+            .await
+            .unwrap_or_else(|error| panic!("index prefix {boundary} did not open: {error}"));
+        at.pool().close().await;
+
+        let upgraded = Store::open(&path, INDEX_MIGRATIONS)
+            .await
+            .unwrap_or_else(|error| panic!("index prefix {boundary} did not upgrade: {error}"));
+        let versions: Vec<(i64,)> =
+            sqlx::query_as("SELECT version FROM schema_migrations ORDER BY version")
+                .fetch_all(upgraded.pool())
+                .await
+                .unwrap();
+        assert_eq!(
+            versions, expected,
+            "an index at prefix {boundary} did not reach every later migration"
+        );
+        println!("index prefix {boundary} -> {versions:?}");
+        upgraded.pool().close().await;
+    }
 }

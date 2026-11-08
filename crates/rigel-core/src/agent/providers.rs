@@ -27,7 +27,7 @@ use std::sync::Arc;
 use crate::credentials::{self, CredentialStore};
 
 use super::model::Model;
-use super::{anthropic, gemini, omniroute, openrouter, vertex};
+use super::{anthropic, custom, gemini, local, omniroute, openrouter, rigel, vertex};
 
 /// Where a provider's `/chat/completions` lives.
 pub enum Endpoint {
@@ -37,6 +37,8 @@ pub enum Endpoint {
     AiStudio,
     /// Vertex AI: the base carries the project and the location.
     Vertex,
+    /// A user's own OpenAI-compatible origin, read from the keychain record (roadmap 28).
+    Custom,
     /// A fixed base URL, with `env` as the variable that overrides it.
     Fixed {
         base: &'static str,
@@ -73,6 +75,57 @@ pub struct ProviderSpec {
 }
 
 pub const PROVIDERS: &[ProviderSpec] = &[
+    ProviderSpec {
+        id: credentials::CUSTOM,
+        name: "Custom (OpenAI-compatible)",
+        endpoint: Endpoint::Custom,
+        // The door's own probe lists the ids; there is nothing safe to assume.
+        default_model: None,
+        usage_request: false,
+        lists_models: true,
+        access_token: false,
+        gateway: true,
+        namespace: &[],
+        hint: "Your own base URL · headers stay in the keychain",
+        key_url: None,
+        headers: &[],
+    },
+    ProviderSpec {
+        id: local::OLLAMA,
+        name: "Ollama (local)",
+        endpoint: Endpoint::Fixed {
+            base: local::OLLAMA_BASE_URL,
+            env: "RIGEL_OLLAMA_BASE_URL",
+        },
+        // The roster names the installed models; guessing one would send a turn to a model the
+        // user does not have.
+        default_model: None,
+        usage_request: false,
+        lists_models: true,
+        access_token: false,
+        gateway: true,
+        namespace: &[],
+        hint: "This machine · no key · Ollama on 11434",
+        key_url: None,
+        headers: &[],
+    },
+    ProviderSpec {
+        id: local::LLAMAFILE,
+        name: "llamafile (local)",
+        endpoint: Endpoint::Fixed {
+            base: local::LLAMAFILE_BASE_URL,
+            env: "RIGEL_LLAMAFILE_BASE_URL",
+        },
+        default_model: None,
+        usage_request: false,
+        lists_models: true,
+        access_token: false,
+        gateway: true,
+        namespace: &[],
+        hint: "This machine · no key · llamafile on 8080",
+        key_url: None,
+        headers: &[],
+    },
     ProviderSpec {
         id: credentials::OMNIROUTE,
         name: "OmniRoute",
@@ -169,6 +222,25 @@ pub const PROVIDERS: &[ProviderSpec] = &[
         namespace: &["gpt", "o1", "o3", "o4", "chatgpt"],
         hint: "Direct · the same key Codex uses off the router",
         key_url: Some("https://platform.openai.com/api-keys"),
+        headers: &[],
+    },
+    ProviderSpec {
+        id: credentials::RIGEL,
+        name: "Rigel",
+        endpoint: Endpoint::Fixed {
+            base: rigel::DEFAULT_BASE_URL,
+            env: "RIGEL_RELAY_BASE_URL",
+        },
+        // The remote agent has one identity, not a roster: the relay answers under this id.
+        default_model: Some(rigel::DEFAULT_MODEL),
+        usage_request: false,
+        // There is no `/models` on the relay; the default row above is the whole catalogue.
+        lists_models: false,
+        access_token: false,
+        gateway: false,
+        namespace: &["rigel"],
+        hint: "The remote agent · over the askrigel relay",
+        key_url: None,
         headers: &[],
     },
     ProviderSpec {
@@ -293,7 +365,7 @@ pub const PROVIDERS: &[ProviderSpec] = &[
         access_token: false,
         gateway: false,
         namespace: &[],
-        hint: "Fireworks' inference endpoint",
+        hint: "Fireworks inference · FireRouter can use stored Anthropic/OpenAI keys",
         key_url: Some("https://docs.fireworks.ai/getting-started/quickstart"),
         headers: &[],
     },
@@ -359,19 +431,45 @@ pub fn is_model(spec: &ProviderSpec, model: &str) -> bool {
 /// provider, otherwise the provider's own default — `""` when the picker has not chosen one yet,
 /// which a turn reports rather than sending anyway.
 pub fn configured_model(spec: &ProviderSpec, saved: &str) -> String {
-    if is_model(spec, saved) {
-        return saved.trim().to_string();
+    sendable(spec, saved).unwrap_or_else(|| spec.default_model.unwrap_or_default().to_string())
+}
+
+/// Whether this door is keyed. A local door is not, and its empty credential is a fact rather
+/// than a missing key.
+pub fn keyless(id: &str) -> bool {
+    local::is_local(id)
+}
+
+/// Whether this door holds what it needs. The remote agent presents the relay credential, which
+/// is stored under its own entry, so `present_in(store, id)` alone would hide the door.
+pub fn present(store: &dyn CredentialStore, spec: &ProviderSpec) -> bool {
+    if spec.id == credentials::RIGEL {
+        return credentials::present_in(store, credentials::RELAY);
     }
-    // Vertex needs the publisher prefix. A picker that hands over the AI Studio name
-    // ("gemini-3.5-flash") must not be answered with a *different* model: prefix it and send
-    // what was chosen, so a 404 names the model the user asked for rather than the default.
+    credentials::present_in(store, spec.id)
+}
+
+/// The exact id this door accepts for `model`, or `None` when it cannot send it at all.
+///
+/// The one rewrite is Vertex's: its picker shows the AI Studio name (`gemini-3.5-flash`) while
+/// the endpoint needs the publisher prefix (`google/gemini-3.5-flash`). That is the same model
+/// under its other name, not a substitution. Every other mismatch is `None`, and the routing
+/// layer turns it into an error rather than a quiet default.
+pub fn sendable(spec: &ProviderSpec, model: &str) -> Option<String> {
+    let model = model.trim();
+    if model.is_empty() {
+        return None;
+    }
+    if is_model(spec, model) {
+        return Some(model.to_string());
+    }
     if matches!(spec.endpoint, Endpoint::Vertex) {
-        let bare = saved.trim();
+        let bare = model;
         if bare.to_ascii_lowercase().starts_with("gemini") {
-            return format!("google/{bare}");
+            return Some(format!("google/{bare}"));
         }
     }
-    spec.default_model.unwrap_or_default().to_string()
+    None
 }
 
 pub fn base_url(spec: &ProviderSpec) -> Result<String, String> {
@@ -379,6 +477,12 @@ pub fn base_url(spec: &ProviderSpec) -> Result<String, String> {
         Endpoint::Router => Ok(omniroute::base_url()),
         Endpoint::AiStudio => Ok(gemini::base_url()),
         Endpoint::Vertex => vertex::base_url(),
+        Endpoint::Custom => custom::load()?
+            .map(|door| door.base_url.trim_end_matches('/').to_string())
+            .ok_or_else(|| {
+                "no custom door is saved; add its base URL and header in Settings → Providers"
+                    .to_string()
+            }),
         Endpoint::Fixed { base, env } => Ok(non_empty(env).unwrap_or_else(|| base.to_string())),
     }
 }
@@ -388,18 +492,156 @@ pub fn models_url(spec: &ProviderSpec) -> Result<String, String> {
     Ok(format!("{}/models", base_url(spec)?))
 }
 
+/// An OpenAI-compatible door a helper process (the chat room's API agent) can call directly.
+/// The key travels only to the child's environment; it is never written to a config file.
+#[derive(Clone)]
+pub struct CompatibleDoor {
+    pub base_url: String,
+    pub api_key: Option<String>,
+}
+
+impl std::fmt::Debug for CompatibleDoor {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CompatibleDoor")
+            .field("base_url", &self.base_url)
+            .field("api_key", &self.api_key.as_ref().map(|_| "[redacted]"))
+            .finish()
+    }
+}
+
+/// Resolve the base URL and key for a door that speaks `POST {base}/chat/completions`. Returns
+/// `None` for doors this contract cannot serve (Anthropic's Messages API, Vertex's OAuth base,
+/// and a custom door whose headers live in its own record). A local router is started first, the
+/// same way a native turn starts it.
+pub async fn compatible_door(
+    provider: &str,
+    store: &dyn CredentialStore,
+) -> Result<Option<CompatibleDoor>, String> {
+    let spec = find(provider).ok_or_else(|| unknown_provider(provider))?;
+    if spec.id == credentials::ANTHROPIC
+        || matches!(
+            spec.endpoint,
+            Endpoint::AiStudio | Endpoint::Vertex | Endpoint::Custom
+        )
+    {
+        return Ok(None);
+    }
+    if matches!(spec.endpoint, Endpoint::Router) {
+        omniroute::ensure_server().await?;
+    }
+    let key = credential(spec, store).await?;
+    let base_url = base_url(spec)?;
+    Ok(Some(CompatibleDoor {
+        base_url,
+        api_key: (!key.is_empty()).then_some(key),
+    }))
+}
+
 /// The credential, resolved for this provider. Vertex is the one row that does not take a
 /// key: its token, its project and its location each have their own rule.
 pub async fn credential(
     spec: &ProviderSpec,
     store: &dyn CredentialStore,
 ) -> Result<String, String> {
+    // The remote agent has no key of its own: it presents Rigel's relay credential, which lives
+    // under its own entry so the room bridge and this door cannot drift apart.
+    if spec.id == credentials::RIGEL {
+        return credentials::get_from(store, credentials::RELAY)
+            .map(|secret| secret.expose().to_string())
+            .map_err(|error| format!("{error}. {}", key_help(spec)));
+    }
     if matches!(spec.endpoint, Endpoint::Vertex) {
         return vertex::resolve_token(store).await;
     }
-    credentials::get_from(store, spec.id)
+    // A local door is keyless: there is no secret to unlock a server on this machine.
+    if local::is_local(spec.id) {
+        return Ok(String::new());
+    }
+    // A custom door carries its credential in its configured headers, not in a bearer key.
+    if spec.id == credentials::CUSTOM {
+        return Ok(String::new());
+    }
+    let key = credentials::get_from(store, spec.id)
         .map(|secret| secret.expose().to_string())
-        .map_err(|error| format!("{error}. {}", key_help(spec)))
+        .map_err(|error| format!("{error}. {}", key_help(spec)))?;
+    // A wrong-shaped key produces a provider 401 that reads like a routing bug. Name the
+    // mismatch before the request, with the same remedy the missing-key path gives.
+    check_shape(spec, &key).map_err(|error| format!("{error} {}", key_help(spec)))?;
+    Ok(key)
+}
+
+/// The credential families whose prefixes the vendors document and whose values cannot belong
+/// to another vendor. Deliberately short: `sk-` alone is shared by several vendors, so it is not
+/// a family here.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum KeyFamily {
+    Anthropic,
+    OpenRouter,
+    Groq,
+    Xai,
+    GoogleAiStudio,
+    VertexToken,
+}
+
+impl KeyFamily {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Anthropic => "an Anthropic key (`sk-ant-…`)",
+            Self::OpenRouter => "an OpenRouter key (`sk-or-…`)",
+            Self::Groq => "a Groq key (`gsk_…`)",
+            Self::Xai => "an xAI key (`xai-…`)",
+            Self::GoogleAiStudio => "a Google AI Studio key (`AIza…`)",
+            Self::VertexToken => "a Vertex OAuth token (`ya29.…`)",
+        }
+    }
+}
+
+/// The family a value unmistakably belongs to, if any. Everything else is unknown, which is a
+/// state the caller allows: a vendor can add a prefix, and the endpoint is the only authority on
+/// its own token.
+pub fn family_of(value: &str) -> Option<KeyFamily> {
+    let value = value.trim();
+    [
+        (KeyFamily::Anthropic, "sk-ant-"),
+        (KeyFamily::OpenRouter, "sk-or-"),
+        (KeyFamily::Groq, "gsk_"),
+        (KeyFamily::Xai, "xai-"),
+        (KeyFamily::GoogleAiStudio, "AIza"),
+        (KeyFamily::VertexToken, "ya29."),
+    ]
+    .into_iter()
+    .find(|(_, prefix)| value.starts_with(prefix))
+    .map(|(family, _)| family)
+}
+
+/// The family a provider's own console issues, where the vendor documents the prefix.
+fn documented_family(spec: &ProviderSpec) -> Option<KeyFamily> {
+    match spec.id {
+        credentials::ANTHROPIC => Some(KeyFamily::Anthropic),
+        credentials::OPENROUTER => Some(KeyFamily::OpenRouter),
+        credentials::GROQ => Some(KeyFamily::Groq),
+        credentials::XAI => Some(KeyFamily::Xai),
+        credentials::GEMINI => Some(KeyFamily::GoogleAiStudio),
+        credentials::VERTEX => Some(KeyFamily::VertexToken),
+        _ => None,
+    }
+}
+
+/// Refuse a credential that is unmistakably another vendor's. An unrecognised shape is allowed,
+/// so a new prefix is never a false rejection; only a documented mismatch is refused.
+pub fn check_shape(spec: &ProviderSpec, value: &str) -> Result<(), String> {
+    let Some(found) = family_of(value) else {
+        return Ok(());
+    };
+    if documented_family(spec) == Some(found) {
+        return Ok(());
+    }
+    Err(format!(
+        "the stored `{}` credential looks like {}; {} does not accept it.",
+        spec.id,
+        found.label(),
+        spec.name
+    ))
 }
 /// One sentence naming every way to give a provider a credential, and where one comes from.
 pub fn key_help(spec: &ProviderSpec) -> String {
@@ -419,8 +661,31 @@ pub fn key_help(spec: &ProviderSpec) -> String {
     }
 }
 
+/// FireRouter accepts the user's Anthropic and OpenAI credentials for closed models. The names
+/// are Fireworks' documented headers; only a router call receives them.
+fn fireworks_router_headers(store: &dyn CredentialStore) -> Vec<(String, String)> {
+    let mut headers = Vec::new();
+    if let Ok(key) = credentials::get_from(store, credentials::ANTHROPIC) {
+        headers.push(("x-anthropic-api-key".to_string(), key.expose().to_string()));
+    }
+    if let Ok(key) = credentials::get_from(store, credentials::OPENAI) {
+        headers.push(("x-openai-api-key".to_string(), key.expose().to_string()));
+    }
+    headers
+}
+
 /// Resolve a provider into the model a turn will use.
 pub async fn build(id: &str, store: &dyn CredentialStore) -> Result<Arc<dyn Model>, String> {
+    build_with_policy(id, store, None).await
+}
+
+/// [`build`], with the project's OpenRouter routing preferences (roadmap 26). Only the OpenRouter
+/// row reads them; every other door ignores the policy rather than having it rewritten for it.
+pub async fn build_with_policy(
+    id: &str,
+    store: &dyn CredentialStore,
+    policy: Option<openrouter::RoutingPolicy>,
+) -> Result<Arc<dyn Model>, String> {
     let spec = find(id).ok_or_else(|| unknown_provider(id))?;
     if matches!(spec.endpoint, Endpoint::Router) {
         // A local router that is down is a process to launch, not a configuration error.
@@ -430,6 +695,19 @@ pub async fn build(id: &str, store: &dyn CredentialStore) -> Result<Arc<dyn Mode
     // URL is what every other adapter's failure looks like.
     let key = credential(spec, store).await?;
     let base = base_url(spec)?;
+    // The remote agent speaks the relay protocol, not the OpenAI contract.
+    if spec.id == credentials::RIGEL {
+        return Ok(Arc::new(rigel::RigelModel::new(key, base)));
+    }
+    // A custom door is one saved record: its headers, its base and its model ids all come from
+    // the same keychain entry, so a turn cannot use half of an older configuration.
+    if spec.id == credentials::CUSTOM {
+        let door = custom::load_from(store)?.ok_or_else(|| {
+            "no custom door is saved; add its base URL and header in Settings → Providers"
+                .to_string()
+        })?;
+        return Ok(Arc::new(door.model()));
+    }
     // One row is not an OpenAI-compatible door: the Messages API has its own request, its own
     // event stream and its own version header.
     if spec.id == credentials::ANTHROPIC {
@@ -437,11 +715,30 @@ pub async fn build(id: &str, store: &dyn CredentialStore) -> Result<Arc<dyn Mode
             key, base,
         )));
     }
+    // Vertex is the one door whose credential expires while the app is open. The model owns
+    // the token cache so a mid-turn 401 is answered by exactly one refresh and one retry.
+    if matches!(spec.endpoint, Endpoint::Vertex) {
+        return Ok(Arc::new(vertex::RefreshingModel::new(key, base)));
+    }
     let model = openrouter::OpenRouterModel::with_base_url(key, base).with_provider(spec.id);
     let model = if spec.usage_request {
         model
     } else {
         model.without_usage_request()
+    };
+    let model = match policy {
+        Some(policy) if !policy.is_default() => model.with_policy(policy),
+        _ => model,
+    };
+    let model = if spec.id == credentials::FIREWORKS {
+        let headers = fireworks_router_headers(store);
+        if headers.is_empty() {
+            model
+        } else {
+            model.with_conditional_headers("firerouter", headers)
+        }
+    } else {
+        model
     };
     Ok(Arc::new(model))
 }
@@ -477,7 +774,7 @@ mod tests {
             assert!(!spec.name.is_empty(), "{} has no name", spec.id);
             assert!(!spec.hint.is_empty(), "{} has no hint", spec.id);
             assert!(
-                credentials::PROVIDERS.contains(&spec.id),
+                credentials::PROVIDERS.contains(&spec.id) || spec.id == credentials::RIGEL,
                 "{} is not in the keychain list",
                 spec.id
             );
@@ -646,6 +943,27 @@ mod tests {
         assert!(error.contains("unknown provider"), "{error}");
     }
 
+    #[test]
+    fn firerouter_headers_come_from_the_existing_provider_credentials() {
+        let store = MemoryCredentialStore::new();
+        store.insert(credentials::ANTHROPIC, "sk-ant-test");
+        store.insert(credentials::OPENAI, "sk-openai-test");
+        let headers = fireworks_router_headers(&store);
+        assert_eq!(
+            headers,
+            vec![
+                ("x-anthropic-api-key".to_string(), "sk-ant-test".to_string()),
+                ("x-openai-api-key".to_string(), "sk-openai-test".to_string()),
+            ]
+        );
+
+        let only_fireworks = MemoryCredentialStore::with(credentials::FIREWORKS, "fw-test");
+        assert!(
+            fireworks_router_headers(&only_fireworks).is_empty(),
+            "no provider key means FireRouter stays open-model only"
+        );
+    }
+
     #[tokio::test]
     async fn a_stored_key_builds_the_model_for_that_provider() {
         let store = MemoryCredentialStore::with(credentials::GROQ, "gsk-test");
@@ -659,5 +977,130 @@ mod tests {
         let store = MemoryCredentialStore::with(credentials::ANTHROPIC, "sk-ant-test");
         let model = build("anthropic", &store).await.unwrap();
         assert_eq!(model.id(), "anthropic");
+    }
+
+    #[test]
+    fn a_key_from_another_vendor_is_refused_with_both_names() {
+        let cases = [
+            (
+                credentials::GROQ,
+                "sk-ant-api03-AbCdEfGhIjKlMnOpQrStUv",
+                "Anthropic",
+            ),
+            (
+                credentials::ANTHROPIC,
+                "gsk_AbCdEfGhIjKlMnOpQrStUvWxYz012345",
+                "Groq",
+            ),
+            (
+                credentials::OPENROUTER,
+                "AIzaSyA1234567890abcdefghijklmnopqrstuv",
+                "Google AI Studio",
+            ),
+            (
+                credentials::XAI,
+                "sk-or-v1-AbCdEfGhIjKlMnOpQrStUvWxYz",
+                "OpenRouter",
+            ),
+            (
+                credentials::GEMINI,
+                "xai-AbCdEfGhIjKlMnOpQrStUvWxYz012345",
+                "xAI",
+            ),
+        ];
+        for (id, key, expected) in cases {
+            let spec = spec(id);
+            let error = check_shape(spec, key)
+                .expect_err("a key from another vendor must be refused before the request");
+            assert!(error.contains(expected), "{id}: {error}");
+            assert!(error.contains(spec.name), "{id}: {error}");
+        }
+    }
+
+    #[test]
+    fn every_wrong_shape_names_the_provider_the_family_and_the_remedy() {
+        let spec = spec(credentials::GROQ);
+        let error = check_shape(spec, "sk-ant-api03-AbCdEfGhIjKlMnOpQrStUv")
+            .expect_err("Groq cannot use an Anthropic key");
+        assert!(error.contains("`groq`"), "{error}");
+        assert!(error.contains("Anthropic"), "{error}");
+        assert!(error.contains("Groq"), "{error}");
+    }
+
+    #[test]
+    fn an_unrecognised_shape_is_allowed_because_the_endpoint_judges_it() {
+        let accepted = [
+            (credentials::GROQ, "gsk-test"),
+            (credentials::OPENAI, "sk-proj-AbCdEfGhIjKlMnOp"),
+            (credentials::DEEPSEEK, "sk-AbCdEfGhIjKlMnOpQrStUvWx"),
+            (credentials::MISTRAL, "opaque-mistral-test-value"),
+            (credentials::TOGETHER, "0123456789abcdef0123456789abcdef"),
+        ];
+        for (id, key) in accepted {
+            assert!(
+                check_shape(spec(id), key).is_ok(),
+                "{id} refused an unrecognised shape"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn a_wrong_shaped_stored_key_is_named_before_the_request() {
+        let store =
+            MemoryCredentialStore::with(credentials::GROQ, "sk-ant-api03-AbCdEfGhIjKlMnOpQrStUv");
+        let error = build_error("groq", &store).await;
+        assert!(error.contains("does not accept"), "{error}");
+        assert!(error.contains("Anthropic"), "{error}");
+        assert!(error.contains("https://console.groq.com"), "{error}");
+    }
+
+    /// Done-when for item 24: every provider has an accept, a wrong-vendor and an unknown row.
+    /// A provider without a documented prefix accepts an opaque value and still refuses every
+    /// family it does not own; a provider with one accepts only its own family.
+    #[test]
+    fn every_provider_has_accept_wrong_and_unknown_rows() {
+        fn sample(family: KeyFamily) -> &'static str {
+            match family {
+                KeyFamily::Anthropic => "sk-ant-api03-AbCdEfGhIjKlMnOpQrStUv",
+                KeyFamily::OpenRouter => "sk-or-v1-AbCdEfGhIjKlMnOpQrStUvWxYz",
+                KeyFamily::Groq => "gsk_AbCdEfGhIjKlMnOpQrStUvWxYz012345",
+                KeyFamily::Xai => "xai-AbCdEfGhIjKlMnOpQrStUvWxYz012345",
+                KeyFamily::GoogleAiStudio => "AIzaSyA1234567890abcdefghijklmnopqrstuv",
+                KeyFamily::VertexToken => "ya29.stored",
+            }
+        }
+        const UNKNOWN: &str = "opaque-credential-value-with-no-known-prefix";
+        for spec in PROVIDERS {
+            let own = documented_family(spec);
+            match own {
+                Some(family) => assert!(
+                    check_shape(spec, sample(family)).is_ok(),
+                    "{} refused its own {} key",
+                    spec.id,
+                    family.label()
+                ),
+                None => assert!(
+                    check_shape(spec, UNKNOWN).is_ok(),
+                    "{} refused an unrecognised shape",
+                    spec.id
+                ),
+            }
+            let wrong = if own == Some(KeyFamily::Anthropic) {
+                KeyFamily::Groq
+            } else {
+                KeyFamily::Anthropic
+            };
+            assert!(
+                check_shape(spec, sample(wrong)).is_err(),
+                "{} accepted a {} key",
+                spec.id,
+                wrong.label()
+            );
+            assert!(
+                check_shape(spec, UNKNOWN).is_ok(),
+                "{} refused an unknown shape",
+                spec.id
+            );
+        }
     }
 }

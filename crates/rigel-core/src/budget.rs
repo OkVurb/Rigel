@@ -170,6 +170,12 @@ pub struct TurnQuote {
     /// What `reserve` will require before the turn starts, so the UI can say whether an
     /// over-budget turn is refused outright or stopped after its first step.
     pub reserve_micros: i64,
+    /// The day the local price table was read, and how old it is now. A stale table is shown
+    /// beside the estimate rather than quietly treated as current.
+    pub price_fetched_on: String,
+    pub price_age_days: i64,
+    pub price_source: String,
+    pub price_stale: bool,
 }
 
 /// Enough to look like a real answer for a short prompt, small enough not to overstate a
@@ -193,6 +199,7 @@ pub fn quote_turn(
     let output_tokens = (input_tokens / 2).clamp(OUTPUT_FLOOR, OUTPUT_CEILING);
     let first_step_micros = cost_micros(model, input_tokens, 0, output_tokens);
     let remaining_micros = cap_micros.map(|cap| cap - spend_micros);
+    let prices = crate::agent::pricing::freshness(crate::migrate::now_ms());
     TurnQuote {
         model: model.to_string(),
         input_tokens,
@@ -205,6 +212,10 @@ pub fn quote_turn(
             .map(|remaining| first_step_micros > remaining)
             .unwrap_or(false),
         reserve_micros: RESERVE_MICROS,
+        price_fetched_on: prices.fetched_on,
+        price_age_days: prices.age_days,
+        price_source: prices.source,
+        price_stale: prices.stale,
     }
 }
 

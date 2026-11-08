@@ -4,8 +4,8 @@
 //! has already paid for: a stored key is the permission to use that door, so **every** provider
 //! that holds a credential is asked for its roster. The rules are small enough to state:
 //!
-//! * the current provider's roster is read first, so a walk cut short by [`MAX_CATALOGS`] is cut
-//!   at the end of the list rather than under the model the composer is showing;
+//! * the current provider's roster is read first, and every configured or local provider is read
+//!   concurrently so Free mode and the picker see the same complete live set;
 //! * OpenRouter's list is public, so it is offered even with no key stored — that is how an
 //!   install on another door sees what it could switch to;
 //! * a provider that publishes no roster of its own contributes exactly one row, its default,
@@ -20,7 +20,14 @@ use serde::{Deserialize, Serialize};
 
 use crate::credentials::{self, CredentialStore};
 
+use super::custom;
+use super::local;
 use super::providers::{self, Endpoint, ProviderSpec};
+use super::retry::{self, RetryClass};
+
+fn tools_unknown() -> bool {
+    true
+}
 
 /// One row in the picker. The provider travels with the id so choosing a model also chooses
 /// where the turn goes; the caller never has to know which key is configured.
@@ -36,10 +43,24 @@ pub struct ModelOption {
     /// hides them behind a toggle and `rigel models --all` prints them — because a filter that
     /// deletes data is a filter nobody can audit.
     pub chat: bool,
+    /// Whether the roster advertises tool/function calls. Free mode needs this because the
+    /// coordinator, subagents and the swarm all act through tools; a text-only row would be
+    /// chosen and then fail the first turn. A roster that does not publish the field is treated
+    /// as unknown-but-usable rather than silently excluded.
+    #[serde(default = "tools_unknown")]
+    pub tools: bool,
+    /// A model served by a keyless door on this machine (roadmap 27), so the picker can say so.
+    #[serde(default)]
+    pub local: bool,
     /// The vendor's own `input->output` description, when it publishes one. Carried so the
     /// [`chat`](Self::chat) rule can be audited from `rigel models --json` instead of guessed at.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub modality: Option<String>,
+    /// Completion price in micro-dollars per million tokens, when the roster publishes one.
+    /// Integer micro-units keep `Eq` and make the picker's relative cost hint serializable
+    /// without carrying floating-point formatting noise into the window.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_micros_per_mtok: Option<u64>,
 }
 
 /// Ids that name something other than a chat model.
@@ -87,9 +108,20 @@ const NOT_CHAT: &[&str] = &[
 /// a row only when **every** output it declares is something other than these.
 const CHAT_OUTPUTS: &[&str] = &["text", "reasoning", "tool", "tools", "code", "json"];
 
-/// How many rosters one call may read. A cheap install can hold half a dozen keys, and a picker
-/// that spends a minute on timeouts is worse than one that shows five rosters.
-pub const MAX_CATALOGS: usize = 6;
+/// Safety ceiling above the built-in provider count. Reads are concurrent, so this prevents an
+/// accidentally unbounded future registry without hiding any provider Rigel currently supports.
+pub const MAX_CATALOGS: usize = 32;
+
+/// What a candidate key proved before Rigel writes it to the keychain (Q244).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct KeyValidation {
+    /// Whether the provider answered a request that carried the candidate key.
+    pub checked: bool,
+    /// How many models the roster returned; zero when no check was possible.
+    pub models: usize,
+    /// One sentence for Settings and `rigel keys set`.
+    pub note: String,
+}
 
 /// The catalogue for one provider. The key is resolved here and only becomes a header; no caller
 /// ever receives it.
@@ -98,6 +130,31 @@ pub async fn catalog(
     store: &dyn CredentialStore,
 ) -> Result<Vec<ModelOption>, String> {
     let spec = providers::find(provider).ok_or_else(|| providers::unknown_provider(provider))?;
+
+    // A custom door's roster is the list its own probe returned on save; reading it from the
+    // keychain keeps the picker usable without a second request and without header values.
+    if spec.id == credentials::CUSTOM {
+        let door = custom::load_from(store)?.ok_or_else(|| {
+            "no custom door is saved; add its base URL and header in Settings → Providers"
+                .to_string()
+        })?;
+        return Ok(door
+            .models
+            .iter()
+            .filter(|id| !id.trim().is_empty())
+            .map(|id| ModelOption {
+                id: id.clone(),
+                provider: spec.id.to_string(),
+                name: None,
+                free: false,
+                chat: true,
+                tools: true,
+                local: false,
+                modality: None,
+                output_micros_per_mtok: None,
+            })
+            .collect());
+    }
 
     // Google's two doors publish no roster on their chat route; the provider's own default is
     // still worth offering, so the picker says where a turn would go instead of showing nothing.
@@ -111,6 +168,8 @@ pub async fn catalog(
     }
 
     let key = match providers::credential(spec, store).await {
+        // A keyless local door has an empty credential, not a header to send.
+        Ok(key) if key.is_empty() => None,
         Ok(key) => Some(key),
         // OpenRouter's roster is public: reading it is how an install on another provider sees
         // what it could switch to. Anywhere else the key is what the list needs.
@@ -119,7 +178,123 @@ pub async fn catalog(
     };
 
     let url = providers::models_url(spec)?;
-    read_roster(&url, spec, key).await
+    let mut rows = read_roster(&url, spec, key).await?;
+    if spec.id == credentials::FIREWORKS {
+        add_fireworks_router_rows(&mut rows);
+    }
+    Ok(rows)
+}
+
+/// FireRouter is a routing id, not always a resource the `/models` roster returns. Offer it
+/// explicitly so the picker can select it; the router reports the concrete served model in usage.
+fn add_fireworks_router_rows(rows: &mut Vec<ModelOption>) {
+    let present = rows
+        .iter()
+        .any(|row| row.id.eq_ignore_ascii_case("firerouter") || row.id.ends_with("/firerouter"));
+    if !present {
+        rows.push(ModelOption {
+            id: "firerouter".to_string(),
+            provider: credentials::FIREWORKS.to_string(),
+            name: Some("FireRouter · auto".to_string()),
+            free: false,
+            chat: true,
+            tools: true,
+            local: false,
+            modality: None,
+            output_micros_per_mtok: None,
+        });
+    }
+    rows.sort_by(|a, b| a.id.cmp(&b.id));
+}
+
+/// Check a candidate provider key before it is stored (Q244).
+///
+/// The candidate goes into a throwaway store rather than the keychain, and the same roster call
+/// the picker uses makes the decision, so saving a key and reading a roster cannot disagree. A
+/// provider with no published roster (Gemini AI Studio, Vertex) is reported as unchecked instead
+/// of being called valid: there is no model-list request that can prove those credentials.
+pub async fn validate_key(provider: &str, value: &str) -> Result<KeyValidation, String> {
+    let spec = providers::find(provider).ok_or_else(|| providers::unknown_provider(provider))?;
+    let value = value.trim();
+    if value.is_empty() {
+        return Err("paste a key first".to_string());
+    }
+    if !spec.lists_models {
+        return Ok(KeyValidation {
+            checked: false,
+            models: 0,
+            note: format!(
+                "{} publishes no model roster, so Rigel could not check the key with a model-list call.",
+                spec.name
+            ),
+        });
+    }
+    // OpenRouter's `/models` list is public, so a 200 there says nothing about the candidate.
+    // Its authenticated key record is the lightweight proof that the key was accepted.
+    if spec.id == credentials::OPENROUTER {
+        let url = format!("{}/key", providers::base_url(spec)?);
+        return validate_openrouter(spec, value, &url).await;
+    }
+    if matches!(spec.endpoint, Endpoint::Router) {
+        super::omniroute::ensure_server().await?;
+    }
+    let url = providers::models_url(spec)?;
+    validate_at(spec, value, &url).await
+}
+/// OpenRouter's authenticated key record: `/api/v1/key` answers 401 for a rejected candidate
+/// and 200 with a `data` object for a live one.
+async fn validate_openrouter(
+    spec: &ProviderSpec,
+    value: &str,
+    url: &str,
+) -> Result<KeyValidation, String> {
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(20))
+        .build()
+        .map_err(|error| format!("could not build an HTTP client: {error}"))?;
+    let response = client
+        .get(url)
+        .bearer_auth(value)
+        .send()
+        .await
+        .map_err(|error| format!("could not validate the key with {}: {error}", spec.name))?;
+    if !response.status().is_success() {
+        return Err(format!(
+            "{} did not accept the key: {} answered {}",
+            spec.name,
+            spec.name,
+            response.status()
+        ));
+    }
+    let record: serde_json::Value = response
+        .json()
+        .await
+        .map_err(|error| format!("{} returned unreadable key data: {error}", spec.name))?;
+    if record.get("data").is_none() {
+        return Err(format!("{} returned no key record", spec.name));
+    }
+    Ok(KeyValidation {
+        checked: true,
+        models: 0,
+        note: format!("{} accepted the key.", spec.name),
+    })
+}
+
+/// The HTTP half of [`validate_key`], split out so a test can point it at a scripted server.
+async fn validate_at(spec: &ProviderSpec, value: &str, url: &str) -> Result<KeyValidation, String> {
+    let models = read_roster(url, spec, Some(value.to_string()))
+        .await
+        .map_err(|error| format!("{} did not accept the key: {error}", spec.name))?;
+    Ok(KeyValidation {
+        checked: true,
+        models: models.len(),
+        note: format!(
+            "{} accepted the key and listed {} model{}.",
+            spec.name,
+            models.len(),
+            if models.len() == 1 { "" } else { "s" }
+        ),
+    })
 }
 
 /// The merged list: the current provider first, then every other provider that holds a
@@ -135,7 +310,7 @@ pub async fn roster(
         .chain(
             providers::all()
                 .iter()
-                .filter(|spec| credentials::present_in(store, spec.id))
+                .filter(|spec| local::is_local(spec.id) || providers::present(store, spec))
                 .map(|spec| spec.id.to_string()),
         )
     {
@@ -174,10 +349,20 @@ fn default_row(spec: &ProviderSpec) -> Option<ModelOption> {
     spec.default_model.map(|default| ModelOption {
         id: default.to_string(),
         provider: spec.id.to_string(),
-        name: Some(format!("{} default", spec.name)),
+        // The remote agent is named by its id, exactly; a provider default says whose it is.
+        name: Some(if spec.id == credentials::RIGEL {
+            default.to_string()
+        } else {
+            format!("{} default", spec.name)
+        }),
         free: false,
         chat: true,
+        tools: true,
+        local: local::is_local(spec.id),
         modality: None,
+        output_micros_per_mtok: Some(
+            (super::pricing::price_for(default).output * 1_000_000.0).round() as u64,
+        ),
     })
 }
 
@@ -193,25 +378,61 @@ async fn read_roster(
         .build()
         .map_err(|error| format!("could not build an HTTP client: {error}"))?;
 
-    let mut request = client.get(url);
-    // Whatever the vendor needs on **every** request, the roster included: Anthropic dates its
-    // API version, and a list without it is a 400 rather than a catalogue.
-    for (name, value) in spec.headers {
-        request = request.header(*name, *value);
-    }
-    if let Some(key) = key {
-        request = request.bearer_auth(key);
-    }
+    // A roster is a GET: it is idempotent, so a 5xx or a lost connection may be retried without
+    // duplicating anything a user can see. The retry is still bounded, and each wait is short.
+    let mut attempt = 0;
+    let response = loop {
+        attempt += 1;
+        let mut request = client.get(url);
+        // Whatever the vendor needs on **every** request, the roster included: Anthropic dates
+        // its API version, and a list without it is a 400 rather than a catalogue.
+        for (name, value) in spec.headers {
+            request = request.header(*name, *value);
+        }
+        if let Some(key) = key.clone() {
+            request = request.bearer_auth(key);
+        }
 
-    let response = request
-        .send()
-        .await
-        .map_err(|error| format!("could not read the model catalogue: {error}"))?;
-    if !response.status().is_success() {
-        // Anthropic answers `x-api-key` and `anthropic-version`; a bare status is enough here,
-        // and the caller already has the provider's name.
-        return Err(format!("{} answered {}", spec.name, response.status()));
-    }
+        match request.send().await {
+            Ok(response) if response.status().is_success() => break response,
+            Ok(response) => {
+                let status = response.status().as_u16();
+                if let Some(retry) = retry::decision(
+                    RetryClass::Read,
+                    attempt,
+                    3,
+                    Some(status),
+                    false,
+                    false,
+                    None,
+                    150,
+                ) {
+                    tokio::time::sleep(std::time::Duration::from_millis(retry.delay_ms)).await;
+                    continue;
+                }
+                // Anthropic answers `x-api-key` and `anthropic-version`; a bare status is enough
+                // here, and the caller already has the provider's name.
+                return Err(format!("{} answered {status}", spec.name));
+            }
+            Err(error) => {
+                let transport = error.is_timeout() || error.is_connect() || error.is_request();
+                if let Some(retry) = retry::decision(
+                    RetryClass::Read,
+                    attempt,
+                    3,
+                    None,
+                    transport,
+                    false,
+                    None,
+                    150,
+                ) {
+                    tokio::time::sleep(std::time::Duration::from_millis(retry.delay_ms)).await;
+                    continue;
+                }
+                return Err(format!("could not read the model catalogue: {error}"));
+            }
+        }
+    };
 
     let value: serde_json::Value = response
         .json()
@@ -231,16 +452,39 @@ async fn read_roster(
                         .map(str::to_string)
                         .filter(|name| name != id);
                     let pricing = row.get("pricing");
-                    let free = id.ends_with(":free")
-                        || (is_zero(pricing.and_then(|price| price.get("prompt")))
-                            && is_zero(pricing.and_then(|price| price.get("completion"))));
+                    let published_zero = is_zero(pricing.and_then(|price| price.get("prompt")))
+                        && is_zero(pricing.and_then(|price| price.get("completion")));
+                    // Published live prices outrank a stale `:free` suffix. The suffix is used only
+                    // when the provider omitted pricing entirely; a newly nonzero row is paid now.
+                    let free = local::is_local(spec.id)
+                        || published_zero
+                        || (pricing.is_none() && id.ends_with(":free"));
+                    let output_micros_per_mtok = pricing
+                        .and_then(|price| price.get("completion"))
+                        .and_then(serde_json::Value::as_str)
+                        .and_then(|value| value.parse::<f64>().ok())
+                        .map(|per_token| (per_token * 1_000_000.0 * 1_000_000.0).round() as u64)
+                        .filter(|micros| *micros > 0 || free);
+                    let tools = row
+                        .get("supported_parameters")
+                        .and_then(serde_json::Value::as_array)
+                        .map(|parameters| {
+                            parameters
+                                .iter()
+                                .filter_map(serde_json::Value::as_str)
+                                .any(|parameter| matches!(parameter, "tools" | "tool_choice"))
+                        })
+                        .unwrap_or(true);
                     Some(ModelOption {
                         id: id.to_string(),
                         provider: spec.id.to_string(),
                         name,
                         free,
                         chat: is_chat_like(id, row),
+                        tools,
+                        local: local::is_local(spec.id),
                         modality: modality_label(row),
+                        output_micros_per_mtok,
                     })
                 })
                 .collect()
@@ -380,6 +624,14 @@ mod tests {
 
     /// One request, read fully, answered with the roster shape the vendors publish.
     async fn fake_roster(body: &'static str) -> (String, Arc<Mutex<String>>) {
+        fake_roster_with(200, "OK", body).await
+    }
+
+    async fn fake_roster_with(
+        status: u16,
+        reason: &'static str,
+        body: &'static str,
+    ) -> (String, Arc<Mutex<String>>) {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
         let seen = Arc::new(Mutex::new(String::new()));
@@ -393,7 +645,7 @@ mod tests {
             let read = socket.read(&mut request).await.unwrap_or(0);
             *log.lock().unwrap() = String::from_utf8_lossy(&request[..read]).to_string();
             let response = format!(
-                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\
+                "HTTP/1.1 {status} {reason}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\
                  Connection: close\r\n\r\n{body}",
                 body.len()
             );
@@ -411,8 +663,28 @@ mod tests {
             name: None,
             free,
             chat: true,
+            tools: true,
+            local: false,
             modality: None,
+            output_micros_per_mtok: None,
         }
+    }
+
+    #[test]
+    fn a_firerouter_row_is_offered_once_even_when_the_roster_omits_it() {
+        let mut rows = vec![row("glm-5p3-flash", credentials::FIREWORKS, false)];
+        add_fireworks_router_rows(&mut rows);
+        add_fireworks_router_rows(&mut rows);
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].id, "firerouter");
+
+        let mut full = vec![row(
+            "accounts/fireworks/routers/firerouter",
+            credentials::FIREWORKS,
+            false,
+        )];
+        add_fireworks_router_rows(&mut full);
+        assert_eq!(full.len(), 1, "the full router resource is the same row");
     }
 
     #[tokio::test]
@@ -422,6 +694,7 @@ mod tests {
                 {"id":"z-model","name":"Zed","pricing":{"prompt":"0.000001","completion":"0.000002"}},
                 {"id":"a-model","name":"Aye"},
                 {"id":"free-model:free","pricing":{"prompt":"0","completion":"0"}},
+                {"id":"was-free:free","pricing":{"prompt":"0.000001","completion":"0.000002"}},
                 {"id":"a-model","name":"Aye again"}
             ]}"#,
         )
@@ -434,12 +707,20 @@ mod tests {
 
         assert_eq!(
             rows.iter().map(|row| row.id.as_str()).collect::<Vec<_>>(),
-            vec!["a-model", "free-model:free", "z-model"],
+            vec!["a-model", "free-model:free", "was-free:free", "z-model"],
             "sorted by id, the duplicate collapsed"
         );
         assert!(rows[1].free, "a `:free` id is free without pricing");
+        assert_eq!(rows[1].output_micros_per_mtok, Some(0));
+        assert!(
+            !rows[2].free,
+            "live nonzero pricing overrides a stale `:free` suffix"
+        );
+        assert_eq!(rows[2].output_micros_per_mtok, Some(2_000_000));
+        assert_eq!(rows[3].output_micros_per_mtok, Some(2_000_000));
         // A vendor that publishes no pricing at all must not be read as free.
         assert!(!rows[0].free);
+        assert_eq!(rows[0].output_micros_per_mtok, None);
         assert_eq!(rows[0].name.as_deref(), Some("Aye"));
         assert!(
             rows.iter().all(|row| row.chat),
@@ -451,6 +732,29 @@ mod tests {
         assert!(
             request.contains("authorization: Bearer test-key"),
             "the key arrives as a bearer header: {request}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_roster_marks_tool_capable_rows_and_keeps_unknown_rows_usable() {
+        let (url, _) = fake_roster(
+            r#"{"data":[
+                {"id":"tools-model","supported_parameters":["temperature","tools"]},
+                {"id":"text-model","supported_parameters":["temperature"]},
+                {"id":"unknown-model"}
+            ]}"#,
+        )
+        .await;
+        let spec = providers::find(credentials::GEMINI).unwrap();
+        let rows = read_roster(&url, spec, Some("test-key".to_string()))
+            .await
+            .unwrap();
+        let row = |id: &str| rows.iter().find(|row| row.id == id).unwrap();
+        assert!(row("tools-model").tools);
+        assert!(!row("text-model").tools);
+        assert!(
+            row("unknown-model").tools,
+            "a roster that omits the field is unknown-but-usable, not silently excluded"
         );
     }
 
@@ -548,6 +852,83 @@ mod tests {
             ],
             "the same id on two doors stays two rows; the current provider leads, free first"
         );
+    }
+
+    #[tokio::test]
+    async fn a_candidate_key_is_checked_before_it_can_be_stored() {
+        let (url, seen) = fake_roster(r#"{"data":[{"id":"a-model"},{"id":"b-model"}]}"#).await;
+        let spec = providers::find(credentials::GROQ).unwrap();
+
+        let check = validate_at(spec, "candidate-key", &url)
+            .await
+            .expect("the roster accepts the candidate");
+
+        assert!(check.checked);
+        assert_eq!(check.models, 2);
+        assert!(
+            check.note.contains("Groq accepted the key"),
+            "{}",
+            check.note
+        );
+        let request = seen.lock().unwrap().clone();
+        assert!(
+            request.contains("authorization: Bearer candidate-key"),
+            "the candidate, not a keychain entry, is sent: {request}"
+        );
+    }
+
+    #[tokio::test]
+    async fn openrouter_uses_the_authenticated_key_record_not_the_public_roster() {
+        let (url, seen) = fake_roster_with(200, "OK", r#"{"data":{"label":"candidate"}}"#).await;
+        let url = url.replace("/models", "/key");
+        let spec = providers::find(credentials::OPENROUTER).unwrap();
+
+        let check = validate_openrouter(spec, "candidate-key", &url)
+            .await
+            .expect("the key record accepts the candidate");
+
+        assert!(check.checked);
+        assert_eq!(check.models, 0, "the key record lists no models");
+        assert!(
+            check.note.contains("OpenRouter accepted the key"),
+            "{}",
+            check.note
+        );
+        let request = seen.lock().unwrap().clone();
+        assert!(request.starts_with("GET /key "), "{request}");
+        assert!(
+            request.contains("authorization: Bearer candidate-key"),
+            "the candidate is what OpenRouter checks: {request}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_rejected_candidate_names_the_provider_and_never_reads_as_valid() {
+        let (url, seen) = fake_roster_with(401, "Unauthorized", r#"{"error":"bad key"}"#).await;
+        let spec = providers::find(credentials::GROQ).unwrap();
+
+        let error = validate_at(spec, "bad-key", &url)
+            .await
+            .expect_err("a 401 is not a valid key");
+
+        assert!(error.contains("Groq did not accept the key"), "{error}");
+        assert!(error.contains("401"), "{error}");
+        let request = seen.lock().unwrap().clone();
+        assert!(
+            request.contains("authorization: Bearer bad-key"),
+            "the rejected candidate was the key sent: {request}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_provider_without_a_roster_is_reported_unchecked() {
+        let check = validate_key(credentials::GEMINI, "candidate-key")
+            .await
+            .expect("a provider without a roster is not an error");
+
+        assert!(!check.checked);
+        assert_eq!(check.models, 0);
+        assert!(check.note.contains("no model roster"), "{}", check.note);
     }
 
     #[tokio::test]

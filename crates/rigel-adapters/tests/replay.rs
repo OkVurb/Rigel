@@ -27,7 +27,7 @@ use async_trait::async_trait;
 use rigel_adapters::acp::{AcpConfig, AcpEvent, ApprovalDecision, ApprovalRequest, Approver};
 use rigel_adapters::{
     AcpClient, ClaudeAdapter, ClaudeConfig, ClaudeEvent, CodexAdapter, CodexConfig, CodexEvent,
-    PermissionMode, Transport,
+    MuseAdapter, MuseConfig, MuseEvent, PermissionMode, Transport,
 };
 use rigel_core::ItemKind;
 use rigel_core::credentials::Secret;
@@ -45,7 +45,7 @@ fn golden(harness: &str, scenario: &str) -> PathBuf {
 /// replay case (or a renamed case with no file) fails here instead of being quietly untested.
 #[test]
 fn every_golden_fixture_has_a_scenario() {
-    for harness in ["claude", "codex", "acp"] {
+    for harness in ["claude", "codex", "acp", "muse"] {
         let dir = golden(harness, "start")
             .parent()
             .expect("golden dir")
@@ -501,6 +501,95 @@ async fn acp_fixtures_replay_through_the_client() {
                 assert_eq!(turn.text, "working", "{scenario}");
             }
             other => panic!("unhandled ACP scenario {other}"),
+        }
+    }
+}
+
+/* ----------------------------------- Muse ---------------------------------- */
+
+fn muse_config(cwd: &Path, scenario: &str) -> MuseConfig {
+    let mut config = MuseConfig::new(cwd);
+    config.exe = PathBuf::from(env!("CARGO_BIN_EXE_fake-muse"));
+    config.timeout = Duration::from_secs(10);
+    config.vendor_login = None;
+    config
+        .env
+        .insert("META_API_KEY".into(), Secret::new("muse-replay"));
+    config.env.insert(
+        "FAKE_MUSE_FIXTURE".into(),
+        Secret::new(golden("muse", scenario).display().to_string()),
+    );
+    config
+}
+
+async fn muse_run(
+    config: MuseConfig,
+) -> (
+    Result<rigel_adapters::MuseTurn, rigel_adapters::AdapterError>,
+    Vec<MuseEvent>,
+) {
+    let mut events = Vec::new();
+    let outcome = MuseAdapter::new(config)
+        .run_turn("replay", |event| events.push(event))
+        .await;
+    (outcome, events)
+}
+
+#[tokio::test]
+async fn muse_fixtures_replay_through_the_adapter() {
+    for scenario in SCENARIOS {
+        let dir = tempfile::tempdir().unwrap();
+        let (outcome, events) = muse_run(muse_config(dir.path(), scenario)).await;
+
+        match scenario {
+            "start" => {
+                let turn = outcome.expect("a completed journal is a turn");
+                assert_eq!(turn.text, "pong", "{scenario}");
+                assert_eq!(turn.model, "muse-spark-1.3", "{scenario}");
+                assert_eq!(
+                    events,
+                    vec![
+                        MuseEvent::Delta { text: "po".into() },
+                        MuseEvent::Delta { text: "ng".into() },
+                    ],
+                    "{scenario}"
+                );
+            }
+            "tool_call" => {
+                let turn = outcome.expect("a completed journal is a turn");
+                assert_eq!(turn.text, "All tests passed.", "{scenario}");
+                assert!(
+                    events.iter().any(|event| matches!(
+                        event,
+                        MuseEvent::Item(item)
+                            if item.kind == ItemKind::Command
+                                && item.body["command"] == "cargo test"
+                    )),
+                    "{scenario}: {events:?}"
+                );
+            }
+            "approval" => {
+                let error = outcome.expect_err("one-shot Muse cannot ask for approval");
+                assert!(
+                    error.to_string().contains("approval is not available"),
+                    "{scenario}: {error}"
+                );
+            }
+            "error" => {
+                let error = outcome.expect_err("a failed terminal is not a turn");
+                assert!(
+                    error.to_string().contains("upstream model refused"),
+                    "{scenario}: {error}"
+                );
+            }
+            "interrupt" => {
+                let error = outcome.expect_err("a cancelled terminal is not a turn");
+                assert!(
+                    error.to_string().contains("cancelled by user"),
+                    "{scenario}: {error}"
+                );
+            }
+            other => panic!("unhandled Muse scenario {other}"),
         }
     }
 }

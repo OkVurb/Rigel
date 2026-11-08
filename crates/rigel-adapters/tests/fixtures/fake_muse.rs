@@ -8,6 +8,19 @@
 use serde_json::json;
 
 fn main() {
+    if let Ok(path) = std::env::var("FAKE_MUSE_FIXTURE") {
+        match std::fs::read_to_string(&path) {
+            Ok(body) => {
+                print!("{body}");
+                return;
+            }
+            Err(error) => {
+                eprintln!("fake-muse: {path}: {error}");
+                std::process::exit(2);
+            }
+        }
+    }
+
     let mut args = std::env::args().skip(1);
     let mut prompt_file = None;
     while let Some(arg) = args.next() {

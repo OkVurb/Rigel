@@ -22,6 +22,9 @@ pub const ANTHROPIC: &str = "anthropic";
 pub const CURSOR: &str = "cursor";
 pub const CLINE: &str = "cline";
 pub const GEMINI: &str = "gemini";
+/// The key the MiniMax API agent in the room reads. MiniMax is not a native chat provider; it
+/// lives beside the harness keys because that is where Rigel keeps every secret it holds.
+pub const MINIMAX: &str = "minimax";
 /// Not an API key: Vertex takes a short-lived OAuth access token, and this is the provider name
 /// the token is stored under. `rigel/vertex` holds the token itself.
 pub const VERTEX: &str = "vertex";
@@ -38,15 +41,69 @@ pub const AGENTMAIL: &str = "agentmail";
 /// attestation endpoint. It is a bearer secret, so it lives in the keychain and is never
 /// written to `cloud.json`.
 pub const APP_CHECK: &str = "firebase-app-check-client";
+/// Not an inference provider: the publisher key for the opt-in Gravity ads on Home. It is read
+/// only in Rust; the renderer asks whether it is present and never receives it.
+pub const GRAVITY: &str = "gravity";
+/// Not an inference provider: the Exa key behind the native `web_search` and `web_fetch` tools.
+/// It lives beside the provider keys because that is where Rigel keeps every secret it holds.
+pub const EXA: &str = "exa";
+/// Not an inference provider: Rigel's machine credential for the askrigel.com Muse relay.
+/// It is intentionally absent from `PROVIDERS`, so it never appears as a model door.
+pub const RELAY: &str = "relay";
+/// The remote agent as a model door. It has no credential of its own: it presents [`RELAY`], so
+/// it is absent from `PROVIDERS` for the same reason.
+pub const RIGEL: &str = "rigel";
+/// A local model door: no key, so the entry holds nothing. It is listed because the provider
+/// table and `rigel keys status` must agree about every door the app can use.
+pub const LOCAL: &str = "local";
+pub const LLAMAFILE: &str = "llamafile";
+/// A user's own OpenAI-compatible door. Its keychain entry is the whole record — base URL,
+/// header pairs and the probed model ids — so its header values never enter settings.
+pub const CUSTOM: &str = "custom";
 
 /// Every provider Rigel can resolve. One list so a new adapter cannot be added to the keychain
 /// without also appearing in `rigel keys status` and in the environment scrub for commands.
 pub const PROVIDERS: &[&str] = &[
     OMNIROUTE, OPENROUTER, GEMINI, VERTEX, OPENAI, XAI, GROQ, DEEPSEEK, MISTRAL, TOGETHER,
-    FIREWORKS, META, ANTHROPIC, CURSOR, CLINE, AGENTMAIL,
+    FIREWORKS, META, ANTHROPIC, CURSOR, CLINE, MINIMAX, AGENTMAIL, GRAVITY, EXA, LOCAL, LLAMAFILE,
+    CUSTOM,
 ];
 
 const SERVICE: &str = "rigel";
+
+/// Which native credential store this build uses. There is no fourth variant: a plaintext
+/// file fallback is not a storage location Rigel ships.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Backend {
+    WindowsCredentialManager,
+    AppleKeychain,
+    SecretService,
+}
+
+pub fn backend() -> Backend {
+    #[cfg(target_os = "windows")]
+    {
+        Backend::WindowsCredentialManager
+    }
+    #[cfg(target_os = "macos")]
+    {
+        Backend::AppleKeychain
+    }
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        Backend::SecretService
+    }
+}
+
+/// Deliberately absent. Kept as a named constant so a test can assert that no plaintext
+/// fallback was added and a reviewer can see the decision in the code.
+pub const PLAINTEXT_FALLBACK: Option<&str> = None;
+
+/// A keychain failure is reported with the provider and the platform error, never with the
+/// key. The key is not an argument here, which is what makes the property structural.
+pub fn failure_message(provider: &str, error: &KeyError) -> String {
+    format!("keychain {provider}: {error}")
+}
 
 #[derive(Debug, thiserror::Error)]
 pub enum KeyError {
@@ -203,6 +260,8 @@ pub fn provider_environment_variable(provider: &str) -> Option<&'static str> {
         CURSOR => Some("CURSOR_API_KEY"),
         CLINE => Some("CLINE_API_KEY"),
         GEMINI => Some("GEMINI_API_KEY"),
+        // The room's MiniMax API agent reads this exact variable from its wrapper.
+        MINIMAX => Some("MINIMAX_API_KEY"),
         // Vertex has no API key to hold: the credential is an OAuth access token, and this is
         // the variable the adapter reads it from.
         VERTEX => Some("VERTEX_ACCESS_TOKEN"),
@@ -213,7 +272,17 @@ pub fn provider_environment_variable(provider: &str) -> Option<&'static str> {
         TOGETHER => Some("TOGETHER_API_KEY"),
         FIREWORKS => Some("FIREWORKS_API_KEY"),
         AGENTMAIL => Some("AGENTMAIL_API_KEY"),
+        GRAVITY => Some("GRAVITY_API_KEY"),
+        EXA => Some("EXA_API_KEY"),
+        RELAY => Some("RIGEL_RELAY_TOKEN"),
+        RIGEL => Some("RIGEL_RELAY_TOKEN"),
         APP_CHECK => Some("RIGEL_FIREBASE_APP_CHECK_CLIENT"),
+        // Not a key: the variable that moves a keyless local door. `present_in` reads it as
+        // "this door was configured", which is why a moved local door still appears in health.
+        LOCAL => Some("RIGEL_OLLAMA_BASE_URL"),
+        LLAMAFILE => Some("RIGEL_LLAMAFILE_BASE_URL"),
+        // Not a key: the complete custom-door record, for a headless run.
+        CUSTOM => Some("RIGEL_CUSTOM_DOOR"),
         _ => None,
     }
 }
@@ -251,6 +320,41 @@ mod tests {
     use super::*;
 
     #[test]
+    fn every_platform_selects_its_native_backend() {
+        #[cfg(target_os = "windows")]
+        assert_eq!(backend(), Backend::WindowsCredentialManager);
+        #[cfg(target_os = "macos")]
+        assert_eq!(backend(), Backend::AppleKeychain);
+        #[cfg(all(unix, not(target_os = "macos")))]
+        assert_eq!(backend(), Backend::SecretService);
+    }
+
+    #[test]
+    fn no_plaintext_fallback_exists() {
+        assert!(PLAINTEXT_FALLBACK.is_none());
+    }
+
+    #[test]
+    fn a_keychain_failure_names_the_provider_and_never_the_key() {
+        let error = KeyError::Keychain("the requested operation was denied".to_string());
+        let message = failure_message("openrouter", &error);
+        assert!(message.contains("openrouter"));
+        assert!(message.contains("denied"));
+        assert!(!message.contains("sk-"));
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn the_windows_platform_answers_from_the_credential_manager() {
+        // `available` asks for a name no provider uses; `NoEntry` is the healthy answer. A
+        // locked-down runner may refuse the store, and the error still must not carry a key.
+        match available() {
+            Ok(()) => assert_eq!(backend(), Backend::WindowsCredentialManager),
+            Err(error) => assert!(!error.contains("sk-")),
+        }
+    }
+
+    #[test]
     fn a_secret_does_not_print_itself() {
         let secret = Secret::new("sk-live-abc");
         assert_eq!(format!("{secret:?}"), "Secret(<redacted>)");
@@ -280,8 +384,8 @@ mod tests {
         // The mapping is what makes `infisical run` work without any code change; a provider
         // added without one would silently fall back to the keychain only.
         for provider in [
-            OPENAI, ANTHROPIC, OPENROUTER, OMNIROUTE, CURSOR, CLINE, GEMINI, VERTEX, XAI, GROQ,
-            DEEPSEEK, MISTRAL, TOGETHER, FIREWORKS,
+            OPENAI, ANTHROPIC, OPENROUTER, OMNIROUTE, CURSOR, CLINE, GEMINI, MINIMAX, VERTEX, XAI,
+            GROQ, DEEPSEEK, MISTRAL, TOGETHER, FIREWORKS, GRAVITY, EXA,
         ] {
             let name = provider_environment_variable(provider)
                 .unwrap_or_else(|| panic!("no environment name for {provider}"));
@@ -307,8 +411,8 @@ mod tests {
         // `rigel keys status` and the environment scrub both read PROVIDERS; a constant missing
         // from it is a key the user can store but never see the state of.
         for provider in [
-            OPENROUTER, OMNIROUTE, OPENAI, ANTHROPIC, CURSOR, CLINE, GEMINI, VERTEX, XAI, GROQ,
-            DEEPSEEK, MISTRAL, TOGETHER, FIREWORKS,
+            OPENROUTER, OMNIROUTE, OPENAI, ANTHROPIC, CURSOR, CLINE, GEMINI, MINIMAX, VERTEX, XAI,
+            GROQ, DEEPSEEK, MISTRAL, TOGETHER, FIREWORKS, AGENTMAIL, GRAVITY, EXA,
         ] {
             assert!(PROVIDERS.contains(&provider), "{provider} is missing");
         }

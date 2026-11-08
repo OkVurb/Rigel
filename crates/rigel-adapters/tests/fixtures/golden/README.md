@@ -8,6 +8,7 @@ One JSONL stream per harness per scenario. The fixture binaries replay the file 
 | `claude/` | Claude Code, `-p --output-format stream-json` | `fake-claude` (`FAKE_CLAUDE_FIXTURE`) |
 | `codex/` | Codex app-server JSON-RPC notifications | `fake-codex` (`FAKE_CODEX_FIXTURE`) |
 | `acp/` | ACP v1 (`agent acp` / `cline --acp`) | `fake-acp` (`FAKE_ACP_FIXTURE`) |
+| `muse/` | Muse Code, `muse exec --json` | `fake-muse` (`FAKE_MUSE_FIXTURE`) |
 
 Scenarios, all five per harness: `start`, `tool_call`, `approval`, `error`, `interrupt`.
 
@@ -22,6 +23,9 @@ They are **authored to the documented shapes**, not captured from a live binary 
   21 Oct (`item/agentMessage/delta`, `item/completed`, `thread/tokenUsage/updated`,
   `turn/completed`), plus `turn/failed` and `item/commandExecution/requestApproval`.
 - ACP: the published v1 `session/update` variants and `session/request_permission`.
+- Muse: the published envelope (`run.model.configured`, `run.output.delta`, `tool.result`,
+  `run.terminal.completed`/`failed`/`cancelled`). One-shot Muse has no approval channel, so the
+  approval fixture pins the terminal failure instead of inventing a request event.
 
 Re-recording them from installed binaries is P4.12's job, where a real turn per harness is already
 required. The point of these files is to fail when a decode changes, and to give the next
