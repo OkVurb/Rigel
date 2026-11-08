@@ -14,8 +14,8 @@ open and blocked items below are unchanged by it.
 functions test` passes 37 tests; `node scripts/check-docs.mjs` validates 55 documents and 200
 roadmap items; `check-tokens.mjs` covers 44 files; `check-versions.mjs` agrees on 0.3.0; and
 `node deploy/check.mjs` reports 11 checks with 4 notes. This is local evidence only: no VPS
-deployment or database migration was run. The native-window runner and the signing, VM and
-published-asset items (1, 6-11 and 200) stay blocked.
+deployment or database migration was run. Item 1's local driver is done; its first Windows CI run
+is still external proof. The signing, VM and published-asset items (6-11 and 200) stay blocked.
 
 **Built without further input.** These are the inferred Hallmark design-context answers; redirect
 one and only the affected items change:
