@@ -19,8 +19,8 @@ backups and review consequential changes.
 
 ## Third-party services
 
-Model providers, Firebase, AgentMail, GitHub, and skill sources are separate services with their
-own terms and privacy policies. Rigel does not control their availability, output or billing.
+Model providers, Firebase, AgentMail, GitHub, skill sources and any MCP server you configure are
+separate services with their own terms and privacy policies. Rigel does not control their availability, output or billing.
 Cloud is optional and runs against a project you configure.
 
 ## Updates

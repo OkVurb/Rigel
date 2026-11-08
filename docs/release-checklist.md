@@ -7,11 +7,14 @@ run. A box that cannot be ticked is a blocker, not a note.
 
 ### Scope and tree
 
-- [ ] `git status` is clean after the release commit.
-- [ ] `docs/grilling-round-9.md` contains Q216–Q335 and the `0.1.7`/`0.2` disposition.
-- [ ] `docs/roadmap-0.2.md` records every deferred `0.2` item.
-- [ ] `README.md`, `docs/PLATFORMS.md`, `docs/what-works.md`, `CHANGELOG.md`, `SECURITY.md`, and
-      this file are current.
+- [ ] `git status` is clean after the release commit — blocked by the uncommitted 0.2 work, so
+      the release commit itself is clean but this checkout is not.
+- [x] `docs/grilling-round-9.md` contains Q216–Q335 and the `0.1.7`/`0.2` disposition.
+- [x] `docs/roadmap-0.2.md` records every deferred `0.2` item — the 74 `0.2` dispositions are all
+      present, including Q253 and Q255.
+- [x] `README.md`, `docs/PLATFORMS.md`, `docs/what-works.md`, `CHANGELOG.md`, `SECURITY.md`, and
+      this file are current — `node scripts/check-docs.mjs` validates 38 documents and every issue
+      form.
 - [x] Version is `0.1.7` in `Cargo.toml`, `crates/rigel-app/tauri.conf.json`, `ui/package.json` and
       `web/index.html`.
 
@@ -49,8 +52,9 @@ vulnerability on Windows. `npm --prefix ui audit --omit=dev` reports 0 vulnerabi
 - [ ] Windows Sandbox install/start/doctor/uninstall pass recorded in `docs/qa/p7-acceptance.md`
       — not run for this cut; the section above records the unapplied boot requirement.
 - [ ] Windows 10 1809 and SmartScreen recorded as manual gaps.
-- [ ] MSI and NSIS SHA-256 hashes recorded in the release receipt.
-- [ ] `latest.json` Ed25519 signature verifies against the committed public key.
+- [x] MSI and NSIS SHA-256 hashes recorded in the release receipt.
+- [x] `latest.json` Ed25519 signature verifies against the committed public key — both the NSIS
+      setup and the MSI verify against their signed hashes with the committed key.
 
 ### Publish gate
 
@@ -60,18 +64,21 @@ vulnerability on Windows. `npm --prefix ui audit --omit=dev` reports 0 vulnerabi
 - [x] Release notes use the curated `docs/release-notes/0.1.7.md`.
 - [x] Published assets are downloaded and their hashes match the receipt — both artifacts match
       `latest.json`.
-- [ ] The published MSI installs on this machine — **not executed**: the elevation prompt was
-      cancelled and the machine still reports 0.1.6.
-- [ ] The 0.1.6 update path is checked against the published `latest.json` — blocked by the install
-      check above; the manifest itself verifies.
-- [ ] The app reports `0.1.7` after installation — blocked by the same install check.
+- [x] The published MSI installs on this machine — `C:\Program Files\Rigel\rigel-app.exe` reports
+      ProductVersion 0.1.7; no app process was running when checked on 5 Nov 2026.
+- [ ] The 0.1.6 update path is checked against the published `latest.json` — the installed binary
+      is 0.1.7, but the automatic updater path itself was not observed.
+- [x] The app reports `0.1.7` after installation — the installed executable's ProductVersion and
+      FileVersion are both 0.1.7.
 - [x] Post-release receipt is posted — `docs/release-receipts/0.1.7.md`, with the gaps above.
 
 ### Rollback
 
-- [ ] The v0.1.6 MSI and NSIS artifacts and hashes are retained.
-- [ ] `docs/PLATFORMS.md` explains manual rollback.
-- [ ] A failed startup is treated as a release blocker, not an automatic rollback (Q228).
+- [x] The v0.1.6 MSI and NSIS artifacts and hashes are retained — local build outputs under
+      `target/release/bundle/`, recorded in the 0.1.7 receipt. They were never published assets.
+- [x] `docs/PLATFORMS.md` explains manual rollback — the uninstall-then-reinstall steps and the
+      per-machine `%APPDATA%\Rigel` retention are documented.
+- [x] A failed startup is treated as a release blocker, not an automatic rollback (Q228).
 
 ## Future releases
 

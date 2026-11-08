@@ -1,7 +1,8 @@
 # Privacy
 
 Rigel is a local-first desktop app. This note describes what 0.1.7 actually does; the threat model
-is in [SECURITY.md](../SECURITY.md).
+is in [SECURITY.md](../SECURITY.md). A per-call receipt with purposes and retention is in
+[cloud-privacy.md](cloud-privacy.md).
 
 ## What stays on this machine
 
@@ -34,6 +35,9 @@ is in [SECURITY.md](../SECURITY.md).
 - **AgentMail.** Only after you save an inbox and key, and only when mail is used. Reading needs no
   confirmation; sending is a card and silence is a refusal. No mailbox is polled.
 - **GitHub.** PR actions and forge reads happen only when you invoke them.
+- **MCP servers.** A configured server is contacted only when its tool is used; the tool arguments
+  and the result it returns go to that server, whether it is a local child process or a remote
+  endpoint. The server operator's retention policy applies.
 
 ## Retention and deletion
 

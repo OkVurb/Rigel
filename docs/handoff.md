@@ -4,8 +4,8 @@
 CLI carries a source URL; every decision carries an ID that later sections cite. Where this document
 and an older doc disagree, this document wins — see [§3.3 Superseded](#33-superseded).
 
-**Last reviewed:** 22 Oct 2026 (the agent room ships with in-app, windowless agent launch, and
-is merged into `main` — §2.8–§2.10).
+**Last reviewed:** 6 Nov 2026 (0.2.0: provider routing, Free mode, the MCP and skill-script
+gates, and the version bump — §2.10).
 
 ---
 
@@ -292,6 +292,71 @@ Two things the merge exposed that are worth keeping in mind:
 hardening and low-risk cleanup; the substantial accepted work is in
 [roadmap-0.2.md](roadmap-0.2.md). The hard gate is
 [release-checklist.md](release-checklist.md).
+
+**6 Nov 2026 — 0.2.0 and the routing repair.** The report was “every send fails with a Vertex
+401 `ACCESS_TOKEN_TYPE_UNSUPPORTED`, whichever model I pick”. The door was taken from
+`Settings.provider` alone while the model arrived from the picker, a preset or an agent row, so
+a save that had not landed sent the pick through the previous door — and Vertex's namespace is
+`google/gemini…`, the same spelling OpenRouter and AI Studio use. The fix is one resolver,
+`crates/rigel-core/src/agent/routing.rs`: the renderer sends `provider` with `model`, a preset
+owns its saved door, a model the named door cannot send is an error, and a bare id may repair the
+door only through a non-gateway namespace owner — never Vertex. `vertex::resolve_token` refuses
+the three credentials that produce that 401 (API key, service-account JSON, ID token) before the
+request. `docs/roadmap-0.2.md` now lists every 0.2.0 gate as closed and moves the remaining
+round-9 work past the release with a reason; the version is `0.2.0` in the workspace, the UI and
+the bundle, and `rigel --version` prints it.
+
+**5 Nov 2026 — Q244.** Saving a chat provider key now proves the candidate before the keychain
+write: the core sends it to `/models`, or to OpenRouter's authenticated `/api/v1/key` because
+OpenRouter's roster is public, and reports a provider with no roster as unchecked rather than
+valid. A rejection leaves the previous key untouched. Settings shows the check's sentence and
+`rigel keys set` refuses the same way; the scripted 200/401 tests are in `agent::catalog`.
+
+**6 Nov 2026 — the 0.2 guard gates.** Five runtime gates landed in the shared core path used by
+the window and the CLI: **Q239** `BlastRadius` (carried on `CommandRequest`, with exact targets,
+file/byte counts and explicit `cannot_determine` rows; the existing snapshot is still the recovery
+path), **Q240** `NetworkPolicy` (`.rigel/network.json`, checked in `Egress::authorize` before the
+per-origin prompt and before any socket), **Q245** per-child `SubagentPolicy::max_steps` (now
+proved by a test that stops two children at `step_limit` while the parent completes), **Q251**
+`MemoryApprover` (the default is `DenyMemory`; the window card, CLI `y/yes` and MCP bus all ask
+first), and **Q254** pause/resume at a step boundary (`Cancels`, with `paused`/`resumed` rows and
+Pause/Resume controls in the window). Tests: `agent::destructive` (blast radius),
+`tests/egress.rs` (kill switch and allowlist), `tests/guarantees.rs` (closed memory write), and
+`tests/native.rs` (child cap and pause/resume).
+
+**6 Nov 2026 — Q242 and Q243, the last two guard gates.** **Q242** is mediated where the harness
+already asks: `rigel_approve` recognises `mcp__server__tool`, reads the project's `.mcp.json`, and
+sends the declared stdio command through a bounded `initialize` → `tools/list` handshake so the
+card shows the server's **real** tools. The first use is refused when nobody answers; the server
+grant and each tool grant are separate, and every decision is recorded (`gate: "Q242"`) on the
+turn, or as an `mcp_approval` intervention when a harness turn has no row. Tests:
+`crates/rigel-mcp/tests/project_mcp.rs` against a local fixture server. **Q243** rides the command
+path that already exists: `skill_load` records the script paths a body names, `run_command`
+carries them as `skill_scripts`, and the command gate refuses one that was not approved — a
+project-scoped command grant does not cover a skill's script. Tests:
+`crates/rigel-core/tests/skill_scripts.rs`. Both are checked in [roadmap-0.2.md](roadmap-0.2.md).
+
+**6 Nov 2026 — Free mode, launch freshness, and the 401/429/400 reports.** The window's launch
+pass is forced rather than trusting a cache: every credentialed provider roster is read
+concurrently (`models_refresh`), skill sources including GitHub repositories are re-synced through
+`SkillIndex::refresh_all`, and the picker cache is 60 s instead of 300. **Free mode** is a composer
+button backed by `agent::freemode`: it ranks free chat rows (the selected door, then an owned
+quota, then shared pools), probes up to six with a real 8-token message, skips 401/429/404/400 and
+saves the first that answers through `settings_set`. Native fan-out uses the same model because
+`SubagentPolicy` carries it and the coordinator accepts it as an extra allowed id. Three provider
+failures were ambiguous and now name their cause: a Google API key stored for `vertex` is refused
+before the request with the AI Studio/`gcloud` choice (the `ACCESS_TOKEN_TYPE_UNSUPPORTED` 401); a
+saved id the provider's live roster no longer lists is refused before sending, with real rows
+instead of a 400 that names a whole catalogue (`guard_live_model`); and a 429 from a shared free
+pool is one of the cases Free mode skips rather than the end of the turn.
+
+**Working method and sources.** The test-first loop and the "verify the real execution path before
+claiming a gate" habit came from [obra/superpowers](https://github.com/obra/superpowers) (MIT); the
+diagnosis loop that traced where `run_command`, `MemoryService`, `Egress` and the coordinator
+actually execute came from [mattpocock/skills](https://github.com/mattpocock/skills) (MIT). The
+other skill collections reviewed were [xedlab/agent-skills](https://github.com/xedlab/agent-skills)
+and [odyssey4me/agent-skills](https://github.com/odyssey4me/agent-skills) (Apache-2.0); no external
+code was copied, only the working method.
 
 Verified working in the app: open a project → Chat → **Start the chat server** → **Start agents**
 → three agents (Claude, Codex, Phi4) online with no window on screen; mention one and it replies;
@@ -878,7 +943,7 @@ command must say so explicitly.
 | D138 | **Focus mode hides the rail and inspector for the current view**, toggled with `Ctrl+.` and remembered per view; the list stays. | grilling Q188, 30 Oct |
 | D139 | **Clicking a notification opens the session and turn that raised it**, and an approval notification opens its card; the payload carries ids, never paths or prompts. | grilling Q189, 30 Oct |
 | D140 | **The shelf pins a skill to the session, and a cheap scout proposes skills.** Pin writes the current body hash, shows a composer chip, names the skill in the turn's preamble, and gains unpin/list calls. A lite agent — the cheapest allowlist entry — reads a compact session summary, searches the local index and offers a few candidates to pin; it runs from a button and once when a session's first turn starts, never per turn. Task agents get master prompts shipped per role (chat, implementer, reviewer, tester, researcher), editable in Settings and recorded in the transcript when used. A pin remains untrusted instruction, not permission. | grilling Q190, 30 Oct |
-| D141 | **A moved pin shows its change**: a changed badge in the session's pinned list, a diff between the pinned and current bodies, and Keep pin / Update, with the update reason recorded on the session. | grilling Q191, 30 Oct |
+| D141 | **A moved pin shows its change**: a changed badge in the session's pinned list, a diff between the pinned and current bodies, and Keep pin / Update, with the update reason recorded on the session. **Built 5 Nov:** `crates/rigel-core/src/pins.rs` joins session pins with `SkillIndex` (`body_sha`, plus `body_at` for any content-addressed body); `session_skill_pins` / `session_skill_review` / `session_skill_keep` / `session_skill_update` cross IPC, and the core resolves the current hash for Update. The composer chip and the Skills menu carry the badge; the review card renders a bounded line diff and disables Update when the current body is missing. Keep and Update write `interventions` rows of kind `skill_pin` with the old/new hashes and reason. `SkillIndex::body_sha` keeps change detection honest when a blob was collected. Tests: `crates/rigel-core/tests/pins.rs` restores a real indexed pin from a template after the index moves and asserts the original body; `ui/tests/skillpins.spec.ts` covers the diff, Keep and Update cards. **Batch/filter 5 Nov:** `pins::update_all` moves every changed pin whose current body is available in one pass, writes one `skill_pin` intervention with all old/new hashes and the shared reason, and `session_skill_update_all` crosses IPC. The Skills menu filters to changed pins and records the batch reason in an inline form; pins whose current body is missing stay changed rather than moving to a body the index cannot read. Tests: `crates/rigel-core/tests/pins.rs::a_batch_update_moves_every_changed_pin_and_records_one_reason`; `ui/tests/skillpins.spec.ts` covers the filter and batch action. **Batch keep + badge 5 Nov:** `pins::keep_all` leaves every pinned hash in place and records one `skill_pin` intervention with action `keep_all`, all pinned/current hash pairs and the shared reason; `session_skill_keep_all` crosses IPC. The composer Skills button carries the changed count, so a moved pin is visible before the menu opens, and the inline batch form offers Keep all changed or Update all changed with one reason input. Tests: `crates/rigel-core/tests/pins.rs::a_batch_keep_freezes_every_changed_pin_and_records_one_reason`; `ui/tests/skillpins.spec.ts` covers the badge and batch Keep. | grilling Q191, 30 Oct |
 | D142 | **A source gains Pause and a two-step Forget.** Pause stops refreshing and keeps rows and history; Forget deletes rows and blobs except a body a session pinned, which is kept and marked `missing`. | grilling Q192, 30 Oct |
 | D143 | **The picker remembers starred models and the last five picks**, saved in `settings.toml`, with the current model visible whatever the filter. | grilling Q193, 30 Oct |
 | D144 | **The picker shows published context length, input/output price and modality tags**, "unknown" where a vendor publishes nothing and no derived price; the vision flag is what D127 reads. | grilling Q194, 30 Oct |
@@ -889,7 +954,7 @@ command must say so explicitly.
 | D149 | **A turn outline rail, derived at render time.** One mark per user prompt, diff, error and approval, with a sticky current position; no schema, and it carries D136's filter counts. **Built 30 Oct:** `outline` is a `useMemo` over the same pane entries the filter counts read; marks are prompt / diff / error / approval, sized and coloured per kind. `trackOutline` follows scroll against a 32px line from the top and marks the group the reader is in; clicking any mark centres that turn and flashes it. The rail is hidden in the two-pane comparison, where it would describe neither pane. No table was added. Test: `ui/tests/transcript.spec.ts` checks the marks exist and the jump runs. | grilling Q198, 30 Oct |
 | D150 | **Bookmarks: a star on any transcript item or patch hunk**, listed per session with jump links and stored in the project database. **Built 30 Oct:** migration `0013_bookmarks` (`session_id`, `kind` of `item` or `hunk`, `target_id`, `label`, `created_at`, unique per target); `SessionService::toggle_bookmark` returns the stored row or `None`, `bookmarks()` lists newest first. The star is on every transcript line and every hunk head; the inspector lists the session's bookmarks with jump links (a hunk jump opens Diff on that hunk through `onOpenHunk`). Labels are cut at 160 characters and the kind is validated in the core. Tests: `crates/rigel-core/tests/sessions.rs::a_bookmark_toggles_and_stays_per_session`; `ui/tests/bookmarks.spec.ts`. | grilling Q199, 30 Oct |
 | D151 | **Composer history and snippets.** Up/Down cycles the session's prompts (a modifier widens it to all sessions), boundary-aware; a snippets menu with placeholders. Nothing sends without the button. **Built 30 Oct:** history is `localStorage` per project (last 100 prompts, recorded only when a turn is delivered); Up/Down only move when the caret is on the first/last line, `Ctrl+Up` widens to the whole project, and the draft typed before recalling comes back at the end of the list. The snippets menu is project-local (`rigel.snippets.<project>`), offers three starters, inserts text with the first `{placeholder}` selected, and saves the current draft as a snippet. Inserting is never sending — Enter still opens the review card. Test: `ui/tests/composer.spec.ts`. | grilling Q200, 30 Oct |
-| D152 | **Project-local session templates.** Model, effort, steps, roster, pinned skills and a prompt skeleton, offered at create and stored per project — never committed, because model ids are machine-specific (N7). **Built 30 Oct:** `crates/rigel-core/src/templates.rs` reads and writes `.rigel/templates.json` (atomic temp + rename, 40-template cap, one-line 60-character names, missing file is an empty list); `template_list` / `template_save` / `template_delete` cross IPC. `+ session` opens the project's templates when there are any, with Blank session still one click; starting from one creates the session, spawns its roster with each agent's own model, applies the template's model/effort through the picker's path (a turn reads one window-wide default, D130) and steps through `settings_set`, and leaves the prompt in the composer, unsent. "save template" stores the current session's shape. **Not in the template yet:** pinned skills, because the window still has no skill-pin surface (D140); the menu says so by omission rather than saving a field nothing applies. Tests: `crates/rigel-core/tests/templates.rs`; `ui/tests/templates.spec.ts`. | grilling Q201, 30 Oct |
+| D152 | **Project-local session templates.** Model, effort, steps, roster, pinned skills and a prompt skeleton, offered at create and stored per project — never committed, because model ids are machine-specific (N7). **Built 30 Oct:** `crates/rigel-core/src/templates.rs` reads and writes `.rigel/templates.json` (atomic temp + rename, 40-template cap, one-line 60-character names, missing file is an empty list); `template_list` / `template_save` / `template_delete` cross IPC. `+ session` opens the project's templates when there are any, with Blank session still one click; starting from one creates the session, spawns its roster with each agent's own model, applies the template's model/effort through the picker's path (a turn reads one window-wide default, D130) and steps through `settings_set`, and leaves the prompt in the composer, unsent. "save template" stores the current session's shape. **Q270 (5 Nov):** the template now carries `skills` as id + body hash, with `#[serde(default)]` so files written before the field still load; `SessionService::skill_pins` lists and `unpin_skill` removes, `session_skill_pins` / `session_skill_pin` / `session_skill_unpin` cross IPC, the Shelf and the composer's Skills menu pin the current body, the turn preamble names each pinned id with a short hash, and starting from a template restores every pin at its recorded version. Tests: `crates/rigel-core/tests/templates.rs`, `crates/rigel-core/tests/sessions.rs::skill_pins_are_per_session_and_unpin_is_idempotent`; `ui/tests/templates.spec.ts`, `ui/tests/skillpins.spec.ts`. | grilling Q201, 30 Oct |
 | D153 | **A cost preflight line, shown as a range.** Estimated from the last N comparable turns and the prompt's tokens, "no history yet" when the sample is small; a warning that never blocks send. **Built 30 Oct:** the last eight completed top-level turns are the sample; the 20th–80th percentile of their bills is scaled by the draft's tokens against the sample's median prompt (clamped 0.4–3×). Under three completed turns the line says "cost history: no history yet — N of 3 completed turns recorded" instead of inventing a range. The line sits under the first-step quote, names the sample size in its tooltip, warns when the high end exceeds the remaining cap, and never touches the Send button. Test: `ui/tests/composer.spec.ts`. | grilling Q202, 30 Oct |
 | D154 | **An Attention view with a rail count.** Pending approvals, failed turns, budget stops, stale claims, unmerged reviews and blocked merges, grouped by session with jump links; unresolved items only, cleared by resolution. **Built 30 Oct:** `crates/rigel-core/src/attention.rs` reads each kind from the ledger — a failed or budget-stopped turn waits until that agent completes a later turn, a claim waits until it is stale and is cleared by release, and a review waits until merged (an overridden block is not listed) — and returns groups newest first with archived sessions included. `attention_list` adds the bus's open approvals as one “Waiting on you” block. **Follow-up 31 Oct:** `PendingApproval` carries optional `project_root`, `session_id`, `agent_id` and `turn_id`; `turn_send`'s `WindowApprover` records the project and all three ids from the turn it was built for, and the MCP permission tool records the project, session and agent it knows. `Attention::with_approvals` keeps only questions whose project matches the open one — a file with no project stays visible rather than hiding a live question — and maps the origin into each row, so an approval opens the turn that asked; an older queued file without ids still opens the Session card. The rule is `PendingApproval::belongs_to`, and the Session card's `approval_pending` takes the open project and reads `ApprovalBus::pending_for`, so another project's question is not listed there either (its “approval waiting” notification follows that read). `ui/src/attention.tsx` renders the groups with a kind tag and a jump: a turn row opens the session at that turn, a claim or review opens Diff, an approval opens the Session card. The rail badge polls the same read every ten seconds and the view every five, as a fallback: the app watches the approval channel's directory and emits `rigel://approval` on any change, so the card, the badge and the open view refresh as soon as a question lands or is cleared — including a question from the MCP sidecar, whose process has no window handle. Tests: `crates/rigel-core/tests/attention.rs` (each kind lists and then clears at its resolution); `ui/tests/attention.spec.ts` (badge count, grouping, approval targets its recorded turn, block → Diff); `crates/rigel-core/tests/attention.rs::approvals_lead_the_view_and_keep_the_turn_that_asked` covers the merge, the other-project question left out, and the older file with no origin. | grilling Q203, 30 Oct |
 | D155 | **A while-you-were-away card on focus.** Turns finished, patches merged, approvals waiting and spend since the last focus; dismissible, and complementary to D139 rather than a second notification path. **Built 30 Oct:** the baseline is stamped on blur (and on opening a session, so the first focus shows nothing) and read at focus from refs, never by restarting the listener per streamed item. The card appears only when a turn finished, a patch applied, spend moved or the waiting-approval count changed, then reports the current counts; Dismiss clears it and a second focus with no change keeps it away. Notification ids and jumps stay D139's. Test: `ui/tests/away.spec.ts`. | grilling Q204, 30 Oct |

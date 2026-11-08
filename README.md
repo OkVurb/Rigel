@@ -1,568 +1,234 @@
 <div align="center">
 
-<img src="ui/public/rigel.svg" width="104" height="104" alt="Rigel" />
+<img src="ui/public/rigel.svg" width="88" height="88" alt="Rigel" />
 
-# ⭐ Rigel
+# Rigel
 
-**One offline catalogue for agent skills — with an honest measured-vs-advertised column.**
+**Several coding agents. One tree. One bill.**
 
-[![CI](https://github.com/OkVurb/Rigel/actions/workflows/ci.yml/badge.svg?branch=main&style=flat-square)](https://github.com/OkVurb/Rigel/actions/workflows/ci.yml)
-[![Rust](https://img.shields.io/badge/Rust-1.88%20%C2%B7%202024-orange?style=flat-square&logo=rust&logoColor=white)](Cargo.toml)
-[![Tauri](https://img.shields.io/badge/Tauri-2-24C8DB?style=flat-square&logo=tauri&logoColor=white)](crates/rigel-app)
-[![React](https://img.shields.io/badge/React-19-61DAFB?style=flat-square&logo=react&logoColor=black)](ui)
-[![SQLite](https://img.shields.io/badge/SQLite-FTS5-003B57?style=flat-square&logo=sqlite&logoColor=white)](crates/rigel-core)
-[![Windows](https://img.shields.io/badge/Windows-first-0078D6?style=flat-square&logo=windows&logoColor=white)](docs/PLATFORMS.md)
-[![License](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue?style=flat-square)](#-licence)
+A local-first window for Codex, Claude Code, Cursor, Cline and Rigel's own coordinator, working the
+same project without silently overwriting each other.
 
-**The number on the package is usually not the number you get.**
+[![CI](https://github.com/OkVurb/Rigel/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/OkVurb/Rigel/actions/workflows/ci.yml)
+[![Windows](https://img.shields.io/badge/Windows-10%201809%2B-0078D6?logo=windows&logoColor=white)](docs/PLATFORMS.md)
+[![Licence](https://img.shields.io/badge/licence-MIT%20OR%20Apache--2.0-blue)](#licence)
 
 </div>
 
-<p align="center">
-  <a href="#-why-rigel">Why Rigel</a> ·
-  <a href="#-features">Features</a> ·
-  <a href="#-screenshots">Screenshots</a> ·
-  <a href="#-quick-start">Quick start</a> ·
-  <a href="#-the-rust-core">The Rust core</a> ·
-  <a href="#-what-works">What works</a> ·
-  <a href="#-faq">FAQ</a> ·
-  <a href="#-docs">Docs</a> ·
-  <a href="#-contributing">Contributing</a>
-</p>
+**0.3.0 preview.** This tree ships the 0.3 runtime, safety and window wave. Verified on 2026-11-08:
+the Rust workspace (53 test binaries), `cargo fmt` and clippy, the renderer build, the 55-test UI
+end-to-end suite, the docs, claims, design and version checks, the Functions tests and the VPS
+deploy checker are green. Of the [200-item roadmap](docs/roadmap-0.3.md), **71 items are done,
+7 are blocked and 122 remain open**; the blocked set needs a signing certificate, a clean Windows
+VM or GitHub-hosted release proof.
 
-<p align="center">
-  <img src="screenshots/rigel-tour-2026.gif" width="800" alt="Screen recording of the current Rigel build: the skill shelf, the command palette, a session transcript with a command waiting on approval, the chat room, the diff view, the terminal and the settings pages" />
-</p>
+![The Rigel session pane: an agent roster, a transcript with a command waiting on approval, and the per-agent bill](screenshots/2026-session.png)
 
-<p align="center"><sub>Recorded from the current build: shelf · palette · session · chat · diff · terminal · settings</sub></p>
+<p align="center"><sub>The session pane: roster, role-gutter transcript, approval card and bill. Captured from the current build.</sub></p>
 
-<p align="center"><sub><a href="screenshots/rigel-ad-2026.mp4">36-second video ad (MP4, 1.5 MB)</a></sub></p>
+## What it is
 
-## 💡 Why Rigel
+Rigel is a desktop window with one project database behind it. It runs your own agent CLIs and a
+native coordinator, records every turn, attributes every file write, and shows the bill per agent
+instead of as one opaque total.
 
-A local index for agent skills: one catalogue across GitHub and the marketplaces, with duplicate
-detection, a static safety scan, an honest measured-vs-advertised column, and an install matrix per agent
-harness.
+Claims are advisory, not locks. When two agents do touch one file, the diff shows base, ours and
+theirs, and the resolution lands through the same patch journal as everything else. The window
+closes to the tray, so a running session is not interrupted by losing the window.
 
-The claim it is built around: **the number on the package is usually not the number you get.** JetBrains
-measured three token-saving skills against their advertised claims — one delivered a third of its claim,
-one made things worse. Star counts and install numbers surface none of that.
+## What it does
 
-| Question | What Rigel answers with |
+| Surface | What is there |
 |---|---|
-| 🧬 Is this skill a copy of one I already have? | SimHash clusters, with every variant listed under the row |
-| 🛡️ What would it do to my machine? | A static scan with `file:line` evidence, not a score without a reason |
-| 📊 Does it do what it claims? | Advertised percentages stay `unmeasured` until something measures them |
+| **Sessions** | A roster, a role-gutter transcript, streaming turns, an outline, bookmarks, templates, and a resume that reconciles the journal instead of replaying it. |
+| **Claims and merge** | Advisory claims with tombstones and a 24-hour expiry, a 250 ms attribution watcher, a three-way merge, and a CAS patch journal with one revert per patch. |
+| **Budget and safety** | Micro-dollar accounting per turn and per child, a preflight estimate, an 80% warning, and a $20/day project cap that refuses the next turn before it starts. |
+| **Skill shelf** | An offline SQLite FTS5 index, SimHash duplicate clusters, six static capability rules with `file:line` evidence, and source health read without a network call. |
+| **Terminal** | A real PTY in the project root, live font and scrollback settings, and a command gate that names the exact text, cwd and timeout before approval. |
+| **Cloud and phone** | An opt-in Firebase project you own, shelf metadata with tombstones, one published session readable on an iPhone, and a read-only web reader. |
+| **Routing and doors** | One resolver decides the provider and model; the inspector and `rigel route explain` print selected, requested, resolved, reason and the mismatch sentence. Launch health probes every credentialed door, and aliases resolve to the pair they name. |
+| **Runtime control** | Plan mode with one approval per plan, steering at a step boundary, pause across a restart, crash recovery with tombstones, deterministic replay, compaction at 80% of the window and per-step cost and timing. |
+| **Subagents** | Four read-only children with a parent DAG; write mode gives a child a worktree, per-file claims and a reviewed merge. |
+| **Home** | The Rigel Paper: each local day set as a broadsheet from the session database, with a lead story, dispatches, a plate, the day's numbers and a rack of earlier days. |
+| **Headless API** | `rigel serve` exposes the same coordinator over loopback HTTP with bearer auth, an OpenAPI 3.1 spec and SSE. |
+| **Site and CMS** | A static site plus a Payload CMS; the VPS stack (Caddy, Fastify API, Postgres) is documented in [deploy/README.md](deploy/README.md). |
 
-## ✨ Features
+The long version of each, including where it stops, is in [docs/what-works.md](docs/what-works.md).
 
-| | Feature | What it does |
-|---|---|---|
-| 🔎 | **Offline search** | One catalogue across GitHub and the marketplaces, queried against `index.db` with FTS5 |
-| 🧬 | **Duplicate detection** | SimHash clusters, with variants listed under every row |
-| 🛡️ | **Static safety review** | Six capability rules, each with the `file:line` that triggered it |
-| 📊 | **Measured vs advertised** | An advertised number stays `unmeasured` until a measurement exists |
-| 🤖 | **Native agent** | Streaming turns, ten path-checked tools, approvals and snapshots, read and writable subagents with a review before merge, and a cap that holds within one turn |
-| 🔀 | **Attributed diff** | Every agent's writes merged, a conflict strip, and per-patch revert |
-| 🧰 | **Tools and trust** | What is installed, what a skill needs (with the line that said so), and the five-factor arithmetic |
-| 🩺 | **Doctor** | One row per check and an exit code: `0` clear, `1` warnings, `2` failures |
+## New in the 0.3 tree
 
-Each row above is expanded, with its real state, in [What works](#-what-works) and
-[docs/what-works.md](docs/what-works.md).
+- **One route, made legible.** A saved pair, a picker pair, a role preset and a bare-id repair all
+  pass through one resolver; the inspector and `rigel route explain` print the same decision, and a
+  door that is down becomes a visible health row rather than a silent switch.
+- **Doors for every key, and two without one.** Local Ollama and llamafile rows need no key, a
+  custom OpenAI-compatible door is validated and written only to the keychain, and OpenRouter
+  provider order, fallbacks and quantisations come from `.rigel/routing.json`.
+- **A turn you can stop and keep.** Pause at a step boundary and resume after a restart with the
+  same messages and budget, steer the next step, continue with a fresh bound, and recover a crashed
+  turn with resume, read-only or a discard tombstone.
+- **Plans and a subagent graph.** Plan mode proposes the tools and asks once; a tool outside the
+  approved set re-arms the gate. Child agents declare dependencies, and a writable child lands only
+  through its worktree and a reviewed merge.
+- **Proof under the surface.** Migration-prefix rehearsal, fuzzed parsers, a file jail, redaction
+  and pre-write secret scanning, prompt-injection tagging, tool-call repair, context estimation and
+  a bounded diagnostic ring — each with its named test in the roadmap.
+- **A headless door.** `rigel serve` gives an external orchestrator the same coordinator with
+  OpenAPI 3.1, bearer auth and SSE; it binds loopback by default and refuses `0.0.0.0`.
+- **The window catches up.** The Rigel Paper home surface, recovery and subagent views, route
+  inspector, a token-only design system, eight-state and keyboard audits, focus mode and a real PTY
+  that refits on resize.
 
-## 📸 Screenshots
 
-**Shelf — the index, offline**
 
-| Search | Evidence table |
-|---|---|
-| <img src="screenshots/2026-shelf.png" width="440" alt="Shelf search over six sample skills, each with a grade and duplicate markers" /> | <img src="screenshots/2026-shelf-detail.png" width="440" alt="The opened pdf row: grade, evidence table and static review" /> |
+## Install
 
-**Session — the native agent, streaming**
+Download the MSI from [Releases](https://github.com/OkVurb/Rigel/releases/latest). The installer
+ships MSI and NSIS builds for Windows 10 1809 and newer; no Node, Python or Rust is needed once it
+has run.
 
-| Transcript | The chat room |
-|---|---|
-| <img src="screenshots/2026-session.png" width="440" alt="Session transcript with a command waiting on approval, and the budget in the inspector" /> | <img src="screenshots/2026-chat.png" width="440" alt="The chat room, with agent messages and who is in the room" /> |
-
-**Diff — conflicts, not locks, and the shell that ran it**
-
-| The merged diff | The terminal |
-|---|---|
-| <img src="screenshots/2026-diff.png" width="440" alt="The merged diff: a conflict with three versions available, claims with a stale row, and subagent worktrees with their reviews" /> | <img src="screenshots/2026-terminal.png" width="440" alt="The terminal surface, echoed locally in the browser preview" /> |
-
-**Harnesses — one roster, one key each**
-
-| Harnesses | Agent settings |
-|---|---|
-| <img src="screenshots/2026-settings-harnesses.png" width="440" alt="Harness settings: Codex, Claude Code, Cursor, Cline and Gemini CLI with what is detected and the key each receives" /> | <img src="screenshots/2026-settings-agent.png" width="440" alt="Agent settings: model, reasoning effort and the step budget" /> |
-
-## 📌 Status
-
-Phases 0–6 are complete: five surfaces and one database per project. Phase 7 (hardening and release)
-is in progress — the ticked checklist in [handoff.md](docs/handoff.md) says what each item means and
-what is deliberately left open.
-
-The index is not the endpoint. The direction, settled in the interview: **one place where several
-agents work on the same code together**, with this catalogue as the capability layer they call into.
-That shifts the product's spine from grading an index to sandboxing what an agent actually invokes —
-see [interview-answers.md](docs/interview-answers.md) for the answers and the seven collisions they
-leave behind.
-
-## 🚀 Quick start
-
-The desktop app is the product. The Tauri shell embeds `ui/dist` at compile time, so the renderer has
-to be built before the Rust workspace:
+To build the desktop app from source, build the renderer first: the Tauri shell embeds `ui/dist` at
+compile time.
 
 ```bash
+git clone https://github.com/OkVurb/Rigel
+cd Rigel
 cd ui && npm install && npm run build && cd ..
 cargo build --workspace
 cargo run -p rigel-app
 ```
 
-### Chat sidecar
-
-The Chat tab runs agentchattr. Development can point at a checkout under `vendor/agentchattr`, but
-the installer bundles a pinned copy and an embeddable Python 3.12 runtime, so a clean machine needs
-no Python at all. Build that sidecar once on Windows before packaging:
+Or install only the CLI:
 
 ```bash
-python scripts/sidecar/build-agentchat.py
-python scripts/sidecar/build-agentchat.py --force   # rebuild the runtime from scratch
+cargo install --path crates/rigel-cli
+rigel skills index anthropics/skills --limit 20
+rigel skills search "pdf"
+rigel doctor
 ```
 
-The script downloads the commit and archive pinned in `scripts/sidecar/agentchattr.pin` (cached in
-`vendor/cache/`) and writes `crates/rigel-app/resources/sidecar/{agentchattr,python}` plus the
-consolidated `THIRD-PARTY-NOTICES.txt`. The directory is about 100 MB and gitignored. Tauri copies it
-to `$RESOURCE/sidecar`; first launch copies the writable source to `%APPDATA%\Rigel\agentchat` and
-points its agents at the open project. The script refuses to run off Windows x64. Without the
-sidecar the app still starts, and the Chat tab explains what is missing.
+`rigel doctor` prints one row per check and exits `0` clear, `1` warnings, `2` failures. The Chat
+sidecar is built once on Windows before packaging; [CONTRIBUTING.md](CONTRIBUTING.md) has that step
+and the rest of the build setup.
 
-The Chat tab is a messaging view over that room: a bots list with presence, role and a per-agent
-start; one thread per bot (its own messages plus the ones addressed to it) or the whole room; and
-`@name` routing from the composer. A message's uploads draw in its bubble — the core fetches an
-image and hands the renderer a `data:` URL (8 MB cap, `/uploads/` names only), so the session token
-and the server origin never reach the window; anything that is not an image stays a named chip.
+## How a turn works
 
-When a room starts, Rigel also adds the project-scoped [Concord](https://github.com/Get-Concord-AI/concord-mcp)
-MCP server to the project's `.mcp.json`, so Chat harnesses can share work-state, claims, messages and
-handoffs. Each launched harness gets a unique `CONCORD_AGENT_ID`; the server is resolved through
-`npx`, which requires Node 22.12 or newer. Concord is optional: its tools are unavailable when Node
-is absent, and `concord setup` is still the way to enable its global live-delivery adapters.
+1. **Pick the door.** The model picker merges every provider you hold a key for, capped at six rows.
+   A stored key is the permission; a model id never reaches a provider that does not own it.
+2. **Answer the gate.** A command shows its exact text, cwd and timeout first. A destructive command
+   also names its policy rows, gets one round of three read-only advisors, and captures a snapshot.
+3. **Read the record.** Patches land through a compare-and-swap check and a write-ahead journal. The
+   diff names the writer, the turn and the model; the bill is per agent.
 
-[AgentCAD](https://github.com/jdilla1277/agentcad) is also registered at Chat start. Its OpenCascade
-binding supports only Python 3.10–3.12, so Rigel first looks for an interpreter that already imports
-`agentcad.mcp` (the Windows `py -3.12` launcher, then `python3.12`, `python3`, `python`) and otherwise
-falls back to `uv run --with "agentcad[mcp]"`, which keeps the dependency in uv's own cache rather
-than in a system Python. Install it yourself if you prefer the first path:
+## Screenshots
 
-```powershell
-py -3.12 -m pip install "agentcad[mcp]"
-```
-
-With neither a compatible Python nor `uv` on PATH the `agentcad` server is skipped, so the rest of
-the Chat room still works. The `uv` fallback needs the network on its first launch (a ~200 MB
-download); later launches reuse the cache.
-
-[Muse Code](https://dev.meta.ai/products/muse-code) is Meta's terminal agent. When `muse` is on
-PATH, the first room start adds an `[agents.muse]` table to `config.local.toml` (the open project as
-its cwd); a table you wrote yourself is left alone. Rigel starts it with `--disable-approval`
-because a hidden console cannot answer its prompts, and Muse keeps its OS sandbox on. Install it
-with `irm https://dev.meta.ai/install.ps1 | iex` on Windows, then sign in or set `META_API_KEY`.
-
-### Rigel Cloud (optional)
-
-The app is offline unless you point it at a Firebase project you own. Settings → Cloud takes the
-project id and web API key; `rigel cloud configure` does the same from the terminal. Account
-creation, email/password sign-in, password reset and email verification go through Firebase
-Authentication — the refresh token (with the verification answer) stays in the OS keychain and a
-reset answer never says whether the address has an account — **Push shelf** mirrors the
-catalogue's metadata to Firestore, **Pull shelf** brings
-down rows another machine added, and **Publish to phone** sends one session's prompts and the
-assistant's own words so the iPhone client can read them. A row removed locally becomes a
-tombstone on the next push, so a pull deletes it everywhere; Settings → Cloud shows the last sync
-(and `rigel cloud status` prints it). Bodies, tool calls, command output and project files never
-leave the machine. App Check is optional: point the app at the attestation endpoint in
-[`functions/index.js`](functions/index.js), which checks a per-install credential and rate-limits
-token minting (`rigel cloud app-check --url …`). Every Firebase request then carries its
-short-lived token, so a public web API key is not enough to use your project. [docs/cloud.md](docs/cloud.md) has the
-five-minute setup, the App Check endpoint and the document shape;
-[`firestore.rules`](firestore.rules) is the access control.
-
-```bash
-printf '%s' "$FIREBASE_WEB_API_KEY" | cargo run -q -p rigel-cli -- cloud configure --project <project-id>
-printf '%s' "$PASSWORD" | cargo run -q -p rigel-cli -- cloud sign-up --email you@example.com
-printf '%s' "$PASSWORD" | cargo run -q -p rigel-cli -- cloud login --email you@example.com
-cargo run -q -p rigel-cli -- cloud reset --email you@example.com
-cargo run -q -p rigel-cli -- cloud verify            # email a verification link; --check re-reads it
-cargo run -q -p rigel-cli -- cloud push
-cargo run -q -p rigel-cli -- cloud pull
-cargo run -q -p rigel-cli -- cloud publish <session-id>
-cargo run -q -p rigel-cli -- cloud app-check --url https://<region>-<project>.cloudfunctions.net/appCheck
-```
-
-### Email
-
-`rigel mail` gives the agent an inbox on [AgentMail](https://agentmail.to): list, read, send and
-reply.
-Reading needs no confirmation, because nothing leaves the machine. Sending is a card first —
-recipient, subject and body — and silence is a refusal; a read-only subagent is not offered
-the tool at all. The API key lives in the OS keychain, the address in `agentmail.json`, and every
-message comes back labelled untrusted, because it was written by strangers. Nothing is polled and
-no body is written to the project database. Settings → Email lists the conversations and opens one
-oldest-first, so a thread reads as a conversation rather than as separate messages.
-
-```bash
-cargo run -q -p rigel-cli -- mail configure --inbox you@agentmail.to
-printf '%s' "$AGENTMAIL_API_KEY" | cargo run -q -p rigel-cli -- keys set agentmail
-cargo run -q -p rigel-cli -- mail list
-cargo run -q -p rigel-cli -- mail read --message-id '<abc@agentmail.to>'
-printf '%s' 'Body text' | cargo run -q -p rigel-cli -- mail send --to someone@example.com --subject Hi
-printf '%s' 'Thanks!' | cargo run -q -p rigel-cli -- mail reply --message-id '<abc@agentmail.to>'
-```
-
-The browser prototype is the visual reference and needs no Rust at all:
-
-```bash
-cd prototype
-npm install
-npm run dev
-```
-
-Open the printed localhost URL. `Ctrl+1` packages, `Ctrl+2` discover, `Ctrl+3` targets, `Ctrl+K`
-command palette.
-
-## 🧱 The Rust core
-
-The workspace at the repository root is the app itself: `ui/` is the renderer, `crates/` the Rust
-core and CLI, and `crates/rigel-app` the Tauri 2 shell. `prototype/` remains as the visual reference.
-
-```mermaid
-flowchart LR
-  subgraph WIN["Tauri 2 window"]
-    UI["React renderer<br/>ui/"]
-  end
-  UI -->|"invoke · IPC"| APP["rigel-app<br/>thin commands"]
-  APP --> CORE["rigel-core<br/>sessions · budget · patches<br/>claims · tools · updates"]
-  CLI["rigel-cli<br/>one module per command"] --> CORE
-  MCP["rigel-mcp<br/>stdio tool host"] --> CORE
-  ADA["rigel-adapters<br/>one module per harness"] --> CORE
-  CORE --> IDX[("index.db<br/>skills · FTS5 · blobs")]
-  CORE --> PRJ[("project/.rigel/rigel.db<br/>transcript · patches · claims")]
-  CORE -.->|"only when asked"| NET[("GitHub · marketplaces<br/>providers · harnesses")]
-```
-
-<details>
-<summary><b>Every command, with its flags</b></summary>
-
-```bash
-cargo build --workspace
-cargo test --workspace
-cargo run -q -p rigel-cli -- doctor --json
-cargo run -q -p rigel-cli -- session start --project .
-
-# the shelf: walk a repo once, then search it offline forever
-cargo run -q -p rigel-cli -- skills index anthropics/skills
-cargo run -q -p rigel-cli -- skills search "pdf" --json
-cargo run -q -p rigel-cli -- skills get github:anthropics/skills:skills/pdf/SKILL.md
-cargo run -q -p rigel-cli -- skills status
-# re-sync every source that is not fresh — what the window does at launch, when its switch is on
-cargo run -q -p rigel-cli -- skills refresh
-
-# the model roster the picker shows: every provider that holds a credential, merged.
-# The picker opens on chat-eligible rows; `--all` includes image, video, audio and
-# retrieval models instead of naming them in a count.
-cargo run -q -p rigel-cli -- models
-cargo run -q -p rigel-cli -- models --provider openrouter --json
-cargo run -q -p rigel-cli -- models --all
-
-# the native agent: one turn, billed to the session
-# OmniRoute is the default provider; a turn starts `omniroute serve` if it is down.
-printf '%s' "$OMNIROUTE_KEY" | cargo run -q -p rigel-cli -- keys set omniroute
-cargo run -q -p rigel-cli -- session start --project . --budget-cents 25
-cargo run -q -p rigel-cli -- agent run --project . --prompt "read README and fix the typo"
-# a shell command is printed for consent first; `--approval allow` pre-consents, `--json` denies
-cargo run -q -p rigel-cli -- agent run --project . --prompt "run the tests" --approval ask
-# Google's models through the Gemini API (a key from AI Studio; default gemini-4-argon)
-printf '%s' "$GEMINI_API_KEY" | cargo run -q -p rigel-cli -- keys set gemini
-cargo run -q -p rigel-cli -- agent run --provider gemini --prompt "say pong"
-# the same models on Vertex AI: your project and location in the URL, an access token as the
-# credential (VERTEX_ACCESS_TOKEN, or `gcloud auth print-access-token`, which Rigel calls when
-# nothing is stored); ids are the publisher-prefixed `google/gemini-…`
-cargo run -q -p rigel-cli -- agent run --provider vertex --prompt "say pong"
-# Claude through Anthropic's own endpoint — the Messages API, not the OpenAI shape. The key is the
-# same `rigel/anthropic` entry the Claude Code harness reads; default model `claude-opus-5-5`
-printf '%s' "$ANTHROPIC_API_KEY" | cargo run -q -p rigel-cli -- keys set anthropic
-cargo run -q -p rigel-cli -- agent run --provider anthropic --prompt "say pong"
-# Meta Model API: Muse Spark and Muse Wonder on Meta's own endpoint (OpenAI-compatible)
-printf '%s' "$META_API_KEY" | cargo run -q -p rigel-cli -- keys set meta
-cargo run -q -p rigel-cli -- agent run --provider meta --model muse-spark-1.3 --prompt "say pong"
-# the other adapters are one key and one base URL each — `rigel keys status` lists them with their
-# variables. A vendor with no assumed default takes its model from its own live list
-printf '%s' "$GROQ_API_KEY" | cargo run -q -p rigel-cli -- keys set groq
-cargo run -q -p rigel-cli -- agent run --provider groq --model openai/gpt-oss-120b --prompt "say pong"
-# one ACP turn against Cursor, Cline or Gemini; approvals prompt on stdin
-# (needs its CLI and its own key: CURSOR_API_KEY, CLINE_API_KEY or GEMINI_API_KEY)
-cargo run -q -p rigel-cli -- agent acp --harness gemini --project . --prompt "say pong"
-cargo run -q -p rigel-cli -- agent acp --project . --prompt "say pong"
-cargo run -q -p rigel-cli -- agent acp --harness cline --project . --prompt "say pong"
-# trust this project's .mcp.json servers for Claude Code's interactive session
-# (writes .claude/settings.local.json and the ~/.claude.json project entry; --dry-run shows both)
-cargo run -q -p rigel-cli -- agent trust --project .
-cargo run -q -p rigel-cli -- snapshot list
-cargo run -q -p rigel-cli -- snapshot capture --project .
-cargo run -q -p rigel-cli -- snapshot restore <snapshot-id> --project .
-cargo run -q -p rigel-cli -- patch list --project .
-cargo run -q -p rigel-cli -- session resume --project . --id <session-id>
-
-# the claim ledger: advisory, never a lock
-cargo run -q -p rigel-cli -- claim list --json
-cargo run -q -p rigel-cli -- claim release src/lib.rs --agent <agent-id>
-
-# tools: what is here, what a skill needs, what an install would run
-cargo run -q -p rigel-cli -- tools list
-cargo run -q -p rigel-cli -- tools which ripgrep --json
-cargo run -q -p rigel-cli -- tools requirements <skill-id>     # names the source line
-cargo run -q -p rigel-cli -- trust explain ripgrep            # the arithmetic, not a number
-cargo run -q -p rigel-cli -- tools install ripgrep            # exact command first, then a prompt
-cargo run -q -p rigel-cli -- tools install ripgrep --unattended # queues; never runs
-cargo run -q -p rigel-cli -- tools ledger
-
-# a report with an exit code: 0 clear, 1 warnings, 2 failures
-cargo run -q -p rigel-cli -- doctor --project . --json
-
-# updates check GitHub at launch; the manifest is signed and hash-checked
-cargo run -q -p rigel-cli -- update status
-cargo run -q -p rigel-cli -- update check --manifest ./release.json
-
-cd ui && npm install && npm run dev   # renderer in a browser, sample rows
-bash scripts/dev.sh                    # desktop shell, secrets from Infisical (INFISICAL.md)
-cargo run -p rigel-app                 # the same, without Infisical: keychain or shell env
-cd prototype && npm run dev            # visual reference (Phase 0 browser app)
-```
-
-</details>
-
-The index lives at `%APPDATA%\Rigel` (`~/.local/share/rigel` elsewhere): `index.db`, plus `blobs/`
-holding one file per distinct skill body, addressed by sha256. `RIGEL_INDEX_DIR` or `--data-dir`
-points both the CLI and the window at a different one, which is how the tests avoid touching yours.
-
-`skills index` is the only skill command that uses the network. Bodies are fetched from
-`raw.githubusercontent.com`, which does not count against GitHub's API quota, so a 500-skill repo
-costs two API calls. `RIGEL_GITHUB_TOKEN` (or `GITHUB_TOKEN`) raises the limit from 60 to 5,000
-requests/hour if you have one.
-
-`migrate` creates `<project>/.rigel/rigel.db` and writes a `.gitignore` for it, so a session log can
-never be committed by accident. The schema is numbered SQL in `migrations/`, applied one transaction at
-a time by `rigel_core::migrate`.
-
-On Windows, if the checkout sits under a deep path, set `CARGO_TARGET_DIR=C:/rigel-target` before
-building: `link.exe` fails with `LNK1104` once output paths pass 260 characters.
-
-The prototype's Discover view talks to two marketplaces that send no CORS headers, so it uses a
-**dev-only** proxy (`/__hub`, see `prototype/vite.config.ts`). The Rust indexer does not need one:
-`rigel skills sync skillsmp|skillhub` talks to them server-side (`crates/rigel-core/src/skills/hub.rs`).
-
-## ✅ What works
-
-Nothing below is a mock; the tables in [docs/what-works.md](docs/what-works.md) give the state of
-each surface and the evidence for it.
-
-| Surface | State |
+| The shelf, offline | Conflicts, not locks |
 |---|---|
-| **Shelf** | FTS5 search, six-rule static review with `file:line` evidence, evidence table, variants — all offline |
-| **Cloud** | An opt-in Firebase project you own: email/password sign-in, the shelf mirrored both ways (metadata only), sessions published on request for the phone, and per-user Firestore rules |
-| **Session** | The native agent streaming turns, approvals, snapshots, subagents, a live model picker that merges **every provider you hold a key for** and opens on chat-eligible rows, and a cap that holds within one turn |
-| **Safety** | Three writable agents at once, a per-child plan the user approves, a clean-context reviewer on every merge, and a $20/day cap across the project |
-| **Harnesses** | Codex, Claude, Gemini CLI, Cursor and Cline, each probed as its own row with its own key |
-| **Diff** | Attributed writes, the conflict strip, claims with stale rows, per-patch revert, subagent plans with their merge reviews and pending worktree diffs, and a merge or recorded override for an unmerged review |
-| **Tools** | Twelve probed tools, requirements traced to the line that said so, the trust arithmetic, gated installs |
-| **Doctor** | One row per check and an exit code: `0` clear, `1` warnings, `2` failures |
-| **MCP** | A stdio host scoped to one session and one agent, sharing the same tools |
-| **Settings** | Fifteen pages — Agent, Providers, Harnesses, Safety, Spending, Terminal, Appearance, Skill shelf, Cloud, Email, Project rules, Notifications, Updates, Advanced, Diagnostics — with every control writing something the core reads |
-| **Updates** | One signed check of the latest GitHub release, an artifact SHA-256 and Ed25519 check, and auto-install — both switches in Settings → Updates |
-| **Window** | Closing hides to the tray while agents and terminals keep running; the tray menu reopens or quits |
+| <img src="screenshots/2026-shelf-detail.png" width="440" alt="The shelf: search results and an opened skill with grade, evidence and static review" /> | <img src="screenshots/2026-diff.png" width="440" alt="The diff view: a conflict with three versions, claims, and subagent worktrees with their reviews" /> |
 
-The full table, including what is deliberately unfinished, is [docs/what-works.md](docs/what-works.md).
+| The chat room | A real shell |
+|---|---|
+| <img src="screenshots/2026-chat.png" width="440" alt="The chat room with agent messages and who is in the room" /> | <img src="screenshots/2026-terminal.png" width="440" alt="The terminal surface with a shell prompt in the project root" /> |
 
-## ❓ FAQ
+Every image is a capture of the built app. The [tour](web/shots/rigel-tour-2026.mp4) shows the
+shelf, palette, session, chat, diff, terminal and settings in order.
 
-<details>
-<summary><b>Does Rigel need the network?</b></summary>
+## Cloud is optional
 
-Only to index or sync a source (`skills index`, `skills sync`), to run a model turn, and to check
-for updates. Search, the static review, evidence, variants and the diff all read local SQLite. A
-re-index inside the freshness window makes zero HTTP requests; after it, each URL is revalidated
-with `If-None-Match`. The update check is one signed request to the latest GitHub release at
-launch, or whenever you press Check now; Settings → Updates turns it and auto-install off.
+Rigel is offline unless you point it at a Firebase project you own. Push mirrors shelf metadata,
+never a skill body. Publish writes one session's prompts and the assistant's own words, never tool
+calls, command output or your project path. A removed row travels as a tombstone, so a pull does not
+resurrect it.
 
-</details>
+Account credentials stay in the OS keychain; the renderer never sees the refresh token. App Check is
+an optional custom provider that verifies a per-install token in constant time and rate-limits minting.
+[docs/cloud.md](docs/cloud.md) has the setup and the document shape.
 
-<details>
-<summary><b>Is the safety grade a proof that a skill is harmless?</b></summary>
+## The site, the CMS and the VPS stack
 
-No. It is a static scan of one file: it does not execute anything, and it cannot prove a skill is
-harmless. `A` is unreachable from a static scan and stays reserved until declared-vs-actual tool use
-and provenance are weighed.
+`askrigel.com` is a static build of `web/`. The stack in [deploy/README.md](deploy/README.md) runs
+Caddy at the edge, a Fastify API at `api.askrigel.com`, a Payload CMS at `admin.askrigel.com` and one
+Postgres container with separate `rigel` and `rigel_cms` databases; the site is mounted into Caddy
+from the build in `.deploy/`. `node deploy/check.mjs` validates the production env file, both
+Dockerfiles, the compose file, the Caddy targets and the built site without touching the server; the
+runbook has the bootstrap, DNS, TLS, backup and rollback steps.
 
-</details>
+The Firebase project is still the reader's auth and data path: the web reader signs in directly, and
+`/api/contact` plus `/api/gravity-ad` are reverse-proxied to the existing Functions until the
+Fastify routes replace them. The migration is staged so either side can be rolled back.
 
-<details>
-<summary><b>Where does my data live?</b></summary>
+## What works, and what does not
 
-`%APPDATA%\Rigel` on Windows (`~/.local/share/rigel` elsewhere): `index.db`, plus `blobs/` holding one
-file per distinct skill body, addressed by sha256. Each project also gets `<project>/.rigel/rigel.db`,
-and `migrate` writes a `.gitignore` for it, so a session log can never be committed by accident.
-`RIGEL_INDEX_DIR` or `--data-dir` points both the CLI and the window somewhere else.
+[docs/what-works.md](docs/what-works.md) is the table this README answers to. It marks each surface
+**real**, **protocol**, or **not ported**, and names the evidence.
 
-</details>
+The gaps are part of the record:
 
-<details>
-<summary><b>Which agents can it drive?</b></summary>
+- **122 roadmap items are still open.** [docs/roadmap-0.3.md](docs/roadmap-0.3.md) lists each with
+  its artifact and its "done when"; the seven blocked items need a signing identity, a clean Windows
+  VM or GitHub-hosted release proof. No open item is described here as finished.
+- **The signed release is not cut.** 0.3.0 has no published installer, provenance or receipt; the
+  version agrees across the four build files, but signing credentials are not in this tree.
+- **The VPS API is partial.** Health, auth, devices, sessions, published sessions and the relay are
+  implemented; the cloud, files, LLM, contact and ad routes still live on Firebase or the bridge.
+- **The web reader still talks to Firebase.** The static site is hosted by Caddy, not the reader.
+- **Cloud is exercised against a local stand-in** for the Firebase hosts, not a live project owned
+  by the repository.
+- **The iPhone client is compiled, not device-tested.** Uploads and the charge gesture have unit
+  coverage; no simulator rendered them on this machine.
+- **Muse Code, Gemini CLI, Cursor and Cline are verified against scripted implementations**, because
+  none of those CLIs is installed on the build machine; a live Claude subscription turn has not run.
+- **The keyboard exit test runs in the browser preview**, not against a packaged build; that
+  real-build walk is the remaining proof.
+- The static safety scan is not a proof that a skill is harmless. `A` is unreachable from a static
+  scan and stays reserved.
+- The merge reviewer is a model, not a proof. The patch journal and the worktree are what make a bad
+  merge recoverable.
 
-The native agent, against any row of its provider table: OmniRoute by default (the local router),
-or OpenRouter, Gemini (AI Studio or Vertex), Claude (Anthropic's own Messages API), OpenAI, xAI,
-Groq, DeepSeek, Mistral, Together and Fireworks with a key of your own. Plus one turn through Codex (`codex app-server`, with
-`codex exec --json` as the fallback), one through the Claude CLI, one headless turn through Meta's
-Muse Code (`muse exec --json`, with no `Usage` row because its journal carries no token counts),
-and one ACP turn through Gemini CLI, Cursor or Cline. Every harness is probed as its own row and keeps its own key in the keychain.
+## Docs
 
-</details>
+- [ARCHITECTURE.md](ARCHITECTURE.md): the pieces, the two databases, the write path and a turn
+- [docs/what-works.md](docs/what-works.md): every surface, its state and its evidence
+- [CONTRIBUTING.md](CONTRIBUTING.md): build, checks, layout and the rules for a schema change
+- [SECURITY.md](SECURITY.md): the threat model, every network call and what is not defended
+- [docs/privacy.md](docs/privacy.md): what stays local and what leaves
+- [docs/PLATFORMS.md](docs/PLATFORMS.md): Windows support, signing and what macOS/Linux mean here
+- [docs/cloud.md](docs/cloud.md): the Firebase project, the account and the document shape
+- [docs/roblox.md](docs/roblox.md): Roblox Studio MCP, 3D assets, animations and sound effects
+- [docs/design.md](docs/design.md): surface jobs, the token contract and the responsive breakpoints
+- [docs/api.md](docs/api.md): `rigel serve`, bearer auth, OpenAPI and the endpoint table
+- [docs/threat-model.md](docs/threat-model.md): five threats and what is, and is not, defended
+- [docs/troubleshooting.md](docs/troubleshooting.md): real error strings and the fix for each
+- [docs/adr/README.md](docs/adr/README.md): the routing, storage, approval and cloud decisions
+- [deploy/README.md](deploy/README.md): the VPS runbook, DNS, TLS, backup and rollback
+- [cms/README.md](cms/README.md): the Payload content and admin backend for the website
+- [docs/roadmap-0.2.md](docs/roadmap-0.2.md): what 0.2.0 closed, and the round-9 work that moved past it
+- [docs/roadmap-0.3.md](docs/roadmap-0.3.md): the next 200, with the Hallmark design doctrine and the repo/skill research
+- [docs/sprint-0.3-wave-1.md](docs/sprint-0.3-wave-1.md): the executable proof-and-safety sprint for the first wave
 
-<details>
-<summary><b>Can I open it without an API key?</b></summary>
+## Contributing
 
-Yes. The window, the index, the safety scan, the diff and the tools ledger need no provider at all.
-A model turn needs a key; the deterministic scripted model drives the tests with none.
-
-</details>
-
-## 📚 Docs
-
-- [CONTRIBUTING.md](CONTRIBUTING.md) — build, checks, layout and the rules for a schema change
-- [SECURITY.md](SECURITY.md) — the threat model, every network call, and what is not defended
-- [ARCHITECTURE.md](ARCHITECTURE.md) — the pieces, the two databases, the write path and a turn
-- [docs/what-works.md](docs/what-works.md) — every surface, its state and the evidence for it
-- [docs/PLATFORMS.md](docs/PLATFORMS.md) — Windows support, signing, and what macOS/Linux mean here
-- [docs/grilling-round-9.md](docs/grilling-round-9.md) — the 120 decisions behind 0.1.7, with what shipped and what waits
-- [docs/roadmap-0.2.md](docs/roadmap-0.2.md) — the substantial round-9 work deferred from 0.1.7
-- [docs/release-checklist.md](docs/release-checklist.md) — the hard gate every release must clear
-- [SECURITY.md](SECURITY.md) — the threat model and the private reporting route
-- [docs/privacy.md](docs/privacy.md) — what stays local, what leaves, and why
-- [docs/terms.md](docs/terms.md) — the plain-language beta terms
-- [docs/cloud.md](docs/cloud.md) — your own Firebase project: setup, the account, and the shelf's document shape
-- [qa/p2.md](docs/qa/p2.md) — the Phase 2 exit test, with recorded results
-- [qa/p3.md](docs/qa/p3.md) — the Phase 3 exit test: killed turn, resume, idempotent patch, the cap
-- [migrating-prototype-index.md](docs/migrating-prototype-index.md) — moving the `skilldb:` rows into SQLite
-- [phase-0-teardown.md](docs/phase-0-teardown.md) — competitor analysis
-- [competitor-codebuff-docs.md](docs/competitor-codebuff-docs.md) — what Codebuff's docs reveal, and where Rigel beats it
-- [skill-intelligence.md](docs/skill-intelligence.md) — discovery, fingerprinting, safety, ranking
-- [design-prompt.md](docs/design-prompt.md) — the visual brief this UI follows
-- [handoff.md](docs/handoff.md) — **the build plan**: architecture, schemas, interfaces, and a tickable checklist (P0.1–P7.9)
-- [interview-answers.md](docs/interview-answers.md) — 60 answered questions, the contradictions, and the ChatGPT handoff
-- [phase-1-plan.md](docs/phase-1-plan.md) — the earlier index-only plan; superseded by the handoff
-- [grilling-50.md](docs/grilling-50.md) — 66 questions to stress-test the plan
-
-## 🧰 Scripts
-
-- `node scripts/export-installed-skills.mjs` — snapshot installed skill names into the prototype
-- `node scripts/verify-ecc.mjs` — verify ECC across every harness; non-zero on failure
-- `node scripts/fix-cursor-hooks.mjs` — repair Cursor's project-relative hook paths
-- `node scripts/handoff-status.mjs` — checklist progress per phase; fails if the §11 summary table is stale
-- `node scripts/check-docs.mjs` — fails on a link or anchor in `README.md` or `docs/` that resolves nowhere, or an issue form GitHub would reject
-- `node scripts/make-sbom.mjs sbom.cdx.json` — generate the CycloneDX SBOM from Cargo and npm lockfiles
-- `bash scripts/check-hygiene.sh` — fails if `ACTIVE-WORK.md` or a path under `tmp/` is committed; the pre-commit hook runs it too
-- `bash scripts/dev.sh` — local dev: the desktop shell under `infisical run --env=dev`, with the setup steps in [INFISICAL.md](INFISICAL.md)
-- `bash scripts/p3-exit-test.sh` — the Phase 3 exit test; needs a built `rigel` and `python`
-- `bash scripts/p5-exit-test.sh` — two agents on one file: conflict in two seconds, no "locked"
-- `bash scripts/p6-exit-test.sh` — a missing tool, a shim package manager, approval and the queue
-- `bash scripts/p7-exit-test.sh` — doctor, licence files, installer config, updates and no network
-- `python scripts/sidecar/build-agentchat.py` — build the pinned Chat sidecar and its third-party notice for the installer (Windows x64)
-- `bash scripts/refresh-skills.sh` — re-index every repository in `scripts/skills-sources.txt`; `--dry-run`, `--limit` and `RIGEL_GITHUB_TOKEN` are supported
-- `node scripts/cloud-verify.mjs` — verify Rigel Cloud against a live Firebase project: account, mail, a push/pull round trip, a tombstone and the sync clocks, each as a pass/fail step; [docs/cloud.md](docs/cloud.md#verifying-a-live-project)
-- `scripts/fixtures/p4-subagents.json` — a scripted parent that delegates to two cheap readers; `rigel agent run --script` prints their bills
-
-## 🤝 Contributing
-
-Read [CONTRIBUTING.md](CONTRIBUTING.md) first — especially the "Non-negotiables" table, because a
-change that violates one is a bug even if the tests pass. The checks are exactly the ones CI runs:
+The checks are the ones CI runs:
 
 ```bash
 cargo fmt --all -- --check
 cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
 (cd ui && npx tsc --noEmit && npm run build && npm run test:e2e)
+node scripts/check-docs.mjs
+node scripts/release-check.mjs
 ```
 
-A schema change is a new numbered file in `migrations/` plus a `Migration` entry; an applied migration
-is never edited. `bash scripts/dev.sh` enables the pre-commit hook on first run, and
-`git config core.hooksPath .githooks` does it directly; the hook runs the same hygiene check as CI.
-Security reports go to `security@rigel.invalid`, as [SECURITY.md](SECURITY.md) describes, and not
-to the issue tracker. A failing test is fixed by fixing the cause: no `#[ignore]`, no weakened
-assertion, no lint silenced with an `allow` attribute.
+A schema change is a new numbered file in `migrations/` plus a `Migration` entry; an applied
+migration is never edited. Fix a failing test by fixing the cause: no ignored test, no weakened
+assertion, no silenced lint.
 
-## 🚧 Limits, stated plainly
+Security reports go to `security@rigel.invalid`, as [SECURITY.md](SECURITY.md) describes, not to the
+issue tracker.
 
-- The safety grade is a static scan of one file. It does not execute anything and cannot prove a skill
-  is harmless. `A` is unreachable from a static scan and stays reserved until Phase 6 weighs
-  declared-vs-actual tool use and provenance.
-- **Freshness is a ten-minute window.** Re-indexing inside it makes zero HTTP requests; after it, each
-  URL is revalidated with `If-None-Match`, and `--force` bypasses the window entirely. A repo that
-  changed while cached is only seen after the window expires or with `--force`.
-- The GitHub path uses unauthenticated quota (60 requests/hour) unless `RIGEL_GITHUB_TOKEN` is set.
-  Six hundred skills cost two API calls, so the quota is rarely the limit; the raw body fetches are.
-- Skill bodies live on disk in `blobs/`, not in SQLite. Deleting that directory forces a re-fetch; the
-  rows will report `body: not fetched` until one happens. `rigel skills gc` only removes blobs no row
-  or cache entry names.
-- **The merge reviewer is a model, not a proof.** It sees the diff and nothing else, and its
-  APPROVE is a signal, not a guarantee; the patch journal and the worktree are what make a bad
-  merge recoverable. The daily cap is counted in the project database, so it is global across
-  this project's sessions, not across every project the window has opened.
-- **Subagents are cheap and concurrent; up to three may write.** Read children cannot write or
-  spawn. A writable child is started only with a plan the user approved (or skipped with a
-  recorded reason), holds a claim on each of its files, works in its own worktree, and merges
-  only after a clean-context reviewer reads the diff. A blocked review needs a typed override,
-  which is stored beside the verdict. The writable count and the $20/day cap live in
-  Settings → Safety; the cap covers every session in the project and interrupts every running
-  agent after the step that crosses it. The allowlist is eight models, all at
-  $5/M output or less: `openai/gpt-5-nano` (default), `openai/gpt-5.4-nano`,
-  `google/gemini-2.5-flash-lite`, `deepseek/deepseek-v4.1-flash`,
-  `qwen/qwen3-coder-30b-a3b-instruct`, `anthropic/claude-haiku-5.5`,
-  `google/gemini-3-flash-preview` and `openai/gpt-5.4-mini`. A parent cannot name anything outside
-  it, so it cannot point a child at an expensive model to dodge its own cap. Prices and context
-  windows were read from OpenRouter's live model list on 21 Oct 2026 and are mirrored in
-  `pricing.rs`, so a provider that omits cost is still billed. Children can read, list and search
-  but not write or spawn, so nesting is one level deep. Up to four children per turn run at the
-  same time: they are registered before any starts, then polled together, and their results come
-  back in the order the parent asked for them, not finish order. `BudgetService::account` takes a
-  writer lock, so two children reporting usage at once cannot lose a charge. A child's turn token
-  is a child of the parent's, so stopping the parent — or a budget kill — stops the whole fan-out;
-  a stop that lands mid-stream still charges the step and closes the turn `cancelled`. Four steps
-  each, and a child's turn is not counted as a task. The cap still ends a running child after the
-  step that crosses it, which means a fan-out near the cap can overshoot by one step per running
-  child.
-- Clustering uses one signal (content SimHash), not the three the design calls for. MinHash and tree
-  signatures are still open.
-- `prototype/src/installed.json` contains the names of skills present on the machine that generated it.
+## Licence
 
-## 🏷️ Naming
+MIT OR Apache-2.0, at your option. The texts are in [LICENSE-MIT](LICENSE-MIT) and
+[LICENSE-APACHE](LICENSE-APACHE). The installer's Chat sidecar also bundles agentchattr (MIT) and
+Python (PSF); the build writes their notices to `resources/sidecar/THIRD-PARTY-NOTICES.txt`.
 
-Rigel, named for the bright anchor star in the mark. The Phase 0 document is titled Skill Index, and
-the prototype still uses `skilldb:` keys; both are now historical. Phase 2 moved that data into
-`index.db` — see [the migration note](docs/migrating-prototype-index.md) — and nothing in `crates/`
-or `ui/` reads those keys.
-
-## 📄 Licence
-
-MIT OR Apache-2.0, at your option. The workspace, every crate and the renderer carry the same
-expression; the texts are in [LICENSE-MIT](LICENSE-MIT) and [LICENSE-APACHE](LICENSE-APACHE).
-The installer's Chat sidecar also bundles agentchattr (MIT) and Python (PSF); the build writes their
-full texts to `resources/sidecar/THIRD-PARTY-NOTICES.txt`, which ships with the app.
 No contributor licence agreement, and no telemetry to opt out of.
-
-<p align="center">
-  <sub>Rust · Tauri 2 · React · SQLite — built in the open, with no telemetry and no CLA.</sub>
-</p>
-
-<p align="center">
-  <sub>⭐ If Rigel saves you from one bad skill, star the repo.</sub>
-</p>

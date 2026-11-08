@@ -2,6 +2,38 @@
 
 Every release, newest first. The heading is the version its `v*` tag publishes.
 
+## 0.3.0 — 2026-11-06 (preview)
+
+A preview of the 0.3 tree for testing inside the desktop app. It keeps the 0.2.0 feature set and
+adds the work completed for 0.3 wave 1.
+
+- feat(swarm): add Rigel, the Muse big boss, and let Swarm choose any chat model for the coordinator
+- feat(concord): read and reply to Concord work from Settings, with awaiting/all filters and receipts
+- test(window): drive the built app through open, turn, approval and diff with the native window runner
+- test(core): rehearse every migration prefix and fuzz the patch, MCP, settings and skill parsers
+- feat(diagnostics): keep the last thousand events in a bounded, redacted ring
+- feat(agent): plan mode with one plan approval, steering, pause across restart and crash recovery
+- feat(agent): a subagent DAG and write-mode children that merge only through a reviewed worktree
+- feat(agent): route inspection, launch provider health, local and custom doors, aliases and a project routing policy
+- feat(agent): context compaction, token estimation, tool-call repair, a prompt-section budget and per-step cost
+- feat(security): pre-write secret scanning, an untrusted-content firewall, MCP transport hardening and a file jail
+- feat(api): `rigel serve` exposes the coordinator over loopback HTTP with OpenAPI 3.1 and SSE
+- feat(ui): the Rigel Paper home surface, recovery and subagent views, design tokens and accessibility audits
+- feat(server,cms): add the Fastify API, Payload CMS and the Caddy/Postgres deployment runbook
+- feat(web): refresh the public site, add the FAQ and features pages, robots.txt and sitemap.xml
+
+## 0.2.0 — 2026-11-06
+
+- fix(agent): make the picked provider the door the turn uses, via one core route resolver
+- fix(agent): refuse API keys, service-account JSON and ID tokens as Vertex credentials before sending
+- feat(agent): Free mode probes free chat rows and saves the winning pair; launch re-syncs rosters and skills
+- feat(agent): per-project MCP server approval with a real `tools/list`, and per-tool grants (Q242)
+- feat(agent): skill scripts are approved separately from the command grant (Q243)
+- feat(agent): per-subagent step caps, pause/resume at a step boundary (Q245, Q254)
+- feat(agent): blast-radius preview for destructive commands, and a project network policy (Q239, Q240)
+- feat(agent): validate a provider key before writing it to the keychain (Q244)
+- feat(memory): memory writes need an approver and show the exact path, mode and content (Q251)
+
 ## 0.1.7 — 2026-11-03
 
 - test(agentchat): say why a launched wrapper wrote no report

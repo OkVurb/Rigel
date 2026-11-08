@@ -1,0 +1,20 @@
+{
+  "reviewed": "2026-11-06",
+  "claims": [
+    {
+      "text": "80%",
+      "source": "crates/rigel-core/src/budget.rs",
+      "basis": "the warning threshold is a constant, not a measured marketing figure"
+    },
+    {
+      "text": "80% of the cap",
+      "source": "ui/src/session.tsx",
+      "basis": "rendered from the stored spend and cap rows"
+    },
+    {
+      "text": "80% warning",
+      "source": "web/features/budget.html",
+      "basis": "describes the constant warning threshold; no incidence rate is claimed"
+    }
+  ]
+}
