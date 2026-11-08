@@ -13,4 +13,16 @@ paths = [
     '''crates/rigel-cli/tests/.*''',
     '''scripts/supply-chain\.test\.mjs''',
     '''ui/src/.*\.(test|spec)\.[tj]sx?''',
+    # Unit-test fixture tokens: each is deliberately fake and asserted as rejected/read.
+    '''crates/rigel-core/src/agent/secret_scan\.rs''',
+    '''crates/rigel-core/src/agent/agentchat\.rs''',
+    '''crates/rigel-core/src/memory\.rs''',
+    # Test-only fixtures under the vendored obscura browser and the iOS reader.
+    '''vendor/rigel-b/.*/tests/.*''',
+    '''ios/.*Tests/.*''',
+    '''ios/tools/capture-fixtures\.py''',
+    # Public Turnstile site key (client-side by design), not a secret.
+    '''web/site\.js''',
+    # Generated third-party MCP catalog: findings are OCI tags, version strings and prose.
+    '''data/mcp-catalog\.json''',
 ]

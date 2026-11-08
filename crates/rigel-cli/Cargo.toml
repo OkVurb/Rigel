@@ -13,9 +13,9 @@ path = "src/main.rs"
 async-trait = { workspace = true }
 clap = { workspace = true }
 futures = { workspace = true }
-rigel-adapters = { path = "../rigel-adapters" }
-rigel-core = { path = "../rigel-core" }
-rigel-mcp = { path = "../rigel-mcp" }
+rigel-adapters = { version = "0.3.0", path = "../rigel-adapters" }
+rigel-core = { version = "0.3.0", path = "../rigel-core" }
+rigel-mcp = { version = "0.3.0", path = "../rigel-mcp" }
 serde_json = { workspace = true }
 sqlx = { workspace = true }
 tokio = { workspace = true }

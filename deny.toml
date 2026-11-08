@@ -1,13 +1,18 @@
 # Item 9: what the supply-chain lane refuses.
 #
-# Advisories are denied outright. The two ignores are the tree's current, unavoidable warnings:
-# the GTK stack Tauri pulls in on Linux, where no fixed release exists yet. They are pinned by ID
-# and reason so a new advisory cannot hide behind them.
+# Advisories are denied outright. The ignores below are the tree's current, unavoidable
+# unmaintained transitives from Tauri; they are pinned by ID and reason so a new advisory cannot
+# hide behind them. None is a vulnerability: the audit reports zero vulnerabilities.
 
 [advisories]
 version = 2
 ignore = [
+    { id = "RUSTSEC-2024-0370", reason = "proc-macro-error is unmaintained; transitive via Tauri's GTK stack, no safe upgrade" },
+    { id = "RUSTSEC-2025-0075", reason = "unic-char-range is unmaintained; transitive via Tauri's urlpattern, no replacement release" },
+    { id = "RUSTSEC-2025-0080", reason = "unic-common is unmaintained; transitive via Tauri's urlpattern, no replacement release" },
+    { id = "RUSTSEC-2025-0081", reason = "unic-char-property is unmaintained; transitive via Tauri's urlpattern, no replacement release" },
     { id = "RUSTSEC-2025-0098", reason = "unic-ucd-version is unmaintained; transitive via Tauri's GTK stack, no replacement release" },
+    { id = "RUSTSEC-2025-0100", reason = "unic-ucd-ident is unmaintained; transitive via Tauri's urlpattern, no replacement release" },
     { id = "RUSTSEC-2024-0429", reason = "glib 0.18 VariantStrIter unsoundness; Linux-only and no fixed 0.18 release is published" },
 ]
 
