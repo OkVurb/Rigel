@@ -1,5 +1,6 @@
 import Foundation
 import Observation
+import PostHog
 import RigelRoomKit
 
 /// Everything the screens read: the connection, the roster, the stream.
@@ -184,6 +185,17 @@ final class RoomModel {
             remember(found.client.address)
             apply(settings: found.settings, roster: roster, recent: recent)
             phase = .live
+            PostHogSDK.shared.capture(
+                "room_connected",
+                properties: [
+                    "agent_count": roster.agents.count,
+                    "channel_count": found.settings.channels.count,
+                ]
+            )
+            PostHogLogs.roomConnectionEstablished(
+                agentCount: roster.agents.count,
+                channelCount: found.settings.channels.count
+            )
             KeychainStore.save(found.client.token, account: Self.tokenAccount)
             openStream()
             // The socket will send both of these too; fetching them now only
@@ -195,6 +207,7 @@ final class RoomModel {
             client = nil
             phase = .idle
             connectError = Self.describe(error)
+            PostHogLogs.roomConnectionFailed()
         }
     }
 
@@ -249,6 +262,7 @@ final class RoomModel {
         UserDefaults.standard.removeObject(forKey: Self.addressKey)
         UserDefaults.standard.removeObject(forKey: Self.alternateKey)
         KeychainStore.delete(account: Self.tokenAccount)
+        PostHogSDK.shared.capture("room_forgotten")
     }
 
     /// Switching channels is local: the socket carries every channel, so there
@@ -311,6 +325,13 @@ final class RoomModel {
         defer { isSending = false }
         do {
             try await connection.send(line)
+            PostHogSDK.shared.capture(
+                "room_message_sent",
+                properties: [
+                    "attachment_count": line.attachments.count,
+                    "has_text": !line.text.isEmpty,
+                ]
+            )
             draft = ""
             pendingAttachments = []
             sendError = nil
@@ -340,6 +361,13 @@ final class RoomModel {
             if !pendingAttachments.contains(where: { $0.url == attachment.url }) {
                 pendingAttachments.append(attachment)
             }
+            PostHogSDK.shared.capture(
+                "room_attachment_uploaded",
+                properties: [
+                    "byte_count": bytes.count,
+                    "is_image": mimeType.hasPrefix("image/"),
+                ]
+            )
             uploadError = nil
         } catch {
             uploadError = Self.describe(error)
@@ -389,6 +417,7 @@ final class RoomModel {
         defer { resolvingDecision = nil }
         do {
             try await client.resolveDecision(messageID: answer.message.id, choice: answer.choice)
+            PostHogSDK.shared.capture("room_decision_answered")
             decisionError = nil
             settle(answer.message.id, as: answer.choice)
         } catch {

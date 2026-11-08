@@ -2,6 +2,10 @@ import SwiftUI
 
 @main
 struct RigelPhoneApp: App {
+    init() {
+        PostHogConfiguration.setup()
+    }
+
     @State private var model = RoomModel()
     @State private var cloud = CloudModel()
 

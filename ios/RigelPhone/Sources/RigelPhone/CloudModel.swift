@@ -1,5 +1,6 @@
 import Foundation
 import Observation
+import PostHog
 import RigelRoomKit
 
 /// The phone's Rigel Cloud account: the same Firebase project the desktop
@@ -57,6 +58,7 @@ final class CloudModel {
         guard let project = FirebaseProject(id: projectText, apiKey: keyText),
               project.id == stored.account.projectID
         else {
+            PostHogSDK.shared.reset()
             account = nil
             return
         }
@@ -68,10 +70,14 @@ final class CloudModel {
             } catch {
                 // A revoked or rotated-away token means a fresh sign-in, not a
                 // screen full of errors at launch.
+                PostHogSDK.shared.reset()
                 account = nil
                 KeychainStore.delete(account: Self.accountKey)
                 return
             }
+        }
+        if let account {
+            identify(account)
         }
         await loadSessions()
     }
@@ -110,6 +116,9 @@ final class CloudModel {
             )
             passwordText = ""
             account = signedIn
+            identify(signedIn)
+            PostHogSDK.shared.capture("cloud_signed_in")
+            PostHogLogs.cloudSignInSucceeded()
             keep(signedIn)
             UserDefaults.standard.set(project.id, forKey: Self.projectKey)
             UserDefaults.standard.set(project.apiKey, forKey: Self.apiKeyKey)
@@ -124,6 +133,8 @@ final class CloudModel {
     }
 
     func signOut() {
+        PostHogSDK.shared.capture("cloud_signed_out")
+        PostHogSDK.shared.reset()
         account = nil
         sessions = []
         selected = nil
@@ -162,6 +173,10 @@ final class CloudModel {
                 for: session.id,
                 account: fresh
             )
+            PostHogSDK.shared.capture(
+                "cloud_session_opened",
+                properties: ["published_turn_count": turns.count]
+            )
         } catch {
             self.error = Self.sentence(error)
         }
@@ -171,6 +186,16 @@ final class CloudModel {
         selected = nil
         turns = []
         error = nil
+    }
+
+    /// Identifies the signed-in Firebase account once at the authentication boundary.
+    /// A Firebase UID is scoped to its project, so the combined resource identifier
+    /// avoids merging users from independently configured Firebase projects.
+    private func identify(_ account: FirebaseAccount) {
+        PostHogSDK.shared.identify(
+            "\(account.projectID):\(account.uid)",
+            userProperties: ["email": account.email]
+        )
     }
 
     private var currentProject: FirebaseProject? {
