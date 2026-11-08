@@ -1,0 +1,16 @@
+# Item 9: gitleaks scans the whole history with its default rules, except for the fixtures that
+# deliberately contain non-working keys to prove redaction and provider-shape checks.
+
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Fake credentials that exist only to exercise redaction and provider validation."
+paths = [
+    '''crates/rigel-core/src/redaction\.rs''',
+    '''crates/rigel-core/src/agent/providers\.rs''',
+    '''crates/rigel-core/tests/.*''',
+    '''crates/rigel-cli/tests/.*''',
+    '''scripts/supply-chain\.test\.mjs''',
+    '''ui/src/.*\.(test|spec)\.[tj]sx?''',
+]

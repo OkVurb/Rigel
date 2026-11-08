@@ -1,4 +1,8 @@
 {
+  "scripts": {
+    "app:build": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build-release.ps1",
+    "app:install": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/sync-install.ps1"
+  },
   "dependencies": {
     "@genkit-ai/googleai": "^1.28.0",
     "genkit": "^1.43.0"

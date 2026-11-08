@@ -98,5 +98,21 @@ functions/node_modules/
 # The MCP catalogue is checked in: the app embeds it at compile time and CI has
 # no generation step. Rebuild it with scripts/fetch-mcp-catalog.mjs.
 
+# Payload CMS: the local authoring database and admin build stay machine-local
+cms/node_modules/
+cms/.next/
+cms/*.db
+cms/*.db-*
+cms/media/
+
 # one-shot reCAPTCHA assessment body from Google's console flow
 request.json
+
+# Local handoff bundles and the VPS delivery shelf: large, machine-specific and never history
+handoff/
+
+# Playwright's root-level last-run marker (the report under ui/ is already ignored)
+test-results/
+
+# The CMS test environment can hold real credentials
+cms/test.env

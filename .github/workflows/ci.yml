@@ -80,6 +80,8 @@ jobs:
       - name: Install Chromium
         run: npx playwright install --with-deps chromium
       - run: npm run build
+      - name: Design tokens and surface table
+        run: npm run lint:tokens
       - name: Five surfaces smoke
         run: npm run test:e2e
       - name: Handoff checklist
@@ -114,6 +116,49 @@ jobs:
       - name: Docs links, anchors and issue forms
         run: node scripts/check-docs.mjs
 
+  # Item 9: advisories, licences, committed secrets and a bill of materials. The lane's own
+  # script is tested here too, so a policy file that stops matching the workflow is caught.
+  supply-chain:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      - name: RustSec advisories
+        uses: rustsec/audit-check@v2
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Licences, bans and sources
+        uses: EmbarkStudios/cargo-deny-action@v2
+
+      - name: Committed secrets
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Lane self-test
+        run: node --test scripts/supply-chain.test.mjs
+
+      - name: SBOM
+        run: node scripts/make-sbom.mjs sbom.cdx.json
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sbom
+          path: sbom.cdx.json
+          if-no-files-found: error
+
   hygiene:
     runs-on: ubuntu-latest
     steps:
@@ -123,3 +168,30 @@ jobs:
       # the pre-commit hook runs exactly the same code.
       - name: No local-only paths are committed
         run: bash scripts/check-hygiene.sh
+
+  # Item 1: the real window. tauri-driver drives the built app through open, a scripted turn, an
+  # approval and the diff. msedgedriver has to match the Edge that ships on the runner.
+  window:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: ui/package-lock.json
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Dependencies
+        working-directory: ui
+        run: npm ci
+      - name: Window drivers
+        shell: pwsh
+        run: |
+          cargo install tauri-cli --version "^2" --locked
+          cargo install tauri-driver --locked
+          $edge = (Get-Item "C:Program Files (x86)MicrosoftEdgeApplicationmsedge.exe").VersionInfo.ProductVersion
+          Invoke-WebRequest "https://msedgedriver.microsoft.com/$edge/edgedriver_win64.zip" -OutFile edgedriver.zip
+          Expand-Archive edgedriver.zip -DestinationPath "$env:USERPROFILE.cargoin" -Force
+      - name: Window end-to-end
+        run: npm --prefix ui run test:window

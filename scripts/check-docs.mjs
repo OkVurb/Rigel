@@ -15,6 +15,9 @@ import { existsSync, readFileSync, readdirSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
+import { checkRoadmap } from "./check-roadmap.mjs";
+import { checkClaims } from "./check-claims.mjs";
+
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const TEMPLATES = path.join(ROOT, ".github", "ISSUE_TEMPLATE");
 const problems = [];
@@ -400,9 +403,90 @@ function markdownFiles(directory) {
   return found;
 }
 
+// The desktop app's privacy receipt is a release invariant, not prose: every outbound destination
+// has a row, the operator/billing statement is present, and first-party code names no telemetry
+// SDK or collector endpoint. The marketing site's own analytics are outside this desktop receipt.
+const OUTBOUND_DESTINATIONS = [
+  "Selected model provider",
+  "Firebase Identity Toolkit",
+  "Cloud Firestore",
+  "Firebase App Check endpoint",
+  "GitHub releases",
+  "GitHub, SkillsMP, SkillHub",
+  "AgentMail",
+  "GitHub forge and pull requests",
+  "Configured MCP servers",
+  "Update installer download",
+];
+const TELEMETRY_MARKERS = [
+  /\bposthog\b/,
+  /\bsentry\.io\b/,
+  /\bsegment\.io\b/,
+  /\bmixpanel\b/,
+  /\bamplitude\.com\b/,
+  /\bgoogle-analytics\.com\b/,
+  /\bgoogletagmanager\b/,
+  /\bplausible\.io\b/,
+  /\bdatadoghq\b/,
+  /\bbugsnag\b/,
+  /\brollbar\b/,
+];
+
+function sourceFiles(directory, found = []) {
+  if (!existsSync(directory)) return found;
+  const entries = readdirSync(directory, { withFileTypes: true });
+  for (const entry of entries) {
+    const full = path.join(directory, entry.name);
+    if (entry.isDirectory()) sourceFiles(full, found);
+    else if (/\.(?:rs|ts|tsx|js|mjs)$/.test(entry.name)) found.push(full);
+  }
+  return found;
+}
+
+function checkCloudPrivacy() {
+  const receipt = path.join(ROOT, "docs", "cloud-privacy.md");
+  const text = readFileSync(receipt, "utf8");
+  const rows = text
+    .split("\n")
+    .filter((line) => line.startsWith("|"))
+    .map((line) => line.split("|")[1]?.trim() ?? "")
+    .filter((cell) => cell && cell !== "Destination" && !/^-+$/.test(cell));
+  for (const destination of OUTBOUND_DESTINATIONS) {
+    if (!rows.some((row) => row.includes(destination))) {
+      report("docs/cloud-privacy.md", null, `outbound call has no row: ${destination}`);
+    }
+  }
+  if (!text.includes("## Operator and billing")) {
+    report("docs/cloud-privacy.md", null, "the operator and billing statement is missing");
+  }
+  if (!text.includes("Reviewed 2026-11-06")) {
+    report("docs/cloud-privacy.md", null, "the privacy review date is missing");
+  }
+
+  const files = [
+    ...sourceFiles(path.join(ROOT, "crates")),
+    ...sourceFiles(path.join(ROOT, "ui", "src")),
+  ];
+  for (const file of files) {
+    const source = readFileSync(file, "utf8").toLowerCase();
+    const marker = TELEMETRY_MARKERS.find((pattern) => pattern.test(source));
+    if (marker) {
+      report(path.relative(ROOT, file), null, `telemetry path or SDK marker: ${marker}`);
+    }
+  }
+  return { rows: rows.length, files: files.length };
+}
+
 const documents = [path.join(ROOT, "README.md"), ...markdownFiles(path.join(ROOT, "docs"))];
 for (const document of documents) checkMarkdown(document);
 parseTemplates();
+const privacy = checkCloudPrivacy();
+const claims = checkClaims({ root: ROOT });
+for (const problem of claims.problems) problems.push(problem);
+
+// The roadmap's 200-item contract is a documentation invariant, so it fails the same
+// command: count, ID order, metadata, wave/sprint agreement, repositories, Hallmark.
+const roadmap = checkRoadmap({ root: ROOT, report });
 
 if (problems.length > 0) {
   console.error(`docs check: ${problems.length} problem${problems.length === 1 ? "" : "s"}\n`);
@@ -410,4 +494,16 @@ if (problems.length > 0) {
   process.exitCode = 1;
 } else {
   console.log(`docs check: ${documents.length} documents and every issue form are valid`);
+  console.log(
+    `roadmap check: ${roadmap.items} items with unique IDs, ${roadmap.w1} Wave 1 items matching ` +
+      `${roadmap.sprint} sprint packages, ${roadmap.repositories} repositories, ` +
+      `${roadmap.hallmark} Hallmark citations`,
+  );
+  console.log(
+    `cloud privacy: ${privacy.rows} outbound destinations, operator/billing recorded, ` +
+      `no telemetry path in ${privacy.files} first-party files`,
+  );
+  console.log(
+    `claims check: ${claims.claims} sourced claims across ${claims.files} copy files`,
+  );
 }

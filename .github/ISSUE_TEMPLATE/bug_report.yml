@@ -89,6 +89,24 @@ body:
       render: json
 
   - type: textarea
+    id: diagnostics
+    attributes:
+      label: Diagnostics block
+      description: |
+        Run `rigel doctor --support-bundle` and paste the summary it prints: version, platform,
+        shell, git, database schema, harness probes and the redacted bundle path. Do not paste a
+        keychain value; the bundle redacts known secret shapes, but a path you would rather not
+        publish is still yours to remove.
+      placeholder: |
+        rigel doctor --support-bundle
+        version: 0.2.0
+        platform: windows-x86_64
+        ...
+      render: text
+    validations:
+      required: true
+
+  - type: textarea
     id: notes
     attributes:
       label: Anything else
