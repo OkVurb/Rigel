@@ -1,0 +1,222 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Rigel: terminal</title>
+    <meta
+      name="description"
+      content="A real PTY in the project root, live font and scrollback settings, and the command gate that names the text, cwd and timeout before it runs."
+    />
+    <meta name="theme-color" content="#0b0c0e" />
+    <meta property="og:title" content="Rigel terminal: a real shell with a gate in front" />
+    <link rel="icon" type="image/svg+xml" href="/rigel.svg" />
+    <link rel="preload" href="/fonts/inter-400.woff2" as="font" type="font/woff2" crossorigin />
+    <link rel="stylesheet" href="/site.css" />
+  </head>
+  <body>
+    <a class="skip" href="#main">Skip to content</a>
+
+    <header class="topbar">
+      <div class="bar">
+        <a class="brand" href="/">
+          <img src="/rigel.svg" width="24" height="24" alt="" />
+          <span>Rigel</span>
+        </a>
+        <nav aria-label="Sections">
+          <a href="/features/sessions.html#gate">How it works</a>
+          <a href="/#screens">Screenshots</a>
+          <a href="/features/" aria-current="page">Features</a>
+          <a href="/faq.html">FAQ</a>
+          <a href="https://github.com/OkVurb/Rigel" rel="noopener">GitHub</a>
+        </nav>
+        <a class="btn small" href="/app/">Open web app</a>
+      </div>
+    </header>
+
+    <main id="main" class="shell doc-wrap">
+      <aside class="doc-nav" aria-label="Feature pages">
+        <p class="doc-nav-title">Features</p>
+        <a href="/features/">All surfaces</a>
+        <a href="/features/sessions.html">Sessions</a>
+        <a href="/features/claims.html">Claims and merge</a>
+        <a href="/features/budget.html">Budget and safety</a>
+        <a href="/features/shelf.html">Skill shelf</a>
+        <a href="/features/terminal.html" aria-current="page">Terminal</a>
+        <a href="/features/cloud.html">Cloud and phone</a>
+        <p class="doc-nav-title">On this page</p>
+        <a href="#pty">A real PTY</a>
+        <a href="#settings">Font, scrollback, shell</a>
+        <a href="#commands">The command gate</a>
+        <a href="#destructive">Destructive commands</a>
+        <a href="#lifetime">Tabs, tray, lifetime</a>
+        <a href="#limits">Limits</a>
+      </aside>
+
+      <article class="doc">
+        <h1>A real shell, with a gate.</h1>
+        <p class="lede">
+          The terminal is a PTY in the project root, not a text box pretending to be one. Agents reach
+          the same surface through a command tool that shows the exact command, working directory and
+          timeout before anything executes.
+        </p>
+
+        <section class="doc-section" id="pty">
+          <h2>A real PTY</h2>
+          <p>
+            The rail surface is backed by <code>portable-pty</code>, opened in the project root.
+            PowerShell is the shipped Windows shell; elsewhere Rigel reads <code>$SHELL</code>.
+            xterm.js handles drawing and keys, while input, output and resizes cross IPC to the core.
+          </p>
+          <p>
+            The surface is framed as a canvas with a status pane: shell, cwd, state and font size. The
+            status pane is the answer to “which shell is this, and where is it”, which a bare prompt
+            only implies.
+          </p>
+        </section>
+
+        <section class="doc-section" id="settings">
+          <h2>Font, scrollback, shell</h2>
+          <p>
+            Settings → Terminal holds three controls. The first two apply to an open tab in place;
+            the third is read when a tab opens.
+          </p>
+          <table>
+            <thead>
+              <tr>
+                <th scope="col">Setting</th>
+                <th scope="col">Range</th>
+                <th scope="col">When it applies</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>Font size</td>
+                <td>10 to 20 px</td>
+                <td>Immediately, without restarting the PTY.</td>
+              </tr>
+              <tr>
+                <td>Scrollback</td>
+                <td>1,000 to 100,000 lines</td>
+                <td>Immediately, without restarting the PTY.</td>
+              </tr>
+              <tr>
+                <td>Shell program</td>
+                <td>An executable path</td>
+                <td>The next tab; an open shell keeps its own program.</td>
+              </tr>
+            </tbody>
+          </table>
+          <p>
+            Restart opens a fresh shell on purpose. It is not a reconnect to the old process, because
+            a restarted shell that silently inherited state would be harder to reason about.
+          </p>
+        </section>
+
+        <section class="doc-section" id="commands">
+          <h2>The command gate</h2>
+          <p>
+            <code>run_command</code> is one of the native agent’s tools. Its approval card shows the
+            exact command text, the cwd and the timeout before the process starts. Approvals have the
+            same four scopes as the CLI: once, session, always and deny.
+          </p>
+          <ul>
+            <li>The cwd is jailed to the project. A path outside it is refused by the tool.</li>
+            <li>Each stream is capped at 64 KB; the cap is recorded, not silently exceeded.</li>
+            <li>The process is killed at its timeout, and the exit code is recorded as a
+              <code>command</code> item on the turn.</li>
+            <li><code>--approval ask|allow|deny</code> sets the policy for a CLI run; with
+              <code>--json</code>, the default is deny.</li>
+          </ul>
+          <pre><code>rigel doctor
+rigel models
+rigel agent --approval ask</code></pre>
+        </section>
+
+        <section class="doc-section" id="destructive">
+          <h2>Destructive commands</h2>
+          <p>
+            A deterministic classifier runs before approval. It maps the command to policy rows:
+            <code>delete-outside-project</code>, <code>recursive-remove</code>,
+            <code>force-push</code>, <code>git-reset</code> and <code>registry-write</code>. The
+            prompt names both the row and the token that matched it.
+          </p>
+          <p>
+            A destructive command also gets one round of three read-only advisors on the parent’s
+            model: advocate, opponent and referee. Their answers are shown before the question is
+            asked. They are advisory and cannot allow, deny or alter the gate.
+          </p>
+          <p>
+            If you approve, Rigel captures a snapshot first: a <code>git stash create</code> object
+            kept alive by <code>refs/rigel/snapshots/&lt;id&gt;</code> plus raw copies of changed and
+            untracked files. Non-git trees are copied whole. The cap is 2,000 files or 200 MB, and the
+            capture refuses above it rather than truncating.
+          </p>
+          <p>
+            <a href="/features/claims.html">The claims page</a> covers what happens to the snapshot
+            afterwards and how a restore is journaled.
+          </p>
+        </section>
+
+        <section class="doc-section" id="lifetime">
+          <h2>Tabs, tray, lifetime</h2>
+          <p>
+            The shell survives tab switches. Closing the window hides it in the tray with the agents
+            and PTYs still running; the tray reopens the window or quits and reaps every child. If
+            the tray cannot be built, Close keeps its ordinary meaning.
+          </p>
+          <p>
+            Console children spawned by turns and probes are hidden on Windows, so a command never
+            flashes a black window. The chat server runs under <code>pythonw.exe</code> for the same
+            reason.
+          </p>
+        </section>
+
+        <section class="doc-section" id="limits">
+          <h2>Limits</h2>
+          <ul>
+            <li>
+              The gate is approval policy, not an OS sandbox. An approved command runs with your
+              user’s rights; only the cwd jail applies to Rigel’s own tool call.
+            </li>
+            <li>Output is capped at 64 KB per stream. The full output is not kept elsewhere.</li>
+            <li>A shell program change does not migrate the open PTY; it applies to the next tab.</li>
+            <li>Windows is the supported desktop surface. <code>$SHELL</code> exists for the core,
+              not as a promise of a supported desktop build.</li>
+          </ul>
+        </section>
+
+        <nav class="doc-foot" aria-label="Feature pages">
+          <a href="/features/shelf.html">Previous: the skill shelf</a>
+          <a href="/features/cloud.html">Next: cloud and phone</a>
+        </nav>
+      </article>
+    </main>
+
+    <footer class="foot">
+      <div class="shell foot-inner">
+        <div>
+          <a class="brand" href="/">
+            <img src="/rigel.svg" width="22" height="22" alt="" />
+            <span>Rigel</span>
+          </a>
+          <p>One window for several coding agents on one project.</p>
+        </div>
+        <nav aria-label="Footer">
+          <a href="/">Home</a>
+          <a href="/features/">Features</a>
+          <a href="/features/sessions.html">Sessions</a>
+          <a href="/features/claims.html">Claims</a>
+          <a href="/features/budget.html">Budget</a>
+          <a href="/features/shelf.html">Shelf</a>
+          <a href="/features/cloud.html">Cloud</a>
+          <a href="https://github.com/OkVurb/Rigel" rel="noopener">GitHub</a>
+        </nav>
+        <p class="legal">
+          MIT OR Apache-2.0. Command approval, snapshots and PTY behaviour are described in
+          docs/what-works.md; read it for the exact state of each harness.
+        </p>
+      </div>
+    </footer>
+  </body>
+</html>

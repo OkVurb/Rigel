@@ -1,0 +1,279 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Rigel: claims and merge</title>
+    <meta
+      name="description"
+      content="Rigel’s advisory claims, attribution watcher, three-way merge, CAS patch journal and subagent worktrees, with their limits."
+    />
+    <meta name="theme-color" content="#0b0c0e" />
+    <meta property="og:title" content="Rigel claims and merge: collisions, not locks" />
+    <link rel="icon" type="image/svg+xml" href="/rigel.svg" />
+    <link rel="preload" href="/fonts/inter-400.woff2" as="font" type="font/woff2" crossorigin />
+    <link rel="stylesheet" href="/site.css" />
+  </head>
+  <body>
+    <a class="skip" href="#main">Skip to content</a>
+
+    <header class="topbar">
+      <div class="bar">
+        <a class="brand" href="/">
+          <img src="/rigel.svg" width="24" height="24" alt="" />
+          <span>Rigel</span>
+        </a>
+        <nav aria-label="Sections">
+          <a href="/features/sessions.html#gate">How it works</a>
+          <a href="/#screens">Screenshots</a>
+          <a href="/features/" aria-current="page">Features</a>
+          <a href="/faq.html">FAQ</a>
+          <a href="https://github.com/OkVurb/Rigel" rel="noopener">GitHub</a>
+        </nav>
+        <a class="btn small" href="/app/">Open web app</a>
+      </div>
+    </header>
+
+    <main id="main" class="shell doc-wrap">
+      <aside class="doc-nav" aria-label="Feature pages">
+        <p class="doc-nav-title">Features</p>
+        <a href="/features/">All surfaces</a>
+        <a href="/features/sessions.html">Sessions</a>
+        <a href="/features/claims.html" aria-current="page">Claims and merge</a>
+        <a href="/features/budget.html">Budget and safety</a>
+        <a href="/features/shelf.html">Skill shelf</a>
+        <a href="/features/terminal.html">Terminal</a>
+        <a href="/features/cloud.html">Cloud and phone</a>
+        <p class="doc-nav-title">On this page</p>
+        <a href="#why">Why claims are advisory</a>
+        <a href="#lifecycle">The claim lifecycle</a>
+        <a href="#attribution">Attribution</a>
+        <a href="#diff">The diff surface</a>
+        <a href="#journal">The patch journal</a>
+        <a href="#worktrees">Subagent worktrees</a>
+        <a href="#commands">Commands</a>
+        <a href="#limits">Limits</a>
+      </aside>
+
+      <article class="doc">
+        <h1>Claims and merge: collisions, not locks.</h1>
+        <p class="lede">
+          A file claim tells the room who is editing what. It never blocks a write. When two agents
+          do touch one path, Rigel shows base, ours and theirs, and lands the resolution through the
+          same journal as every other patch.
+        </p>
+
+        <section class="doc-section" id="why">
+          <h2>Why claims are advisory</h2>
+          <p>
+            A hard lock turns one slow agent into a stopped session, and a crashed agent into a file
+            nobody can edit. Rigel chooses the opposite failure: a stale claim is reported, not
+            enforced, and it is never released automatically. The user can see who claimed the path,
+            when the heartbeat stopped, and decide what to do.
+          </p>
+          <p>
+            That also means a claim is <strong>not</strong> a safety boundary. The enforcement is the
+            command gate and the reviewer; the claim is information. Both surfaces are needed, and
+            neither is allowed to pretend it is the other.
+          </p>
+        </section>
+
+        <section class="doc-section" id="lifecycle">
+          <h2>The claim lifecycle</h2>
+          <ol>
+            <li><strong>Acquire</strong> records the agent, session, path and a heartbeat.</li>
+            <li><strong>Heartbeat</strong> moves the clock while the agent is still working.</li>
+            <li><strong>Release</strong> writes a tombstone rather than deleting the row, so the
+              history of who held what survives.</li>
+            <li><strong>Expiry</strong> is 24 hours. An expired row is stale evidence, not an
+              automatic release.</li>
+          </ol>
+          <p>
+            The same three verbs are exposed twice: as CLI commands and as MCP tools, so a harness
+            that is not the native agent can participate in the room.
+          </p>
+          <pre><code>rigel claim list
+rigel claim release crates/rigel-core/src/agent/providers.rs
+rigel who</code></pre>
+          <p>
+            The CLI and the MCP server read the same rows. A claim taken in one surface is visible in
+            the other without a sync step.
+          </p>
+        </section>
+
+        <section class="doc-section" id="attribution">
+          <h2>Attribution: the watcher</h2>
+          <p>
+            A 250 ms watcher hashes changed files and compares them with the session’s claim and
+            agent state. A change names its writer when the evidence is unambiguous. When it is not,
+            the row says <code>ambiguous</code> instead of guessing a name.
+          </p>
+          <p>
+            If a claimed path moves under someone else, the watcher records a conflict. That record is
+            what the diff surface opens; it is not a message that disappears after a toast.
+          </p>
+          <div class="callout">
+            <p>
+              <strong>Design choice:</strong> attribution is evidence, not blame. A missing link is
+              printed as “unknown” with the reason, never filled in from the nearest agent.
+            </p>
+          </div>
+        </section>
+
+        <section class="doc-section" id="diff">
+          <h2>The diff surface</h2>
+          <p>
+            Diff is one place for every change the session touched. The conflict strip shows both
+            names and both hashes; unverified counts are shown next to the files they affect. Each
+            patch can be reverted once it has been applied.
+          </p>
+          <h3>The three versions</h3>
+          <p>
+            Opening a conflict renders base, ours and theirs. The merged result is an editable file;
+            saving it writes through the CAS patch pipeline, not directly to disk. That keeps the
+            merge in the same audit trail as an agent’s patch.
+          </p>
+          <h3>Comments on a hunk</h3>
+          <p>
+            Every hunk has a comment box. A note is sent back to the hunk’s author as a turn; the
+            patch itself is never edited by the comment. The author answers with a new patch, which
+            appears as a new row in the same conflict history.
+          </p>
+          <h3>Subagent worktrees</h3>
+          <p>
+            A <strong>Subagent worktrees</strong> block lists every writable child with its approved
+            plan and its stored merge verdict: reviewer, reason, diff hash and any override. A merge
+            that went over a block is marked as one.
+          </p>
+        </section>
+
+        <section class="doc-section" id="journal">
+          <h2>The patch journal</h2>
+          <p>
+            Patches are not written with a hopeful <code>writeFile</code>. The sequence is:
+          </p>
+          <ol>
+            <li>Compare the file’s current hash with the hash the patch was built against (CAS).</li>
+            <li>Append the intended write to the write-ahead journal.</li>
+            <li>Write the new content, fsync, rename into place.</li>
+            <li>Mark the journal entry applied.</li>
+          </ol>
+          <p>
+            Apply is idempotent: replaying a journal that already landed does not write twice. Revert
+            is available once per applied patch, and is itself a journaled operation.
+          </p>
+          <p>
+            On resume the journal is reconciled without applying anything that was not already
+            applied. A half-written patch is visible as a journal state, not as a mystery diff.
+          </p>
+        </section>
+
+        <section class="doc-section" id="worktrees">
+          <h2>Writable subagents, end to end</h2>
+          <p>
+            Write mode gives a child its own worktree, a claim on each assigned file and the full
+            tool set scoped to that list. Three writable children can run at once (D113), and each
+            child’s plan is approved or skipped with a reason before it starts (D114).
+          </p>
+          <p>
+            Its work does not land by copying files back. <code>merge_subagent</code> reviews the
+            diff with clean context, stores the verdict, and merges through the CAS journal. A
+            blocking reviewer runs on every writable merge; an override needs a typed reason and is
+            recorded beside the verdict (D115).
+          </p>
+          <ul>
+            <li>The worktree must still hold the exact diff that was judged, by hash.</li>
+            <li>An approved review merges in one click.</li>
+            <li>A blocked review requires a reason before the same click is offered.</li>
+            <li>The merge is written into the transcript as a note in the user’s voice, and the next
+              turn restates it in the preamble so the parent knows the tree moved.</li>
+          </ul>
+        </section>
+
+        <section class="doc-section" id="commands">
+          <h2>Commands and tools</h2>
+          <table>
+            <thead>
+              <tr>
+                <th scope="col">Command or tool</th>
+                <th scope="col">Does</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td><code>rigel claim list</code></td>
+                <td>Lists live, stale and released claims with their owners and clocks.</td>
+              </tr>
+              <tr>
+                <td><code>rigel claim release</code></td>
+                <td>Writes a release tombstone for a path.</td>
+              </tr>
+              <tr>
+                <td><code>rigel who</code></td>
+                <td>Shows who is in the room and what each one claims.</td>
+              </tr>
+              <tr>
+                <td><code>rigel snapshot list</code></td>
+                <td>Lists destructive-command snapshots with their refs.</td>
+              </tr>
+              <tr>
+                <td><code>rigel snapshot restore</code></td>
+                <td>Restores a named snapshot, journaling the restore.</td>
+              </tr>
+              <tr>
+                <td><code>rigel doctor</code></td>
+                <td>Checks stale claims and journal state alongside the rest of its integrity rows.</td>
+              </tr>
+            </tbody>
+          </table>
+        </section>
+
+        <section class="doc-section" id="limits">
+          <h2>Limits</h2>
+          <ul>
+            <li>Claims are advisory. They do not prevent a write and are not an OS lock.</li>
+            <li>Staleness is reported, never auto-released. A stale row stays until someone releases
+              it or the 24-hour expiry applies.</li>
+            <li>A merge needs the exact diff hash that was reviewed. If the worktree moved, the merge
+              is refused rather than re-reviewed silently.</li>
+            <li>The watcher polls at 250 ms. A change that lands and is reverted inside one interval
+              can be missed; the journal is still the authority for patches Rigel applied.</li>
+            <li>Comments on a hunk produce a turn. They do not edit the patch, and they do not
+              resolve a conflict on their own.</li>
+          </ul>
+        </section>
+
+        <nav class="doc-foot" aria-label="Feature pages">
+          <a href="/features/sessions.html">Previous: sessions</a>
+          <a href="/features/budget.html">Next: budget and safety</a>
+        </nav>
+      </article>
+    </main>
+
+    <footer class="foot">
+      <div class="shell foot-inner">
+        <div>
+          <a class="brand" href="/">
+            <img src="/rigel.svg" width="22" height="22" alt="" />
+            <span>Rigel</span>
+          </a>
+          <p>One window for several coding agents on one project.</p>
+        </div>
+        <nav aria-label="Footer">
+          <a href="/">Home</a>
+          <a href="/features/">Features</a>
+          <a href="/features/sessions.html">Sessions</a>
+          <a href="/features/budget.html">Budget</a>
+          <a href="/features/shelf.html">Shelf</a>
+          <a href="/features/terminal.html">Terminal</a>
+          <a href="/features/cloud.html">Cloud</a>
+          <a href="https://github.com/OkVurb/Rigel" rel="noopener">GitHub</a>
+        </nav>
+        <p class="legal">
+          MIT OR Apache-2.0. Claims, attribution, the journal and worktree merges are described in
+          docs/what-works.md; read it for the test that backs each one.
+        </p>
+      </div>
+    </footer>
+  </body>
+</html>

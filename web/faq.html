@@ -1,0 +1,206 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Rigel: questions and limits</title>
+    <meta
+      name="description"
+      content="Short answers about Rigel's network use, data, harnesses, Windows support, cloud and skill catalogue, with links to the mechanics."
+    />
+    <meta name="theme-color" content="#0b0c0e" />
+    <meta property="og:title" content="Rigel: questions and limits" />
+    <link rel="icon" type="image/svg+xml" href="/rigel.svg" />
+    <link rel="preload" href="/fonts/inter-400.woff2" as="font" type="font/woff2" crossorigin />
+    <link rel="stylesheet" href="/site.css" />
+    <script src="/site.js" defer></script>
+  </head>
+  <body>
+    <a class="skip" href="#main">Skip to content</a>
+
+    <header class="topbar">
+      <div class="bar">
+        <a class="brand" href="/">
+          <img src="/rigel.svg" width="24" height="24" alt="" />
+          <span>Rigel</span>
+        </a>
+        <nav aria-label="Sections">
+          <a href="/features/sessions.html#gate">How it works</a>
+          <a href="/#screens">Screenshots</a>
+          <a href="/features/">Features</a>
+          <a href="/faq.html" aria-current="page">FAQ</a>
+          <a href="https://github.com/OkVurb/Rigel" rel="noopener">GitHub</a>
+        </nav>
+        <a class="btn small" href="/app/">Open web app</a>
+      </div>
+    </header>
+
+    <main id="main" class="shell doc-wrap">
+      <aside class="doc-nav" aria-label="Page sections">
+        <p class="doc-nav-title">Rigel</p>
+        <a href="/">Home</a>
+        <a href="/features/">Features</a>
+        <a href="/faq.html" aria-current="page">Questions</a>
+        <a href="/app/">Web app</a>
+        <p class="doc-nav-title">On this page</p>
+        <!-- cms:faq-nav:start -->
+        <a href="#offline">Network use</a>
+        <a href="#data">What leaves</a>
+        <a href="#agents">Agents</a>
+        <a href="#windows">Windows</a>
+        <a href="#cloud">Cloud</a>
+        <a href="#catalogue">Catalogue</a>
+        <a href="#telemetry">Telemetry</a>
+        <a href="#key">Without a key</a>
+        <a href="#ads">Ads</a>
+        <!-- cms:faq-nav:end -->
+      </aside>
+
+      <article class="doc">
+        <h1>Questions, answered without rounding up.</h1>
+        <p class="lede">
+          The short answers, with the caveats that matter. Each one links to the page or document
+          that carries the mechanics.
+        </p>
+
+        <!-- cms:faq:start -->
+        <section class="doc-section" id="offline">
+          <h2>Does Rigel need the internet?</h2>
+          <p>
+          Search, the static review, duplicate clusters, the diff and the transcripts are local and
+          stay usable offline. Indexing a source, syncing a marketplace, a model turn, the update
+          check and cloud sync use the network. The update check is one signed request at launch
+          and can be switched off in Settings → Updates.
+          </p>
+        </section>
+
+        <section class="doc-section" id="data">
+          <h2>What actually leaves the machine?</h2>
+          <p>
+          Nothing, unless you press a button that says so. Push sends shelf metadata, never a skill
+          body. Publish sends one session’s prompts and the assistant’s own words, never tool
+          calls, command output or your project path. Provider keys, cloud tokens and the refresh
+          token live in the OS keychain; the renderer does not receive them.
+          </p>
+          <p>
+          <a href="/features/cloud.html">The cloud page</a> lists the documents and the exclusion
+          list.
+          </p>
+        </section>
+
+        <section class="doc-section" id="agents">
+          <h2>Which agents does it run?</h2>
+          <p>
+          Codex and Claude Code through their own CLIs, Cursor and Cline through ACP, and a native
+          coordinator with path-checked tools. Each harness is probed as its own row and keeps its
+          own key in the keychain.
+          </p>
+          <p>
+          Muse Code and Gemini CLI are also driven by the core, but those two are verified against
+          scripted implementations because neither CLI is installed on the build machine. The
+          <a href="/features/sessions.html">sessions page</a> marks each harness as real or
+          protocol.
+          </p>
+        </section>
+
+        <section class="doc-section" id="windows">
+          <h2>Windows only?</h2>
+          <p>
+          Windows-first: MSI and NSIS installers for Windows 10 1809 and newer. The core is a Rust
+          workspace and the phone client is iOS. Other desktop targets are not a supported surface
+          today, so the site does not list them as one.
+          </p>
+        </section>
+
+        <section class="doc-section" id="cloud">
+          <h2>Is the cloud a subscription?</h2>
+          <p>
+          No. Rigel is a binary you run. The cloud is a Firebase project you own, on your own bill,
+          or nothing at all. It stays off until you configure it, and the desktop app sends no
+          telemetry whether it is on or off.
+          </p>
+        </section>
+
+        <section class="doc-section" id="catalogue">
+          <h2>What is in the catalogue?</h2>
+          <p>
+          The catalogue holds <span data-skill-count>11,587</span> skills measured from public
+          sources. Independent censuses put the public universe at roughly 238,000 unique skills,
+          so a larger number would be padding rather than coverage. Every row names its source, and
+          a body is only kept when Rigel fetched it itself.
+          </p>
+          <p>
+          <a href="/features/shelf.html">The shelf page</a> explains the six static rules, the
+          evidence column and the difference between metadata-only and reviewed rows.
+          </p>
+        </section>
+
+        <section class="doc-section" id="telemetry">
+          <h2>Is there telemetry?</h2>
+          <p>
+          The desktop app sends none. It has no account requirement and no anonymous identifier.
+          This marketing site uses Google Analytics; the application does not, and the contact form
+          on the home page uses reCAPTCHA Enterprise only when you submit it.
+          </p>
+        </section>
+
+        <section class="doc-section" id="key">
+          <h2>Can I use it without an API key?</h2>
+          <p>
+          Yes. The window, the index, the static review, the diff and the tools ledger need no
+          provider. A model turn needs a key for the provider you pick. The deterministic scripted
+          model drives the tests with none.
+          </p>
+        </section>
+        <!-- cms:faq:end -->
+
+        <section class="doc-section" id="ads">
+          <h2>Does the site show ads?</h2>
+          <p>
+          The home page can show one clearly labelled Gravity-sponsored card. It is requested from
+          Rigel's own Firebase endpoint, so the publisher key stays on the server. The card loads
+          only when Gravity has a fill; the impression fires once, when the card is visible. If your
+          browser sends Do Not Track or Global Privacy Control, the page does not request an ad at
+          all. The desktop app offers the same slot as an opt-in and sends no request while it is
+          off.
+          </p>
+          <p>
+          Gravity is the only ad network here. No other ad script or image runs on this page.
+          </p>
+        </section>
+
+        <nav class="doc-foot" aria-label="Page links">
+          <a href="/features/">Every surface</a>
+          <a href="https://github.com/OkVurb/Rigel/blob/main/docs/what-works.md" rel="noopener"
+            >What works, with evidence</a
+          >
+        </nav>
+      </article>
+    </main>
+
+    <footer class="foot">
+      <div class="shell foot-inner">
+        <div>
+          <a class="brand" href="/">
+            <img src="/rigel.svg" width="22" height="22" alt="" />
+            <span>Rigel</span>
+          </a>
+          <p>One window for several coding agents on one project.</p>
+        </div>
+        <nav aria-label="Footer">
+          <a href="/">Home</a>
+          <a href="/features/">Features</a>
+          <a href="/features/sessions.html">Sessions</a>
+          <a href="/features/claims.html">Claims</a>
+          <a href="/features/shelf.html">Shelf</a>
+          <a href="/features/cloud.html">Cloud</a>
+          <a href="https://github.com/OkVurb/Rigel" rel="noopener">GitHub</a>
+        </nav>
+        <p class="legal">
+          MIT OR Apache-2.0. If an answer here and docs/what-works.md disagree, the table is the
+          authority.
+        </p>
+      </div>
+    </footer>
+  </body>
+</html>

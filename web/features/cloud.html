@@ -1,0 +1,277 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Rigel: cloud and phone</title>
+    <meta
+      name="description"
+      content="Rigel Cloud is opt-in and runs in a Firebase project you own: shelf metadata only, tombstones, App Check, and one published session readable on an iPhone."
+    />
+    <meta name="theme-color" content="#0b0c0e" />
+    <meta property="og:title" content="Rigel cloud: your project, your reader" />
+    <link rel="icon" type="image/svg+xml" href="/rigel.svg" />
+    <link rel="preload" href="/fonts/inter-400.woff2" as="font" type="font/woff2" crossorigin />
+    <link rel="stylesheet" href="/site.css" />
+  </head>
+  <body>
+    <a class="skip" href="#main">Skip to content</a>
+
+    <header class="topbar">
+      <div class="bar">
+        <a class="brand" href="/">
+          <img src="/rigel.svg" width="24" height="24" alt="" />
+          <span>Rigel</span>
+        </a>
+        <nav aria-label="Sections">
+          <a href="/features/sessions.html#gate">How it works</a>
+          <a href="/#screens">Screenshots</a>
+          <a href="/features/" aria-current="page">Features</a>
+          <a href="/faq.html">FAQ</a>
+          <a href="https://github.com/OkVurb/Rigel" rel="noopener">GitHub</a>
+        </nav>
+        <a class="btn small" href="/app/">Open web app</a>
+      </div>
+    </header>
+
+    <main id="main" class="shell doc-wrap">
+      <aside class="doc-nav" aria-label="Feature pages">
+        <p class="doc-nav-title">Features</p>
+        <a href="/features/">All surfaces</a>
+        <a href="/features/sessions.html">Sessions</a>
+        <a href="/features/claims.html">Claims and merge</a>
+        <a href="/features/budget.html">Budget and safety</a>
+        <a href="/features/shelf.html">Skill shelf</a>
+        <a href="/features/terminal.html">Terminal</a>
+        <a href="/features/cloud.html" aria-current="page">Cloud and phone</a>
+        <p class="doc-nav-title">On this page</p>
+        <a href="#ownership">Ownership</a>
+        <a href="#account">The account</a>
+        <a href="#sync">Push, pull, tombstones</a>
+        <a href="#publish">Publish to the phone</a>
+        <a href="#appcheck">App Check</a>
+        <a href="#reader">The web reader</a>
+        <a href="#cli">The cloud CLI</a>
+        <a href="#limits">Limits</a>
+      </aside>
+
+      <article class="doc">
+        <h1>Your cloud, your reader.</h1>
+        <p class="lede">
+          Rigel Cloud is opt-in and runs in a Firebase project you own. Push mirrors shelf metadata,
+          Publish writes one session’s prompts and replies to your phone, and the web reader is
+          read-only. Bodies, tool output and project paths stay on the desktop.
+        </p>
+
+        <section class="doc-section" id="ownership">
+          <h2>Ownership</h2>
+          <p>
+            There is no Rigel subscription and no Rigel-hosted tenant database. You point the app at
+            a Firebase project you own; the bill, the rules and the data are yours. If you never
+            configure it, the cloud surface stays absent and the local app is unchanged.
+          </p>
+          <p>
+            The repository exercises the whole flow against a local stand-in for the Firebase hosts.
+            It does not ship a live project of its own, which is why this page says “opt-in” rather
+            than "hosted".
+          </p>
+        </section>
+
+        <section class="doc-section" id="account">
+          <h2>The account</h2>
+          <p>
+            Identity Toolkit email/password sign-in is the account path: sign in, create an account,
+            reset a password and verify an email. The account page carries a send/resend control for
+            verification, and <code>rigel cloud verify --check</code> answers the same question from
+            the CLI.
+          </p>
+          <ul>
+            <li>The refresh token and the verification answer live in the OS keychain, never in the
+              renderer.</li>
+            <li>A reset answer does not reveal whether the account exists.</li>
+            <li>Signing out removes the local credential; it does not delete the project’s data.</li>
+          </ul>
+        </section>
+
+        <section class="doc-section" id="sync">
+          <h2>Push, pull, tombstones</h2>
+          <p>
+            Push and Pull mirror <strong>shelf metadata</strong> through Firestore REST under
+            per-user rules. A skill body stays on the machine that fetched it. A deletion travels as
+            a tombstone from a per-account manifest, <code>cloud-state.json</code>, so a pull does not
+            resurrect a row that was deliberately removed.
+          </p>
+          <p>
+            Settings → Cloud shows the last push and last pull clock; <code>rigel cloud status</code>
+            prints the same state. The clock is the answer to "is this machine up to date", not a
+            progress animation.
+          </p>
+        </section>
+
+        <section class="doc-section" id="publish">
+          <h2>Publish to the phone</h2>
+          <p>
+            Publish writes one session’s turns to
+            <code>users/{uid}/sessions/{id}/turns</code>. Each turn keeps the prompt and the
+            assistant’s own text. It deliberately excludes:
+          </p>
+          <ul>
+            <li>Tool calls and their arguments.</li>
+            <li>Command output.</li>
+            <li>The project path.</li>
+          </ul>
+          <p>
+            The iPhone client signs in to the same project and lists and reads those documents. Its
+            decoder is covered by the phone’s CloudKit tests. The desktop owns the shelf, the agents
+            and the transcripts; the phone is a reader.
+          </p>
+          <p>
+            This is the same data the web reader at <a href="/app/">/app/</a> reads in a browser,
+            scoped by the same rules.
+          </p>
+        </section>
+
+        <section class="doc-section" id="appcheck">
+          <h2>App Check</h2>
+          <p>
+            Optional Firebase App Check runs through a custom provider shipped in
+            <code>functions/</code>. The provider verifies a per-install client token in constant
+            time, rate-limits each installation and address with Firestore token buckets, and mints
+            tokens with the Admin SDK.
+          </p>
+          <p>
+            Configure it with <code>rigel cloud app-check --url</code> and
+            <code>--client-token</code>, or from Settings → Cloud. The endpoint and the client token
+            are stored where the other cloud settings live; the client token stays in the OS keychain.
+            Tokens are cached in memory and attached as <code>X-Firebase-AppCheck</code> to every
+            Firebase request.
+          </p>
+          <p>
+            The provider’s contract is explicit: a token, a Unix-second expiry, and fail-closed
+            errors. A provider that cannot answer does not degrade into an open door.
+          </p>
+        </section>
+
+        <section class="doc-section" id="reader">
+          <h2>The web reader</h2>
+          <p>
+            The web app is a separate static surface at <a href="/app/">/app/</a>. It signs in with
+            the same account, lists the sessions you published, and renders titles, projects, prompts
+            and replies. It is not a second control surface: it cannot run an agent, take a claim or
+            change a setting.
+          </p>
+          <p>
+            Firestore rules only let a signed-in account read its own documents. The reader’s UI says
+            so, and the rules are the part that enforces it.
+          </p>
+        </section>
+
+        <section class="doc-section" id="cli">
+          <h2>The cloud CLI</h2>
+          <table>
+            <thead>
+              <tr>
+                <th scope="col">Command</th>
+                <th scope="col">Does</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td><code>rigel cloud status</code></td>
+                <td>Shows the configured project, account, clocks and App Check state.</td>
+              </tr>
+              <tr>
+                <td><code>rigel cloud configure</code></td>
+                <td>Stores the project and web API key.</td>
+              </tr>
+              <tr>
+                <td><code>rigel cloud login</code></td>
+                <td>Signs in and keeps the refresh token in the keychain.</td>
+              </tr>
+              <tr>
+                <td><code>rigel cloud sign-up</code></td>
+                <td>Creates an account in the configured project.</td>
+              </tr>
+              <tr>
+                <td><code>rigel cloud reset</code></td>
+                <td>Sends a password reset without revealing whether the account exists.</td>
+              </tr>
+              <tr>
+                <td><code>rigel cloud logout</code></td>
+                <td>Removes the local credential.</td>
+              </tr>
+              <tr>
+                <td><code>rigel cloud push</code></td>
+                <td>Mirrors shelf metadata up, with tombstones.</td>
+              </tr>
+              <tr>
+                <td><code>rigel cloud pull</code></td>
+                <td>Mirrors shelf metadata down.</td>
+              </tr>
+              <tr>
+                <td><code>rigel cloud sync</code></td>
+                <td>Push then pull, with the clocks recorded.</td>
+              </tr>
+              <tr>
+                <td><code>rigel cloud publish</code></td>
+                <td>Writes one session’s prompts and replies for the readers.</td>
+              </tr>
+              <tr>
+                <td><code>rigel cloud app-check</code></td>
+                <td>Stores the App Check endpoint and client token.</td>
+              </tr>
+            </tbody>
+          </table>
+          <p>
+            Every command accepts <code>--json</code>. The password and the web API key are read from
+            stdin; they are not accepted as command-line arguments.
+          </p>
+        </section>
+
+        <section class="doc-section" id="limits">
+          <h2>Limits</h2>
+          <ul>
+            <li>The repository has exercised cloud against a local Firebase stand-in, not a live
+              project it owns.</li>
+            <li>You own the Firebase project, its rules, its quotas and its bill.</li>
+            <li>Push is metadata only. It is not a backup of bodies, patches or transcripts.</li>
+            <li>Publish sends one session at a time and excludes tool calls, output and paths.</li>
+            <li>The readers are read-only. There is no phone-side agent control.</li>
+            <li>The phone client is iOS. There is no Android client in this repository.</li>
+          </ul>
+        </section>
+
+        <nav class="doc-foot" aria-label="Feature pages">
+          <a href="/features/terminal.html">Previous: terminal</a>
+          <a href="/features/">All surfaces</a>
+        </nav>
+      </article>
+    </main>
+
+    <footer class="foot">
+      <div class="shell foot-inner">
+        <div>
+          <a class="brand" href="/">
+            <img src="/rigel.svg" width="22" height="22" alt="" />
+            <span>Rigel</span>
+          </a>
+          <p>One window for several coding agents on one project.</p>
+        </div>
+        <nav aria-label="Footer">
+          <a href="/">Home</a>
+          <a href="/features/">Features</a>
+          <a href="/features/sessions.html">Sessions</a>
+          <a href="/features/claims.html">Claims</a>
+          <a href="/features/budget.html">Budget</a>
+          <a href="/features/shelf.html">Shelf</a>
+          <a href="/features/terminal.html">Terminal</a>
+          <a href="https://github.com/OkVurb/Rigel" rel="noopener">GitHub</a>
+        </nav>
+        <p class="legal">
+          MIT OR Apache-2.0. The cloud state and the exclusion list follow docs/what-works.md; the
+          repository does not own a live Firebase project.
+        </p>
+      </div>
+    </footer>
+  </body>
+</html>

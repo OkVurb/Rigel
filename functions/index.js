@@ -6,7 +6,9 @@ const { getFirestore, FieldValue } = require('firebase-admin/firestore');
 const { onRequest } = require('firebase-functions/v2/https');
 const { defineSecret } = require('firebase-functions/params');
 
+const { Gravity } = require('@gravity-ai/api');
 const { parseClients, verifyClient } = require('./lib/clients');
+const { createGravityHandler } = require('./lib/gravity');
 const { createAttestationHandler } = require('./lib/handler');
 const { bucketId, createLimiter, takeToken } = require('./lib/limits');
 const { assess } = require('./lib/recaptcha');
@@ -14,7 +16,11 @@ const { assess } = require('./lib/recaptcha');
 initializeApp();
 
 const clientsSecret = defineSecret('RIGEL_ATTEST_CLIENTS');
+const gravitySecret = defineSecret('GRAVITY_API_KEY');
 const appId = (process.env.RIGEL_FIREBASE_APP_ID || '').trim();
+// Test ads are the default until the publisher review finishes. Flip GRAVITY_PRODUCTION=true in
+// the function environment after approval; the client can neither force nor disable that choice.
+const gravityProduction = (process.env.GRAVITY_PRODUCTION || '').trim() === 'true';
 
 const DEFAULT_LIMITS = {
   client: { perHour: 12, burst: 4 },
@@ -209,5 +215,33 @@ exports.contact = onRequest(
     }
 
     response.status(200).json({ ok: true });
+  },
+);
+
+// ---------------------------------------------------------------- Gravity ads
+
+/**
+ * The one ad broker for both Rigel surfaces. The publisher key is a Secret Manager secret and
+ * never leaves this function; the website and the desktop app call the same URL.
+ */
+exports.gravityAd = onRequest(
+  { secrets: [gravitySecret], invoker: 'public', maxInstances: 10, timeoutSeconds: 12 },
+  async (request, response) => {
+    const handler = createGravityHandler({
+      test: !gravityProduction,
+      getAds: (incoming, messages, placements) => {
+        const key = gravitySecret.value().trim();
+        if (!key) return Promise.resolve({ ads: [], status: 0, elapsed: '0ms', requestBody: null });
+        const gravity = new Gravity({
+          apiKey: key,
+          production: gravityProduction,
+          alwaysReturn: !gravityProduction,
+          timeoutMs: 5_000,
+        });
+        return gravity.getAds(incoming, messages, placements);
+      },
+      log: (message) => console.log(message),
+    });
+    await handler(request, response);
   },
 );

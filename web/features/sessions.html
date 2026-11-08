@@ -1,0 +1,359 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Rigel: sessions</title>
+    <meta
+      name="description"
+      content="How a Rigel session holds a roster, a role-gutter transcript, approvals and a resumable journal."
+    />
+    <meta name="theme-color" content="#0b0c0e" />
+    <meta property="og:title" content="Rigel sessions: a room, a roster, a record" />
+    <link rel="icon" type="image/svg+xml" href="/rigel.svg" />
+    <link rel="preload" href="/fonts/inter-400.woff2" as="font" type="font/woff2" crossorigin />
+    <link rel="stylesheet" href="/site.css" />
+  </head>
+  <body>
+    <a class="skip" href="#main">Skip to content</a>
+
+    <header class="topbar">
+      <div class="bar">
+        <a class="brand" href="/">
+          <img src="/rigel.svg" width="24" height="24" alt="" />
+          <span>Rigel</span>
+        </a>
+        <nav aria-label="Sections">
+          <a href="/features/sessions.html#gate">How it works</a>
+          <a href="/#screens">Screenshots</a>
+          <a href="/features/" aria-current="page">Features</a>
+          <a href="/faq.html">FAQ</a>
+          <a href="https://github.com/OkVurb/Rigel" rel="noopener">GitHub</a>
+        </nav>
+        <a class="btn small" href="/app/">Open web app</a>
+      </div>
+    </header>
+
+    <main id="main" class="shell doc-wrap">
+      <aside class="doc-nav" aria-label="Feature pages">
+        <p class="doc-nav-title">Features</p>
+        <a href="/features/">All surfaces</a>
+        <a href="/features/sessions.html" aria-current="page">Sessions</a>
+        <a href="/features/claims.html">Claims and merge</a>
+        <a href="/features/budget.html">Budget and safety</a>
+        <a href="/features/shelf.html">Skill shelf</a>
+        <a href="/features/terminal.html">Terminal</a>
+        <a href="/features/cloud.html">Cloud and phone</a>
+        <p class="doc-nav-title">On this page</p>
+        <a href="#owns">What a session owns</a>
+        <a href="#roster">The roster</a>
+        <a href="#transcript">The transcript</a>
+        <a href="#gate">The gate</a>
+        <a href="#resume">Resume and close</a>
+        <a href="#list">The session list</a>
+        <a href="#templates">Templates</a>
+        <a href="#harnesses">Harnesses</a>
+        <a href="#limits">Limits</a>
+      </aside>
+
+      <article class="doc">
+        <h1>Sessions: a room, a roster, a record.</h1>
+        <p class="lede">
+          A session is the unit that owns agents, turns, approvals, patches and money. Close the
+          window and it keeps running in the tray; reopen the project and it reconciles the journal
+          before it lets you continue.
+        </p>
+
+        <section class="doc-section" id="owns">
+          <h2>What a session owns</h2>
+          <p>
+            Everything that happens in the window is written to the open project’s SQLite database:
+            the session row, each turn, the agent that produced it, tool results, patches, usage
+            rows, claims, bookmarks and the approval questions. That is why the transcript survives a
+            restart and why the bill can be read per agent rather than reconstructed from memory.
+          </p>
+          <p>
+            A session also owns its <strong>working tree checkpoint</strong>. On resume, Rigel
+            compares the tree hash with the checkpoint it recorded. If they differ, it says so
+            instead of pretending the session is still in the state it left.
+          </p>
+        </section>
+
+        <section class="doc-section" id="roster">
+          <h2>The roster</h2>
+          <p>
+            The left rail lists every agent in the session with its role, status and model. Add one
+            with the manual <code>+ agent</code> form, or start a subagent and watch its row appear
+            as soon as its turn starts.
+          </p>
+          <ul>
+            <li>
+              <strong>Model and effort per agent.</strong> The picker merges the current provider’s
+              roster with OpenRouter’s full list, tags every row with its door, and switches provider
+              when you pick a model from another one. A stored key is the permission to use a door.
+            </li>
+            <li>
+              <strong>Swarm.</strong> A task typed into the room is sent to the agents you have
+              ticked, not to every row. The button wakes the room; it does not create a second
+              message path.
+            </li>
+            <li>
+              <strong>Subagents.</strong> A writable child gets its own worktree and its own bill.
+              The parent can <code>chat_send</code> and <code>chat_wait</code> with it while it runs,
+              then collect it with <code>subagent_results</code>.
+            </li>
+          </ul>
+          <p>
+            The roster is not a queue. Two agents can hold the same model and different roles, and
+            the role gutter in the transcript keeps their lines apart.
+          </p>
+        </section>
+
+        <section class="doc-section" id="transcript">
+          <h2>The transcript</h2>
+          <p>
+            The transcript is a document, not a chat log. Each turn is an article with a role gutter,
+            streaming text, collapsed tool lines and rendered patch diffs. A raw/debug toggle opens
+            the underlying rows when you need to see what the renderer received.
+          </p>
+          <table>
+            <thead>
+              <tr>
+                <th scope="col">Control</th>
+                <th scope="col">What it does</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>Outline</td>
+                <td>Marks prompts, diffs, errors and approvals from the same rows; the active turn
+                  follows scroll and a click centres it.</td>
+              </tr>
+              <tr>
+                <td>Bookmarks</td>
+                <td>A star on any line or patch hunk, one list per session, stored in the
+                  <code>bookmarks</code> table.</td>
+              </tr>
+              <tr>
+                <td>Side by side</td>
+                <td>Two agent transcripts in one view; a running subagent appears as soon as its
+                  first turn starts.</td>
+              </tr>
+              <tr>
+                <td>Composer history</td>
+                <td>Up and Down recall this project’s sent prompts; <code>Ctrl+Up</code> widens the
+                  boundary. Neither ever sends.</td>
+              </tr>
+              <tr>
+                <td>Snippets</td>
+                <td>Project-local text with the first placeholder selected. Insertion only.</td>
+              </tr>
+              <tr>
+                <td>80% prompt</td>
+                <td>An inline warning when the day’s spend approaches the cap, in the turn where it
+                  matters.</td>
+              </tr>
+            </tbody>
+          </table>
+          <p>
+            The outline rail stays out of the two-pane comparison so it cannot steal width from the
+            two transcripts.
+          </p>
+        </section>
+
+        <section class="doc-section" id="gate">
+          <h2>The gate inside a turn</h2>
+          <p>
+            A turn does not run commands silently. <code>run_command</code> shows the exact text, the
+            working directory and the timeout before anything starts. The prompt carries four
+            scopes, matching the CLI’s approval modes.
+          </p>
+          <ul>
+            <li><strong>Once</strong> approves this invocation only.</li>
+            <li><strong>Session</strong> approves the same command for the rest of the session.</li>
+            <li><strong>Always</strong> persists the approval in the project’s rules.</li>
+            <li><strong>Deny</strong> refuses it and records the refusal on the turn.</li>
+          </ul>
+          <p>
+            Destructive commands take a longer path: a deterministic classifier maps them to policy
+            rows such as <code>delete-outside-project</code>, <code>recursive-remove</code>,
+            <code>force-push</code>, <code>git-reset</code> and <code>registry-write</code>. The
+            prompt names the row and the token that matched, and three read-only advisors get one
+            round before the question is shown. Their answers cannot allow, deny or alter the gate;
+            they are advice attached to it.
+          </p>
+          <p>
+            Before an approved destructive command runs, Rigel captures a snapshot: a
+            <code>git stash create</code> object kept alive by <code>refs/rigel/snapshots/&lt;id&gt;</code>
+            plus raw copies of changed and untracked files. A non-git tree, or a repository with no
+            commit, is copied whole. The cap is 2,000 files or 200 MB and the capture refuses above
+            it rather than truncating silently.
+          </p>
+        </section>
+
+        <section class="doc-section" id="resume">
+          <h2>Resume and close</h2>
+          <p>
+            Closing the window hides it to the tray; it does not stop the session. Running agents and
+            PTYs keep working, the tray reopens the window, and Quit from the tray reaps every child.
+            If the tray cannot be built, Close keeps its ordinary meaning.
+          </p>
+          <p>Resume is deliberately conservative:</p>
+          <ol>
+            <li>The tree hash is compared with the session checkpoint.</li>
+            <li>Any turn still marked running is closed as <code>cancelled</code>.</li>
+            <li>The patch journal is reconciled without applying anything new.</li>
+            <li>Forcing a continue is recorded as an intervention, not disguised as a normal turn.</li>
+          </ol>
+          <p>
+            A dismissible card reports what happened while the window was out of focus: turns
+            finished, patches applied, approvals waiting and spend since focus. It adds no second
+            notification path.
+          </p>
+        </section>
+
+        <section class="doc-section" id="list">
+          <h2>The session list</h2>
+          <p>
+            The Session pane switches between Sessions and Agents. The list filters by text and
+            status, hides archived rows behind a toggle, and edits in place.
+          </p>
+          <ul>
+            <li><strong>Rename</strong> in one line, up to 120 characters; blank restores the automatic
+              title.</li>
+            <li><strong>Pin</strong> sorts a row first, ahead of newest-first.</li>
+            <li><strong>Archive</strong> hides it from the default list but never deletes it.
+              <code>session_list</code> still returns it, the palette still searches it, and it stays
+              resumable.</li>
+          </ul>
+          <p>
+            Pinning and archiving are migration <code>0012_session_list</code>; bookmarks are
+            <code>0013</code>. The ledger keeps the row either way.
+          </p>
+        </section>
+
+        <section class="doc-section" id="templates">
+          <h2>Templates</h2>
+          <p>
+            <code>.rigel/templates.json</code> holds a per-project shape: model, effort, steps,
+            roster, pinned skills and a prompt skeleton. <code>+ session</code> offers the
+            templates, and "save template" stores the current session’s shape, including each
+            pin’s body hash. Writes are atomic, the file is capped at 40 templates and it is never
+            committed. A template written before pin support still loads.
+          </p>
+        </section>
+
+        <section class="doc-section" id="changed-pins">
+          <h2>Changed pins</h2>
+          <p>
+            A pin is a body hash, not a floating reference. When the shelf's indexed body moves,
+            the session's pinned list shows a <code>changed</code> badge. Opening it reads both
+            bodies from the content-addressed index and shows a line diff; <strong>Keep pin</strong>
+            leaves the session on its recorded version, and <strong>Update</strong> moves it to the
+            current one. Either decision is recorded on the session as a <code>skill_pin</code>
+            intervention with its reason. A disappeared body is reported as unavailable rather
+            than silently replaced. The composer Skills button shows how many pins moved, and the Skills menu can filter to changed pins and keep or update all of them in one action, recording one shared reason for the batch.
+          </p>
+        </section>
+
+        <section class="doc-section" id="harnesses">
+          <h2>Harnesses, and how far each is proven</h2>
+          <table>
+            <thead>
+              <tr>
+                <th scope="col">Harness</th>
+                <th scope="col">State</th>
+                <th scope="col">Evidence</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>Native</td>
+                <td>real</td>
+                <td>OmniRoute, OpenRouter, Gemini, Vertex, Anthropic and OpenAI-compatible doors;
+                  ten path-checked tools.</td>
+              </tr>
+              <tr>
+                <td>Codex</td>
+                <td>real</td>
+                <td>Probe plus one turn through <code>codex app-server</code>, with
+                  <code>codex exec --json</code> as the fallback.</td>
+              </tr>
+              <tr>
+                <td>Claude Code</td>
+                <td>real</td>
+                <td>Probe plus one turn; approval answers travel over the MCP permission tool. A
+                  live subscription turn has not been run.</td>
+              </tr>
+              <tr>
+                <td>Gemini CLI</td>
+                <td>protocol</td>
+                <td>One ACP turn against a scripted agent; the CLI is not installed on the build
+                  machine.</td>
+              </tr>
+              <tr>
+                <td>Cursor and Cline</td>
+                <td>protocol</td>
+                <td>ACP turns against a scripted agent; both CLIs refused a subscription identity.</td>
+              </tr>
+              <tr>
+                <td>Muse Code</td>
+                <td>protocol</td>
+                <td>Headless turn against a fake CLI and the published envelope; no token counts in
+                  the journal.</td>
+              </tr>
+            </tbody>
+          </table>
+          <pre><code>rigel models --provider anthropic
+rigel codex probe
+rigel claude probe
+rigel agent acp --harness gemini</code></pre>
+        </section>
+
+        <section class="doc-section" id="limits">
+          <h2>Limits</h2>
+          <ul>
+            <li>A session is scoped to one project. Switching projects switches the database, the
+              claims and the ledger.</li>
+            <li>The tray is what keeps work alive after Close. Without it, Close quits.</li>
+            <li>Archive is not delete. There is no delete-session button in this surface.</li>
+            <li>Template writes cap at 40 rows and never enter version control.</li>
+            <li>A keyboard-only walk of the full exit test is still open, even though focus order and
+              reduced-motion rules are implemented.</li>
+          </ul>
+        </section>
+
+        <nav class="doc-foot" aria-label="Feature pages">
+          <a href="/features/">All surfaces</a>
+          <a href="/features/claims.html">Next: claims and merge</a>
+        </nav>
+      </article>
+    </main>
+
+    <footer class="foot">
+      <div class="shell foot-inner">
+        <div>
+          <a class="brand" href="/">
+            <img src="/rigel.svg" width="22" height="22" alt="" />
+            <span>Rigel</span>
+          </a>
+          <p>One window for several coding agents on one project.</p>
+        </div>
+        <nav aria-label="Footer">
+          <a href="/">Home</a>
+          <a href="/features/">Features</a>
+          <a href="/features/claims.html">Claims</a>
+          <a href="/features/budget.html">Budget</a>
+          <a href="/features/shelf.html">Shelf</a>
+          <a href="/features/terminal.html">Terminal</a>
+          <a href="/features/cloud.html">Cloud</a>
+          <a href="https://github.com/OkVurb/Rigel" rel="noopener">GitHub</a>
+        </nav>
+        <p class="legal">
+          MIT OR Apache-2.0. States on this page follow docs/what-works.md, including the parts that
+          are protocol-only or still open.
+        </p>
+      </div>
+    </footer>
+  </body>
+</html>

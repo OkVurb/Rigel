@@ -1,0 +1,262 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Rigel: every surface</title>
+    <meta
+      name="description"
+      content="The six working surfaces of Rigel, what each one does, and how far it actually goes."
+    />
+    <meta name="theme-color" content="#0b0c0e" />
+    <meta property="og:title" content="Rigel: every surface, and how far it goes" />
+    <meta
+      property="og:description"
+      content="Sessions, claims and merge, budget, shelf, terminal and cloud: the mechanics, the limits and the commands."
+    />
+    <link rel="icon" type="image/svg+xml" href="/rigel.svg" />
+    <link rel="preload" href="/fonts/inter-400.woff2" as="font" type="font/woff2" crossorigin />
+    <link rel="stylesheet" href="/site.css" />
+  </head>
+  <body>
+    <a class="skip" href="#main">Skip to content</a>
+
+    <header class="topbar">
+      <div class="bar">
+        <a class="brand" href="/">
+          <img src="/rigel.svg" width="24" height="24" alt="" />
+          <span>Rigel</span>
+        </a>
+        <nav aria-label="Sections">
+          <a href="/features/sessions.html#gate">How it works</a>
+          <a href="/#screens">Screenshots</a>
+          <a href="/features/" aria-current="page">Features</a>
+          <a href="/faq.html">FAQ</a>
+          <a href="https://github.com/OkVurb/Rigel" rel="noopener">GitHub</a>
+        </nav>
+        <a class="btn small" href="/app/">Open web app</a>
+      </div>
+    </header>
+
+    <main id="main" class="shell doc-wrap">
+      <aside class="doc-nav" aria-label="Feature pages">
+        <p class="doc-nav-title">Features</p>
+        <a href="/features/" aria-current="page">All surfaces</a>
+        <a href="/features/sessions.html">Sessions</a>
+        <a href="/features/claims.html">Claims and merge</a>
+        <a href="/features/budget.html">Budget and safety</a>
+        <a href="/features/shelf.html">Skill shelf</a>
+        <a href="/features/terminal.html">Terminal</a>
+        <a href="/features/cloud.html">Cloud and phone</a>
+      </aside>
+
+      <article class="doc">
+        <h1>Every surface, and how far it goes.</h1>
+        <p class="lede">
+          Rigel is six working surfaces sharing one project database. Each page below covers the
+          mechanics, the failure modes and the commands, and says which parts are exercised by tests
+          and which are not.
+        </p>
+
+        <section class="doc-section" id="surfaces">
+          <h2>The surfaces</h2>
+          <div class="doc-grid">
+            <article class="feature">
+              <h3>Sessions</h3>
+              <p>
+                A roster of agents, a transcript that keeps roles and tools apart, and a resume that
+                reconciles the journal instead of replaying it.
+              </p>
+              <a class="more" href="/features/sessions.html">Open the sessions page</a>
+            </article>
+            <article class="feature">
+              <h3>Claims and merge</h3>
+              <p>
+                Claims are advisory, a watcher attributes every write, and a collision opens base,
+                ours and theirs instead of refusing the second writer.
+              </p>
+              <a class="more" href="/features/claims.html">Open the claims page</a>
+            </article>
+            <article class="feature">
+              <h3>Budget and safety</h3>
+              <p>
+                Micro-dollar accounting per turn and per child, a preflight estimate, an 80% warning
+                and a daily cap that stops the next turn before it starts.
+              </p>
+              <a class="more" href="/features/budget.html">Open the budget page</a>
+            </article>
+            <article class="feature">
+              <h3>Skill shelf</h3>
+              <p>
+                An offline FTS5 index with SimHash duplicates, six capability rules with file:line
+                evidence, and source health read without a network call.
+              </p>
+              <a class="more" href="/features/shelf.html">Open the shelf page</a>
+            </article>
+            <article class="feature">
+              <h3>Terminal</h3>
+              <p>
+                A real PTY in the project root, plus the command gate that names the text, cwd and
+                timeout before anything runs.
+              </p>
+              <a class="more" href="/features/terminal.html">Open the terminal page</a>
+            </article>
+            <article class="feature">
+              <h3>Cloud and phone</h3>
+              <p>
+                Your own Firebase project, opt-in shelf metadata, tombstones, and one published
+                session readable on an iPhone.
+              </p>
+              <a class="more" href="/features/cloud.html">Open the cloud page</a>
+            </article>
+          </div>
+        </section>
+
+        <section class="doc-section" id="state">
+          <h2>State, without rounding up</h2>
+          <p>
+            The repository keeps one table of what works and how it was verified. These are its
+            states, not marketing tiers: <strong>real</strong> means exercised by the build or its
+            tests, <strong>protocol</strong> means verified against a scripted implementation because
+            the vendor CLI is not installed on the build machine, and <strong>not ported</strong>
+            means the surface does not exist yet.
+          </p>
+
+          <table>
+            <thead>
+              <tr>
+                <th scope="col">Surface</th>
+                <th scope="col">State</th>
+                <th scope="col">What backs it</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>Sessions</td>
+                <td>real</td>
+                <td>Roster, transcript, outline, bookmarks, templates, resume; a keyboard-only exit
+                  walk is still open.</td>
+              </tr>
+              <tr>
+                <td>Claims</td>
+                <td>real</td>
+                <td>Acquire, heartbeat, release, tombstones, staleness, 24 h expiry.</td>
+              </tr>
+              <tr>
+                <td>Patches</td>
+                <td>real</td>
+                <td>CAS check, write-ahead journal, fsync and rename, idempotent apply, one revert.</td>
+              </tr>
+              <tr>
+                <td>Bill and cap</td>
+                <td>real</td>
+                <td>Per-turn and per-child usage, local price fallback, daily cap, reconcile.</td>
+              </tr>
+              <tr>
+                <td>Skill shelf</td>
+                <td>real</td>
+                <td>SQLite FTS5, six capability rules, SimHash clusters, ETag source sync.</td>
+              </tr>
+              <tr>
+                <td>Terminal</td>
+                <td>real</td>
+                <td>portable-pty, PowerShell or <code>$SHELL</code>, xterm.js, live settings.</td>
+              </tr>
+              <tr>
+                <td>Cloud</td>
+                <td>real, opt-in</td>
+                <td>Exercised against a local stand-in for the Firebase hosts; no live project is
+                  owned by the repository.</td>
+              </tr>
+              <tr>
+                <td>Phone reader</td>
+                <td>real</td>
+                <td>Signs in to the same project and decodes the published turns.</td>
+              </tr>
+              <tr>
+                <td>Discover, Targets, Dependencies</td>
+                <td>not ported</td>
+                <td>Still the Phase 0 browser app.</td>
+              </tr>
+            </tbody>
+          </table>
+        </section>
+
+        <section class="doc-section" id="gaps">
+          <h2>What is deliberately unfinished</h2>
+          <p>
+            The gaps are part of the design record, so they get the same space as the features:
+          </p>
+          <ul>
+            <li>
+              A keyboard-only walk of the full exit test on a real build is open. Focus order,
+              reduced motion and a high-contrast palette are implemented, but that walk is the
+              remaining proof.
+            </li>
+            <li>
+              The Claude harness answers a live turn with <code>--mcp-config</code> and the approval
+              tool, but the repository has only run it against a scripted stream, not a live
+              subscription.
+            </li>
+            <li>
+              Muse Code, Gemini CLI, Cursor and Cline are verified against scripted implementations.
+              None of those CLIs is installed on the build machine.
+            </li>
+            <li>
+              Cloud is exercised end to end against a local stand-in for all three Firebase hosts.
+              It has not been run against a live Firebase project owned by the repository.
+            </li>
+          </ul>
+        </section>
+
+        <section class="doc-section" id="read">
+          <h2>How to read a claim here</h2>
+          <p>
+            A page will say <strong>real</strong> and name the mechanism, or it will say
+            <strong>protocol</strong> and name the scripted implementation. If a sentence has no
+            mechanism behind it, it does not belong on these pages. The
+            <a href="https://github.com/OkVurb/Rigel/blob/main/docs/what-works.md" rel="noopener"
+              >what-works table</a
+            >
+            is the authority when a page and the table disagree.
+          </p>
+          <p>
+            The CLI side of every surface is documented with its exit codes in the repository.
+            Commands shown on these pages are the ones that exist today, not planned flags.
+          </p>
+        </section>
+
+        <nav class="doc-foot" aria-label="Feature pages">
+          <a href="/">Back to Rigel</a>
+          <a href="/features/sessions.html">Next: sessions</a>
+        </nav>
+      </article>
+    </main>
+
+    <footer class="foot">
+      <div class="shell foot-inner">
+        <div>
+          <a class="brand" href="/">
+            <img src="/rigel.svg" width="22" height="22" alt="" />
+            <span>Rigel</span>
+          </a>
+          <p>One window for several coding agents on one project.</p>
+        </div>
+        <nav aria-label="Footer">
+          <a href="/">Home</a>
+          <a href="/features/sessions.html">Sessions</a>
+          <a href="/features/claims.html">Claims</a>
+          <a href="/features/budget.html">Budget</a>
+          <a href="/features/shelf.html">Shelf</a>
+          <a href="/features/terminal.html">Terminal</a>
+          <a href="/features/cloud.html">Cloud</a>
+          <a href="https://github.com/OkVurb/Rigel" rel="noopener">GitHub</a>
+        </nav>
+        <p class="legal">
+          MIT OR Apache-2.0. The what-works table is the source of truth for every state claim on
+          this page; when the two disagree, the table wins.
+        </p>
+      </div>
+    </footer>
+  </body>
+</html>

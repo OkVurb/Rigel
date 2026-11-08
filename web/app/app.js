@@ -26,6 +26,9 @@ import {
 } from "https://www.gstatic.com/firebasejs/10.14.1/firebase-firestore.js";
 
 const config = window.RIGEL_CONFIG ?? null;
+// Assigned during boot; the readers below are module-level functions and must not
+// depend on a block-scoped Firestore instance.
+let db = null;
 const $ = (id) => document.getElementById(id);
 
 const el = {
@@ -353,6 +356,10 @@ function renderTurns(turns) {
 
 async function loadSessions(user, { keepSelection = true } = {}) {
   say(el.listError, "");
+  if (!db) {
+    say(el.listError, "Firebase is not initialized.");
+    return;
+  }
   try {
     const snapshot = await getDocs(collection(db, "users", user.uid, "sessions"));
     state.sessions = snapshot.docs
@@ -381,6 +388,7 @@ async function loadSessions(user, { keepSelection = true } = {}) {
 async function open(id, { push = true } = {}) {
   const session = state.sessions.find((row) => row.id === id);
   if (!session) return;
+  if (!db || !state.user) return;
 
   state.selected = session;
   state.filter = state.filter;
@@ -432,7 +440,7 @@ if (!config || !config.projectId || !config.apiKey) {
     authDomain: config.authDomain || `${config.projectId}.firebaseapp.com`,
   });
   const auth = getAuth(app);
-  const db = getFirestore(app);
+  db = getFirestore(app);
 
   wireAuth(auth);
   view(el.auth);

@@ -1,0 +1,238 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Rigel: budget and safety</title>
+    <meta
+      name="description"
+      content="Per-agent micro-dollar accounting, a preflight estimate, an 80% warning and a daily cap that refuses the next turn before it starts."
+    />
+    <meta name="theme-color" content="#0b0c0e" />
+    <meta property="og:title" content="Rigel budget: the bill, before and after" />
+    <link rel="icon" type="image/svg+xml" href="/rigel.svg" />
+    <link rel="preload" href="/fonts/inter-400.woff2" as="font" type="font/woff2" crossorigin />
+    <link rel="stylesheet" href="/site.css" />
+  </head>
+  <body>
+    <a class="skip" href="#main">Skip to content</a>
+
+    <header class="topbar">
+      <div class="bar">
+        <a class="brand" href="/">
+          <img src="/rigel.svg" width="24" height="24" alt="" />
+          <span>Rigel</span>
+        </a>
+        <nav aria-label="Sections">
+          <a href="/features/sessions.html#gate">How it works</a>
+          <a href="/#screens">Screenshots</a>
+          <a href="/features/" aria-current="page">Features</a>
+          <a href="/faq.html">FAQ</a>
+          <a href="https://github.com/OkVurb/Rigel" rel="noopener">GitHub</a>
+        </nav>
+        <a class="btn small" href="/app/">Open web app</a>
+      </div>
+    </header>
+
+    <main id="main" class="shell doc-wrap">
+      <aside class="doc-nav" aria-label="Feature pages">
+        <p class="doc-nav-title">Features</p>
+        <a href="/features/">All surfaces</a>
+        <a href="/features/sessions.html">Sessions</a>
+        <a href="/features/claims.html">Claims and merge</a>
+        <a href="/features/budget.html" aria-current="page">Budget and safety</a>
+        <a href="/features/shelf.html">Skill shelf</a>
+        <a href="/features/terminal.html">Terminal</a>
+        <a href="/features/cloud.html">Cloud and phone</a>
+        <p class="doc-nav-title">On this page</p>
+        <a href="#accounting">Accounting</a>
+        <a href="#per-agent">Per agent, per child</a>
+        <a href="#cap">The daily cap</a>
+        <a href="#preflight">Preflight</a>
+        <a href="#reconcile">Reconcile and doctor</a>
+        <a href="#settings">Where the controls live</a>
+        <a href="#limits">Limits</a>
+      </aside>
+
+      <article class="doc">
+        <h1>The bill, before and after.</h1>
+        <p class="lede">
+          Rigel records provider usage per turn, prices it in micro-dollars, warns at 80% of the
+          day’s cap and refuses the next turn when the cap is reached. Nothing about the bill depends
+          on the window staying open.
+        </p>
+
+        <section class="doc-section" id="accounting">
+          <h2>Accounting</h2>
+          <p>
+            Every turn writes a usage row: provider, model, input and output tokens where the
+            provider reports them, and a micro-dollar cost. The price comes from the provider’s usage
+            answer when it carries one, and from the local price table when it does not. A missing
+            price is recorded as an estimate, not silently multiplied into a confident total.
+          </p>
+          <p>
+            The ledger is per project. Switching projects switches the bill, because the spend belongs
+            to the work, not to the window.
+          </p>
+        </section>
+
+        <section class="doc-section" id="per-agent">
+          <h2>Per agent, per child</h2>
+          <p>
+            A fan-out is not one number. Each child agent is its own agent row and its own bill,
+            nested under the parent turn. That is how you can see that three helpers cost less than
+            one long parent turn, or the reverse, without opening a provider dashboard.
+          </p>
+          <p>
+            Scripted runs are honest about what they know: when a model returns no usage, no usage row
+            is invented. The Muse harness is the clearest case in the repository, because its journal
+            carries no token counts at all, so no <code>Usage</code> row is written.
+          </p>
+        </section>
+
+        <section class="doc-section" id="cap">
+          <h2>The daily cap</h2>
+          <p>
+            The default is <strong>$20 per day across the project</strong>. Settings → Safety edits
+            the number and shows today’s ledger beside it. The cap is enforced in two places:
+          </p>
+          <ul>
+            <li>
+              <strong>Before a turn starts.</strong> If the day is already at the cap, the turn is
+              refused rather than started and abandoned halfway.
+            </li>
+            <li>
+              <strong>While agents run.</strong> Every running agent is interrupted after the step
+              that crosses the cap. The stop is recorded as a budget stop, not as a model error.
+            </li>
+          </ul>
+          <p>
+            At 80% the transcript shows an inline prompt. It is a warning, not a second cap: the turn
+            continues until the real limit is reached.
+          </p>
+        </section>
+
+        <section class="doc-section" id="preflight">
+          <h2>Preflight</h2>
+          <p>
+            Under the composer’s first-step quote, Rigel shows an estimate for the draft you are about
+            to send. The estimate is the 20th to 80th percentile of the last eight completed turns in
+            this project, scaled to the draft’s size. It is a range because the last eight turns are
+            not a prediction.
+          </p>
+          <ul>
+            <li>Fewer than three completed turns: “no history yet”, and no number is invented.</li>
+            <li>Eight or more: the middle band of the last eight, not a lifetime average.</li>
+            <li>The quote is a warning. It never blocks a send.</li>
+          </ul>
+        </section>
+
+        <section class="doc-section" id="reconcile">
+          <h2>Reconcile and doctor</h2>
+          <p>
+            <code>rigel doctor</code> reconciles the budget ledger with the session rows and reports a
+            mismatch as a warning or a failure, following the same exit codes as every other check:
+            <code>0</code> clear, <code>1</code> warnings, <code>2</code> failures. That makes a
+            drifted ledger visible in CI instead of only on the Spending page.
+          </p>
+          <pre><code>rigel doctor</code></pre>
+          <p>
+            The window writes the same usage rows the CLI reads. A turn recorded in the window is
+            visible to doctor without an export step.
+          </p>
+        </section>
+
+        <section class="doc-section" id="settings">
+          <h2>Where the controls live</h2>
+          <table>
+            <thead>
+              <tr>
+                <th scope="col">Control</th>
+                <th scope="col">Location</th>
+                <th scope="col">Scope</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>Daily cap</td>
+                <td>Settings → Safety</td>
+                <td>Project database</td>
+              </tr>
+              <tr>
+                <td>Writable children</td>
+                <td>Settings → Safety</td>
+                <td>Project (default three)</td>
+              </tr>
+              <tr>
+                <td>Today’s ledger</td>
+                <td>Settings → Safety, Spending</td>
+                <td>Project</td>
+              </tr>
+              <tr>
+                <td>Provider keys</td>
+                <td>Settings → Providers</td>
+                <td>OS keychain</td>
+              </tr>
+              <tr>
+                <td>80% warning</td>
+                <td>Transcript, inline</td>
+                <td>Current turn</td>
+              </tr>
+              <tr>
+                <td>Preflight quote</td>
+                <td>Composer</td>
+                <td>This project’s last eight turns</td>
+              </tr>
+            </tbody>
+          </table>
+        </section>
+
+        <section class="doc-section" id="limits">
+          <h2>Limits</h2>
+          <ul>
+            <li>
+              The provider’s invoice is authoritative. Rigel’s local price fallback is an estimate
+              when a provider omits cost or changes a price after a turn was recorded.
+            </li>
+            <li>The cap is project-wide, not per provider and not per agent.</li>
+            <li>The cap stops Rigel’s turns. It cannot stop a harness you launched outside Rigel.</li>
+            <li>Preflight is a warning based on history. A first turn, or a new model, has no history
+              to scale from.</li>
+            <li>Reconcile fixes the ledger’s view; it does not re-bill a provider.</li>
+          </ul>
+        </section>
+
+        <nav class="doc-foot" aria-label="Feature pages">
+          <a href="/features/claims.html">Previous: claims and merge</a>
+          <a href="/features/shelf.html">Next: the skill shelf</a>
+        </nav>
+      </article>
+    </main>
+
+    <footer class="foot">
+      <div class="shell foot-inner">
+        <div>
+          <a class="brand" href="/">
+            <img src="/rigel.svg" width="22" height="22" alt="" />
+            <span>Rigel</span>
+          </a>
+          <p>One window for several coding agents on one project.</p>
+        </div>
+        <nav aria-label="Footer">
+          <a href="/">Home</a>
+          <a href="/features/">Features</a>
+          <a href="/features/sessions.html">Sessions</a>
+          <a href="/features/claims.html">Claims</a>
+          <a href="/features/shelf.html">Shelf</a>
+          <a href="/features/terminal.html">Terminal</a>
+          <a href="/features/cloud.html">Cloud</a>
+          <a href="https://github.com/OkVurb/Rigel" rel="noopener">GitHub</a>
+        </nav>
+        <p class="legal">
+          MIT OR Apache-2.0. The default cap and the enforcement points are recorded in
+          docs/what-works.md; the provider bill remains the final word.
+        </p>
+      </div>
+    </footer>
+  </body>
+</html>

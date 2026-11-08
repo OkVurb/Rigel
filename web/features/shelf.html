@@ -1,0 +1,330 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Rigel: the skill shelf</title>
+    <meta
+      name="description"
+      content="An offline FTS5 skill index with SimHash duplicates, six capability rules, dated evidence and honest source health."
+    />
+    <meta name="theme-color" content="#0b0c0e" />
+    <meta property="og:title" content="Rigel shelf: an index you can audit" />
+    <link rel="icon" type="image/svg+xml" href="/rigel.svg" />
+    <link rel="preload" href="/fonts/inter-400.woff2" as="font" type="font/woff2" crossorigin />
+    <link rel="stylesheet" href="/site.css" />
+  </head>
+  <body>
+    <a class="skip" href="#main">Skip to content</a>
+
+    <header class="topbar">
+      <div class="bar">
+        <a class="brand" href="/">
+          <img src="/rigel.svg" width="24" height="24" alt="" />
+          <span>Rigel</span>
+        </a>
+        <nav aria-label="Sections">
+          <a href="/features/sessions.html#gate">How it works</a>
+          <a href="/#screens">Screenshots</a>
+          <a href="/features/" aria-current="page">Features</a>
+          <a href="/faq.html">FAQ</a>
+          <a href="https://github.com/OkVurb/Rigel" rel="noopener">GitHub</a>
+        </nav>
+        <a class="btn small" href="/app/">Open web app</a>
+      </div>
+    </header>
+
+    <main id="main" class="shell doc-wrap">
+      <aside class="doc-nav" aria-label="Feature pages">
+        <p class="doc-nav-title">Features</p>
+        <a href="/features/">All surfaces</a>
+        <a href="/features/sessions.html">Sessions</a>
+        <a href="/features/claims.html">Claims and merge</a>
+        <a href="/features/budget.html">Budget and safety</a>
+        <a href="/features/shelf.html" aria-current="page">Skill shelf</a>
+        <a href="/features/terminal.html">Terminal</a>
+        <a href="/features/cloud.html">Cloud and phone</a>
+        <p class="doc-nav-title">On this page</p>
+        <a href="#corpus">A local corpus</a>
+        <a href="#sources">Where rows come from</a>
+        <a href="#duplicates">Duplicates</a>
+        <a href="#review">The static review</a>
+        <a href="#checking">Checking a skill</a>
+        <a href="#evidence">Advertised vs measured</a>
+        <a href="#freshness">Freshness</a>
+        <a href="#cli">The CLI</a>
+        <a href="#limits">Limits</a>
+      </aside>
+
+      <article class="doc">
+        <h1>An index you can audit.</h1>
+        <p class="lede">
+          The shelf is a local SQLite index of agent skills, built from sources you point it at. It
+          searches offline, clusters near-copies, reviews what it fetched, and keeps the difference
+          between what a skill advertises and what Rigel actually measured.
+        </p>
+
+        <section class="doc-section" id="corpus">
+          <h2>A local corpus</h2>
+          <p>
+            Skill bodies live in a blob store beside an FTS5 index in <code>index.db</code>. Search,
+            the row list and the opened detail all read that one database; no query leaves the
+            machine. The shelf is usable with the network unplugged, which is also the state the
+            screenshots are captured in.
+          </p>
+          <p>
+            A fetched body is cached with its source and content hash. The next sync can ask whether
+            the source changed instead of downloading every body again.
+          </p>
+        </section>
+
+        <section class="doc-section" id="sources">
+          <h2>Where rows come from</h2>
+          <table>
+            <thead>
+              <tr>
+                <th scope="col">Source</th>
+                <th scope="col">What Rigel keeps</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>GitHub</td>
+                <td>An <code>owner/repo</code> or any GitHub URL, one tree call, raw bodies and an
+                  ETag cache.</td>
+              </tr>
+              <tr>
+                <td>SkillsMP and SkillHub</td>
+                <td>Metadata only, because those sources do not publish bodies. A row without a body
+                  cannot receive a static review.</td>
+              </tr>
+              <tr>
+                <td>skills.sh page</td>
+                <td>That one skill’s body, plus the page’s Gen, Socket and Snyk verdicts as dated
+                  evidence rows.</td>
+              </tr>
+              <tr>
+                <td>Prototype export</td>
+                <td>An explicit import from the Phase 0 index, not a silent migration.</td>
+              </tr>
+            </tbody>
+          </table>
+          <p>
+            The importer refuses a skills.sh page that has no audit section instead of reading the
+            absence as a pass. A verdict never changes Rigel’s own grade; it is stored beside it as
+            dated third-party evidence.
+          </p>
+        </section>
+
+        <section class="doc-section" id="duplicates">
+          <h2>Duplicates</h2>
+          <p>
+            After every ingest, SimHash clusters near-copies at a Hamming distance of three bits or
+            less. Twenty forks of one prompt become one row with a variant list, not twenty search
+            results. The cluster is recomputed after each ingest, so a new fork joins the row instead
+            of creating a second one.
+          </p>
+          <p>
+            The variant list is not a delete pile. Each variant keeps its source and evidence; the
+            cluster is a reading aid.
+          </p>
+        </section>
+
+        <section class="doc-section" id="review">
+          <h2>The static review</h2>
+          <p>
+            Six capability rules scan a fetched body and flag privilege escalation, network egress,
+            destructive commands and related capabilities. Every hit carries the
+            <code>file:line</code> that triggered it, so the review can be checked rather than
+            trusted. The grade comes from the same scan the prototype used, which makes the two
+            comparable.
+          </p>
+          <p>
+            <strong>Source health</strong> is separate from the grade: <code>ok</code>,
+            <code>stale</code> with the last-sync date, or <code>broken</code>. All three are read
+            without a network call. A broken source is a fact about the source, not a verdict on the
+            skill.
+          </p>
+          <div class="callout">
+            <p>
+              <strong>Reading a grade:</strong> it says what the six rules covered, not that the skill
+              is safe. A row with no body says it could not be reviewed, rather than showing a green
+              score it did not earn.
+            </p>
+          </div>
+        </section>
+
+        <section class="doc-section" id="checking">
+          <h2>Checking a skill</h2>
+          <p>
+            The six rules are one layer, not a safety proof. The repository also carries an
+            <a
+              href="https://github.com/OkVurb/Rigel/blob/main/skills/owasp-agentic-skills-top-10/SKILL.md"
+              rel="noopener"
+              >OWASP review skill</a
+            >
+            built from the
+            <a href="https://github.com/OWASP/www-project-agentic-skills-top-10" rel="noopener"
+              >Agentic Skills Top 10</a
+            >. It returns a per-risk verdict with <code>file:line</code> evidence, and leaves a risk
+            <code>unchecked</code> when the reviewer did not look.
+          </p>
+          <p>
+            For a second, independent pass,
+            <a href="https://github.com/NVIDIA/SkillSpector" rel="noopener">NVIDIA SkillSpector</a>
+            is an Apache-2.0 scanner for skill directories, repositories, archives and single files.
+            Its static pass needs no API key; the optional semantic pass does. It can emit SARIF for
+            CI instead of a terminal report.
+          </p>
+          <pre><code>uv tool install git+https://github.com/NVIDIA/SkillSpector.git
+skillspector scan ./my-skill --no-llm --format sarif --output skillspector.sarif</code></pre>
+          <p>
+            The layers answer different questions. The local rules say what Rigel measured; the OWASP
+            review says what a reader checked; SkillSpector adds its own patterns and, when enabled,
+            a model's reading. None of them proves a skill harmless, and none of them is run silently
+            by the shelf.
+          </p>
+        </section>
+
+        <section class="doc-section" id="evidence">
+          <h2>Advertised, measured, audited</h2>
+          <p>
+            A skill’s description often carries a percentage. Rigel records it as advertised and
+            marks the row <code>unmeasured</code> until a measurement exists. A dated third-party
+            verdict is recorded as <code>audited</code>, with the date and the auditor. The three are
+            never flattened into one number.
+          </p>
+          <p>
+            The shelf also counts what it holds, and the number is deliberately unglamorous: the
+            catalogue carries <span data-skill-count>11,587</span> skills measured from public
+            sources. Independent censuses put the entire public universe at roughly 238,000 unique
+            skills, so a claim of 300,000 would be padding rather than coverage.
+          </p>
+        </section>
+
+        <section class="doc-section" id="freshness">
+          <h2>Freshness</h2>
+          <p>
+            At launch, a source older than the stale window is re-synced off the UI thread, unless the
+            auto-refresh switch is off. Settings → Skill shelf lists each source, refreshes on demand
+            and indexes a repository. <code>rigel skills refresh</code> is the same pass, and the two
+            faces share one implementation.
+          </p>
+          <p>
+            An empty shelf offers “Index repository” when no source has ever synced, instead of
+            showing a blank table with no next step.
+          </p>
+        </section>
+
+        <section class="doc-section" id="cli">
+          <h2>The CLI</h2>
+          <p>
+            Every shelf command returns JSON on request and follows the repository’s exit codes, so
+            the terminal is a first-class surface rather than a debug console.
+          </p>
+          <table>
+            <thead>
+              <tr>
+                <th scope="col">Command</th>
+                <th scope="col">Does</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td><code>rigel skills index</code></td>
+                <td>Crawls a source, stores bodies and builds the FTS5 rows.</td>
+              </tr>
+              <tr>
+                <td><code>rigel skills search</code></td>
+                <td>Full-text search over the local index.</td>
+              </tr>
+              <tr>
+                <td><code>rigel skills get</code></td>
+                <td>Prints one row with its grade, health and evidence.</td>
+              </tr>
+              <tr>
+                <td><code>rigel skills status</code></td>
+                <td>Shows sources, freshness and index counts.</td>
+              </tr>
+              <tr>
+                <td><code>rigel skills sync</code></td>
+                <td>Refreshes the marketplace sources that publish metadata.</td>
+              </tr>
+              <tr>
+                <td><code>rigel skills sweep</code></td>
+                <td>Re-runs the static review over the corpus.</td>
+              </tr>
+              <tr>
+                <td><code>rigel skills stats</code></td>
+                <td>Prints corpus counts and cluster totals.</td>
+              </tr>
+              <tr>
+                <td><code>rigel skills import</code></td>
+                <td>Imports a prototype export or one skills.sh page.</td>
+              </tr>
+              <tr>
+                <td><code>rigel skills gc</code></td>
+                <td>Removes unreferenced blobs.</td>
+              </tr>
+              <tr>
+                <td><code>rigel skills refresh</code></td>
+                <td>The same refresh pass the window runs.</td>
+              </tr>
+              <tr>
+                <td><code>rigel trust explain</code></td>
+                <td>Prints the five-factor arithmetic behind a tool’s trust decision.</td>
+              </tr>
+            </tbody>
+          </table>
+          <pre><code>rigel skills index anthropics/skills --limit 20
+rigel skills search "pdf" --json
+rigel skills sweep
+rigel doctor</code></pre>
+        </section>
+
+        <section class="doc-section" id="limits">
+          <h2>Limits</h2>
+          <ul>
+            <li>A metadata-only source cannot be reviewed. Its rows say so.</li>
+            <li>The six rules are static. A body that fetches something at run time is not exercised
+              by the scan.</li>
+            <li>SimHash is a near-copy detector, not a plagiarism ruling; the variants stay available.</li>
+            <li>The catalogue count tracks what was indexed, so it moves between releases.</li>
+            <li>Refresh needs the network. The index and the review do not.</li>
+          </ul>
+        </section>
+
+        <nav class="doc-foot" aria-label="Feature pages">
+          <a href="/features/budget.html">Previous: budget and safety</a>
+          <a href="/features/terminal.html">Next: terminal</a>
+        </nav>
+      </article>
+    </main>
+
+    <footer class="foot">
+      <div class="shell foot-inner">
+        <div>
+          <a class="brand" href="/">
+            <img src="/rigel.svg" width="22" height="22" alt="" />
+            <span>Rigel</span>
+          </a>
+          <p>One window for several coding agents on one project.</p>
+        </div>
+        <nav aria-label="Footer">
+          <a href="/">Home</a>
+          <a href="/features/">Features</a>
+          <a href="/features/sessions.html">Sessions</a>
+          <a href="/features/claims.html">Claims</a>
+          <a href="/features/budget.html">Budget</a>
+          <a href="/features/terminal.html">Terminal</a>
+          <a href="/features/cloud.html">Cloud</a>
+          <a href="https://github.com/OkVurb/Rigel" rel="noopener">GitHub</a>
+        </nav>
+        <p class="legal">
+          MIT OR Apache-2.0. Source states, the six rules and the evidence model are documented in
+          docs/what-works.md.
+        </p>
+      </div>
+    </footer>
+  </body>
+</html>

@@ -1,6 +1,43 @@
 /* The reader is a document tool: the transcript is the content, everything else recedes. One
    accent (amber) for the meaningful line, one muted grey for metadata, and a light theme that is
    a real theme rather than an inversion filter. */
+
+@font-face {
+  font-family: "Inter";
+  src: url("/fonts/inter-400.woff2") format("woff2");
+  font-weight: 400;
+  font-style: normal;
+  font-display: swap;
+}
+@font-face {
+  font-family: "Inter";
+  src: url("/fonts/inter-500.woff2") format("woff2");
+  font-weight: 500;
+  font-style: normal;
+  font-display: swap;
+}
+@font-face {
+  font-family: "Inter";
+  src: url("/fonts/inter-600.woff2") format("woff2");
+  font-weight: 600;
+  font-style: normal;
+  font-display: swap;
+}
+@font-face {
+  font-family: "JetBrains Mono";
+  src: url("/fonts/jetbrains-mono-400.woff2") format("woff2");
+  font-weight: 400;
+  font-style: normal;
+  font-display: swap;
+}
+@font-face {
+  font-family: "JetBrains Mono";
+  src: url("/fonts/jetbrains-mono-500.woff2") format("woff2");
+  font-weight: 500;
+  font-style: normal;
+  font-display: swap;
+}
+
 :root,
 :root[data-theme="dark"] {
   --bg: #0b0c0e;
@@ -8,6 +45,7 @@
   --panel-hi: #171a1f;
   --line: #23262b;
   --line-hi: #30353c;
+  --field: #7b838d;
   --text: #e6e8eb;
   --muted: #9ba1a9;
   --accent: #e9a23b;
@@ -15,6 +53,8 @@
   --danger: #e0605f;
   --ok: #57b27a;
   --radius: 12px;
+  --font: "Inter", system-ui, -apple-system, "Segoe UI", sans-serif;
+  --mono: "JetBrains Mono", ui-monospace, "Cascadia Mono", Menlo, monospace;
   color-scheme: dark;
 }
 
@@ -24,6 +64,7 @@
   --panel-hi: #f2f2f0;
   --line: #e2e2df;
   --line-hi: #cfcfca;
+  --field: #6f7681;
   --text: #14161a;
   --muted: #5d646d;
   --accent: #b9750c;
@@ -37,16 +78,21 @@
   box-sizing: border-box;
 }
 
+[hidden] {
+  display: none !important;
+}
+
 html,
 body {
   height: 100%;
+  overflow-x: clip;
 }
 
 body {
   margin: 0;
   background: var(--bg);
   color: var(--text);
-  font: 15px/1.6 "Segoe UI", system-ui, -apple-system, sans-serif;
+  font: 15px/1.6 var(--font);
   display: flex;
   flex-direction: column;
   min-height: 100vh;
@@ -61,12 +107,13 @@ a:hover {
 }
 
 code {
-  font-family: "Cascadia Code", ui-monospace, Menlo, monospace;
+  font-family: var(--mono);
   font-size: 0.88em;
   padding: 0.1em 0.32em;
   border: 1px solid var(--line);
   border-radius: 4px;
   background: color-mix(in srgb, var(--panel-hi) 70%, transparent);
+  overflow-wrap: anywhere;
 }
 
 .visually-hidden {
@@ -79,14 +126,14 @@ code {
 }
 
 .skip {
-  position: absolute;
-  left: -9999px;
+  position: fixed;
+  left: 12px;
+  top: -72px;
+  z-index: 30;
 }
 
 .skip:focus {
-  left: 12px;
   top: 12px;
-  z-index: 30;
   padding: 8px 14px;
   background: var(--accent);
   color: var(--accent-ink);
@@ -130,7 +177,7 @@ code {
   width: 240px;
   padding: 8px 34px 8px 12px;
   background: var(--panel);
-  border: 1px solid var(--line);
+  border: 1px solid var(--field);
   border-radius: 999px;
   color: var(--text);
   font: inherit;
@@ -193,17 +240,20 @@ code {
   border-radius: 999px;
   border: 1px solid var(--accent);
   color: var(--accent);
-  font-size: 0.68rem;
-  letter-spacing: 0.1em;
-  text-transform: uppercase;
+  font-size: 0.72rem;
+  font-weight: 500;
 }
 
 .link {
+  display: inline-flex;
+  align-items: center;
+  min-height: 32px;
   background: none;
   border: 0;
   padding: 0;
   color: var(--muted);
   font: inherit;
+  white-space: nowrap;
   cursor: pointer;
 }
 
@@ -260,7 +310,7 @@ input[type="email"],
 input[type="password"] {
   padding: 10px 12px;
   background: var(--bg);
-  border: 1px solid var(--line);
+  border: 1px solid var(--field);
   border-radius: 8px;
   color: var(--text);
   font: inherit;
@@ -323,6 +373,25 @@ form button[type="submit"]:disabled {
   text-align: center;
 }
 
+@media (max-width: 520px) {
+  .topbar {
+    gap: 8px;
+    padding: 10px 12px;
+  }
+
+  .brand span {
+    display: none;
+  }
+
+  .search input {
+    width: 110px;
+  }
+
+  .search kbd {
+    display: none;
+  }
+}
+
 .or {
   display: flex;
   align-items: center;
@@ -372,9 +441,8 @@ form button[type="submit"]:disabled {
 
 .list-head h2 {
   margin: 0;
-  font-size: 0.78rem;
-  letter-spacing: 0.14em;
-  text-transform: uppercase;
+  font-size: 0.8125rem;
+  font-weight: 500;
   color: var(--muted);
 }
 
@@ -493,7 +561,6 @@ form button[type="submit"]:disabled {
   border-radius: 999px;
   color: var(--muted);
   font-size: 0.76rem;
-  letter-spacing: 0.02em;
 }
 
 .chip.status {
@@ -533,7 +600,7 @@ form button[type="submit"]:disabled {
   border-radius: 6px;
   background: var(--panel-hi);
   border: 1px solid var(--line);
-  font-family: "Cascadia Code", ui-monospace, monospace;
+  font-family: var(--mono);
   font-size: 0.72rem;
   color: var(--muted);
 }
@@ -541,7 +608,6 @@ form button[type="submit"]:disabled {
 .turn-meta {
   color: var(--muted);
   font-size: 0.76rem;
-  letter-spacing: 0.02em;
 }
 
 .copy {
@@ -580,7 +646,7 @@ form button[type="submit"]:disabled {
 .reply:empty::after {
   content: "no reply recorded";
   color: var(--muted);
-  font-style: italic;
+  font-style: normal;
 }
 
 /* ---------- footer ---------- */

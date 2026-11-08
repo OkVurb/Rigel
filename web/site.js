@@ -6,9 +6,8 @@
 //   2. Point "Get Rigel" at the MSI in whatever release GitHub currently calls latest, and notice
 //      when that changes while the tab is open.
 //
-// Everything else that moves is CSS — scroll-driven animations for the reveals and a marquee for
-// the strip — so a script failure costs the page the enlarge-on-click and a version number, and
-// nothing else. The download link in the markup already points at /releases/latest, so a blocked
+// Everything else is CSS, so a script failure costs the page the enlarge-on-click and a version
+// number, and nothing else. The download link in the markup already points at /releases/latest, so a blocked
 // fetch, a rate limit or an offline visitor still lands on a page with a working MSI.
 //
 // It ships as a file, not inline markup, because the site's Content-Security-Policy has no
@@ -104,8 +103,8 @@
     }
     if (meta) {
       meta.textContent = asset
-        ? `Windows 10/11 · MSI · ${size(asset.size)}`
-        : "Windows 10/11 · installer on GitHub";
+        ? `Windows 10/11, MSI, ${size(asset.size)}`
+        : "Windows 10/11, installer on GitHub";
     }
     link.classList.toggle("is-new", Boolean(shipped) && version !== shipped);
     shown = version;
@@ -113,7 +112,7 @@
 
   function fallback() {
     link.href = `https://github.com/${REPO}/releases/latest`;
-    if (meta) meta.textContent = "Windows 10/11 · latest release on GitHub";
+    if (meta) meta.textContent = "Windows 10/11, latest release on GitHub";
   }
 
   async function check(force) {
@@ -226,12 +225,12 @@
 })();
 
 /* ---------- catalogue count ----------
-   The FAQ says how many skills the catalogue holds. It reads the published meta instead of
-   hard-coding a number, so the sentence cannot drift from what is actually served. */
+   The FAQ reads published catalogue metadata through the website origin, keeping browser
+   requests on askrigel.com rather than exposing a direct Firebase endpoint. */
 (function () {
   const node = document.querySelector("[data-skill-count]");
   if (!node) return;
-  fetch("https://rigel-25128-default-rtdb.firebaseio.com/catalog/v1/meta.json", { cache: "no-store" })
+  fetch("/api/catalog-meta", { cache: "no-store" })
     .then((response) => (response.ok ? response.json() : null))
     .then((meta) => {
       if (meta && Number.isFinite(meta.skills)) node.textContent = meta.skills.toLocaleString("en-US");
@@ -239,4 +238,132 @@
     .catch(() => {
       /* the static number stays; a blocked request is not an error worth showing */
     });
+})();
+
+/* ---------- sponsored slot ----------
+   One Gravity ad, requested through Rigel's first-party site endpoint. The provider key never reaches the page.
+   The slot stays out of the layout when there is no fill, when the visitor sends DNT/GPC, or
+   when the request fails. The impression is fired once, only after the card is actually in view. */
+(function () {
+  const section = document.getElementById("sponsor");
+  if (!section) return;
+
+  const title = document.getElementById("sponsor-title");
+  const text = document.getElementById("sponsor-text");
+  const brand = document.getElementById("sponsor-brand");
+  const link = document.getElementById("sponsor-link");
+  if (!title || !text || !brand || !link) return;
+
+  if (navigator.doNotTrack === "1" || navigator.globalPrivacyControl === true) return;
+
+  const uuid = () => {
+    if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") {
+      return crypto.randomUUID();
+    }
+    return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 12)}`;
+  };
+
+  function stored(storage, key) {
+    try {
+      const existing = storage.getItem(key);
+      if (existing) return existing;
+      const value = uuid();
+      storage.setItem(key, value);
+      return value;
+    } catch {
+      return uuid();
+    }
+  }
+
+  const userId = stored(window.localStorage, "rigel-sponsor-user");
+  const sessionId = stored(window.sessionStorage, "rigel-sponsor-session");
+  const device = {
+    ua: navigator.userAgent,
+    browser: "web",
+    device_type: window.matchMedia("(max-width: 720px)").matches ? "mobile" : "desktop",
+    language: navigator.language,
+    timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
+    screen_width: window.screen.width,
+    screen_height: window.screen.height,
+    viewport_width: window.innerWidth,
+    viewport_height: window.innerHeight,
+  };
+
+  const controller = new AbortController();
+  const timeout = window.setTimeout(() => controller.abort(), 6000);
+  fetch("/api/gravity-ad", {
+    method: "POST",
+    credentials: "omit",
+    cache: "no-store",
+    headers: { "Content-Type": "application/json" },
+    signal: controller.signal,
+    body: JSON.stringify({
+      messages: [
+        {
+          role: "user",
+          content:
+            "I am reading about Rigel, a Windows desktop app for running Codex, Claude Code, Cursor, Cline and other coding agents on one project with one journal and one bill.",
+        },
+        {
+          role: "assistant",
+          content:
+            "Rigel keeps agent claims, patches, approvals and per-agent spend in one local project, with a skill shelf and a read-only web reader.",
+        },
+      ],
+      gravity_context: { sessionId, user: { id: userId }, device },
+    }),
+  })
+    .then((response) => (response.ok ? response.json() : null))
+    .then((data) => {
+      const ad = data && Array.isArray(data.ads) ? data.ads[0] : null;
+      if (ad) show(ad);
+    })
+    .catch(() => {
+      /* no fill and a blocked request look the same: no slot, no error copy */
+    })
+    .finally(() => window.clearTimeout(timeout));
+
+  function show(ad) {
+    if (!ad.clickUrl || !/^https:\/\//i.test(ad.clickUrl)) return;
+    title.textContent = ad.title || ad.brandName || "Sponsored";
+    text.textContent = ad.adText || "";
+    brand.textContent = ad.brandName || "";
+    brand.hidden = !ad.brandName;
+    link.textContent = ad.cta || "Learn more";
+    link.href = ad.clickUrl;
+    section.hidden = false;
+
+    let seen = false;
+    const impression = () => {
+      if (seen || !ad.impUrl || !/^https:\/\//i.test(ad.impUrl)) return;
+      seen = true;
+      const pixel = new Image();
+      pixel.referrerPolicy = "no-referrer";
+      pixel.src = ad.impUrl;
+    };
+
+    // Best effort on a browser without viewability support: still record the impression, as the
+    // only alternative is serving an untracked ad.
+    if (typeof IntersectionObserver !== "function") {
+      impression();
+      return;
+    }
+    const observer = new IntersectionObserver(
+      (entries) => {
+        if (document.visibilityState !== "visible") return;
+        if (!entries.some((entry) => entry.isIntersecting && entry.intersectionRatio >= 0.5)) return;
+        impression();
+        observer.disconnect();
+        document.removeEventListener("visibilitychange", observeVisible);
+      },
+      { threshold: 0.5 },
+    );
+    const observeVisible = () => {
+      if (seen || document.visibilityState !== "visible") return;
+      observer.unobserve(section);
+      observer.observe(section);
+    };
+    observer.observe(section);
+    document.addEventListener("visibilitychange", observeVisible);
+  }
 })();
