@@ -15,6 +15,10 @@
  * while approvals, tools, patches, the transcript and the bill stay on the production path.
  *
  * Usage: node e2e/run.mjs [--skip-build] [--spec <file>]
+ *
+ * With no --spec, each spec gets its own app process. The window specs deliberately drive one
+ * project, but a session and its render state must not leak into the next spec; a fresh process
+ * also means a failed page cannot make the following spec look like a product failure.
  */
 
 import { execFileSync, spawn } from "node:child_process";
@@ -203,6 +207,27 @@ async function main() {
     });
   }
   if (!existsSync(APP)) throw new Error(`missing app binary: ${APP}`);
+
+  if (!spec) {
+    const specs = readdirSync(path.join(ROOT, "e2e", "specs"))
+      .filter((name) => name.endsWith(".spec.ts"))
+      .sort();
+    if (specs.length === 0) throw new Error("no window specs found");
+    let failed = 0;
+    for (const name of specs) {
+      try {
+        run(
+          process.execPath,
+          [fileURLToPath(import.meta.url), "--skip-build", "--spec", `e2e/specs/${name}`],
+          { cwd: ROOT, env: { ...process.env } },
+        );
+      } catch {
+        failed += 1;
+        console.error(`window spec failed: ${name}`);
+      }
+    }
+    process.exit(failed === 0 ? 0 : 1);
+  }
   if (!existsSync(DRIVER)) throw new Error(`missing tauri-driver: ${DRIVER}`);
   prepareWorkspace();
 
