@@ -279,7 +279,10 @@ mod tests {
         let mut out = Vec::new();
         for index in 0..archive.len() {
             let mut entry = archive.by_index(index).unwrap();
-            let name = entry.name().to_string();
+            let name = entry
+                .name()
+                .expect("zip entry has a readable name")
+                .to_string();
             let mut bytes = Vec::new();
             entry.read_to_end(&mut bytes).unwrap();
             out.push((name, bytes));
