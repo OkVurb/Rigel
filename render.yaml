@@ -1,0 +1,31 @@
+# yaml-language-server: $schema=https://render.com/schema/render.yaml.json
+
+services:
+  - type: web
+    name: rigel-cms
+    runtime: docker
+    plan: free
+    region: oregon
+    dockerfilePath: ./cms/Dockerfile
+    dockerContext: ./cms
+    healthCheckPath: /api/faqs
+    autoDeployTrigger: commit
+    initialDeployHook: npm run seed
+    envVars:
+      - key: DATABASE_URL
+        fromDatabase:
+          name: rigel-cms-db
+          property: connectionString
+      - key: PAYLOAD_SECRET
+        generateValue: true
+      - key: PAYLOAD_PUBLIC_SERVER_URL
+        sync: false
+      - key: PAYLOAD_ADMIN_EMAIL
+        sync: false
+      - key: PAYLOAD_ADMIN_PASSWORD
+        sync: false
+
+databases:
+  - name: rigel-cms-db
+    plan: free
+    region: oregon

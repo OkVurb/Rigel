@@ -1,0 +1,11 @@
+.env
+.env.*
+!.env.example
+node_modules
+.next
+cms.db
+cms.db-*
+media
+tests
+playwright-report
+test-results

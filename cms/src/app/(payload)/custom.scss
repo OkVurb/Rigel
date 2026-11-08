@@ -1,0 +1,271 @@
+// Rigel admin theme. Payload exposes its palette through --theme-elevation-*; overriding the
+// surfaces here keeps every built-in control (tables, inputs, cards) in the same ink family
+// instead of theming each one. Amber is the only accent, as in the product: #E9A23B.
+:root {
+  --rigel-amber: #e9a23b;
+  --rigel-amber-soft: rgba(233, 162, 59, 0.14);
+  --rigel-ink: #0b0c0e;
+  --rigel-ink-raised: #111316;
+  --rigel-paper: #f4f1ea;
+
+  --font-body: 'Segoe UI', system-ui, -apple-system, 'Helvetica Neue', Arial, sans-serif;
+  --font-mono: 'Cascadia Code', 'SFMono-Regular', Consolas, monospace;
+}
+
+html[data-theme='light'] {
+  // Amber at full strength is not readable on paper; the darker ink keeps 4.5:1 for links.
+  --rigel-amber: #8a5600;
+  --rigel-amber-soft: rgba(138, 86, 0, 0.1);
+}
+
+html[data-theme='dark'] {
+  --theme-bg: var(--rigel-ink);
+  --theme-elevation-0: var(--rigel-ink);
+  --theme-elevation-50: var(--rigel-ink-raised);
+  --theme-elevation-100: #16181c;
+  --theme-elevation-150: #1e2126;
+  --theme-elevation-200: #24272d;
+  --theme-elevation-250: #2b2f36;
+  --theme-elevation-300: #33373f;
+  --theme-elevation-750: #c9c5bb;
+  --theme-elevation-800: #ddd8ce;
+  --theme-elevation-850: #ece8df;
+  --theme-elevation-900: var(--rigel-paper);
+  --theme-elevation-950: #faf8f3;
+  --theme-elevation-1000: #fffdf8;
+}
+
+html[data-theme='light'] {
+  --theme-bg: #f7f5ef;
+  --theme-elevation-0: #fffdf8;
+  --theme-elevation-50: #f7f5ef;
+  --theme-elevation-100: #efebe2;
+  --theme-elevation-150: #e2ddd1;
+  --theme-elevation-200: #d5cec0;
+}
+
+body {
+  background: var(--theme-bg);
+  color: var(--theme-text);
+}
+
+::selection {
+  background: var(--rigel-amber-soft);
+  color: var(--theme-text);
+}
+
+:focus-visible {
+  outline: 2px solid var(--rigel-amber);
+  outline-offset: 2px;
+}
+
+// ------------------------------------------------------------------ brand
+
+.rigel-brand {
+  display: inline-flex;
+  align-items: center;
+  gap: 14px;
+}
+
+.rigel-brand__word {
+  display: flex;
+  flex-direction: column;
+  line-height: 1;
+}
+
+.rigel-brand__word strong {
+  color: var(--theme-elevation-900);
+  font-size: 24px;
+  font-weight: 600;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+}
+
+.rigel-brand__word small {
+  margin-top: 6px;
+  color: var(--rigel-amber);
+  font-size: 10px;
+  letter-spacing: 0.26em;
+  text-transform: uppercase;
+}
+
+.rigel-mark {
+  flex: none;
+  border-radius: 5px;
+}
+
+// ------------------------------------------------------------------ nav links
+
+.rigel-cloud-nav {
+  margin: 22px 12px 0;
+  padding: 12px;
+  border: 1px solid var(--theme-elevation-150);
+  border-radius: 6px;
+  background: var(--theme-elevation-50);
+}
+
+.rigel-cloud-nav__label {
+  margin: 0;
+  color: var(--rigel-amber);
+  font-size: 10px;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+}
+
+.rigel-cloud-nav__project {
+  margin: 4px 0 10px;
+  color: var(--theme-elevation-700);
+  font-family: var(--font-mono);
+  font-size: 11px;
+}
+
+.rigel-cloud-nav__link {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 6px 0;
+  border-bottom: 1px solid var(--theme-elevation-100);
+  color: var(--theme-elevation-800);
+  font-size: 12px;
+  text-decoration: none;
+}
+
+.rigel-cloud-nav__link:last-child {
+  border-bottom: 0;
+}
+
+.rigel-cloud-nav__link:hover {
+  color: var(--rigel-amber);
+}
+
+// ------------------------------------------------------------------ dashboard
+
+.rigel-dashboard {
+  margin: 24px 0;
+  padding: 20px;
+  border: 1px solid var(--theme-elevation-150);
+  border-radius: 8px;
+  background: var(--theme-elevation-50);
+}
+
+.rigel-dashboard__head {
+  display: flex;
+  align-items: flex-start;
+  gap: 14px;
+}
+
+.rigel-dashboard h2 {
+  margin: 0;
+  color: var(--theme-elevation-900);
+  font-size: 15px;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.rigel-dashboard p {
+  max-width: 68ch;
+  margin: 6px 0 0;
+  color: var(--theme-elevation-700);
+  font-size: 12px;
+  line-height: 1.6;
+}
+
+.rigel-dashboard__links {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 16px;
+}
+
+.rigel-dashboard__link {
+  display: inline-flex;
+  gap: 8px;
+  padding: 6px 10px;
+  border: 1px solid var(--theme-elevation-200);
+  border-radius: 4px;
+  color: var(--theme-elevation-800);
+  font-size: 11px;
+  text-decoration: none;
+}
+
+.rigel-dashboard__link:hover {
+  border-color: var(--rigel-amber);
+  color: var(--rigel-amber);
+}
+
+.rigel-dashboard-stack {
+  display: grid;
+  gap: 16px;
+}
+
+.rigel-dashboard__metrics {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 240px), 1fr));
+  gap: 10px;
+  margin-top: 18px;
+}
+
+.rigel-dashboard__metric {
+  min-width: 0;
+  padding: 14px;
+  border: 1px solid var(--theme-elevation-150);
+  border-radius: 6px;
+  background: var(--theme-elevation-0);
+}
+
+.rigel-dashboard__eyebrow {
+  display: block;
+  color: var(--rigel-amber);
+  font-size: 10px;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+}
+
+.rigel-dashboard__metric strong {
+  display: block;
+  margin-top: 8px;
+  color: var(--theme-elevation-900);
+  font-size: 14px;
+}
+
+.rigel-dashboard__metric p {
+  min-height: 58px;
+  margin: 6px 0 12px;
+}
+
+.rigel-dashboard__metric a {
+  color: var(--rigel-amber);
+  font-size: 12px;
+  text-decoration: none;
+}
+
+.rigel-dashboard__metric a:hover {
+  text-decoration: underline;
+}
+
+// ------------------------------------------------------------------ controls
+
+.btn--style-primary {
+  border-color: var(--rigel-amber);
+  background: var(--rigel-amber);
+  color: var(--rigel-ink);
+}
+
+.btn--style-primary:hover,
+.btn--style-primary:focus {
+  border-color: #f0b158;
+  background: #f0b158;
+  color: var(--rigel-ink);
+}
+
+.nav__link:hover,
+.nav__link--active,
+.nav a[aria-current='page'] {
+  color: var(--rigel-amber);
+}
+
+.nav__link--active,
+.nav a[aria-current='page'] {
+  box-shadow: inset 2px 0 0 var(--rigel-amber);
+}

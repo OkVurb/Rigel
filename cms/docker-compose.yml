@@ -1,0 +1,33 @@
+services:
+  payload:
+    build: .
+    ports:
+      - '3000:3000'
+    environment:
+      DATABASE_URL: postgres://rigel:${POSTGRES_PASSWORD:-rigel-local}@postgres:5432/rigel
+      PAYLOAD_PUBLIC_SERVER_URL: http://localhost:3000
+      PAYLOAD_SECRET: ${PAYLOAD_SECRET:?set PAYLOAD_SECRET in cms/.env}
+      PAYLOAD_ADMIN_EMAIL: ${PAYLOAD_ADMIN_EMAIL:-content@rigel.local}
+      PAYLOAD_ADMIN_PASSWORD: ${PAYLOAD_ADMIN_PASSWORD:?set PAYLOAD_ADMIN_PASSWORD in cms/.env}
+    env_file:
+      - .env
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_USER: rigel
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-rigel-local}
+      POSTGRES_DB: rigel
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U rigel -d rigel']
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+
+volumes:
+  pgdata:
