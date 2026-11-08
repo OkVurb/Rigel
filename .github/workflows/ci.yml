@@ -190,8 +190,9 @@ jobs:
         run: |
           cargo install tauri-cli --version "^2" --locked
           cargo install tauri-driver --locked
-          $edge = (Get-Item "C:Program Files (x86)MicrosoftEdgeApplicationmsedge.exe").VersionInfo.ProductVersion
+          $edgePath = Join-Path ${env:ProgramFiles(x86)} 'Microsoft/Edge/Application/msedge.exe'
+          $edge = (Get-Item $edgePath).VersionInfo.ProductVersion
           Invoke-WebRequest "https://msedgedriver.microsoft.com/$edge/edgedriver_win64.zip" -OutFile edgedriver.zip
-          Expand-Archive edgedriver.zip -DestinationPath "$env:USERPROFILE.cargoin" -Force
+          Expand-Archive edgedriver.zip -DestinationPath (Join-Path $env:USERPROFILE '.cargo/bin') -Force
       - name: Window end-to-end
         run: npm --prefix ui run test:window
