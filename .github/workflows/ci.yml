@@ -198,3 +198,21 @@ jobs:
           Expand-Archive edgedriver.zip -DestinationPath (Join-Path $env:USERPROFILE '.cargo/bin') -Force
       - name: Window end-to-end
         run: npm --prefix ui run test:window
+
+      # Job logs need authentication; the step annotation names the failing spec, and these
+      # artifacts retain its full output for diagnosis.
+      - name: Window failure details
+        if: failure()
+        shell: pwsh
+        run: |
+          if (Test-Path tmp/e2e/window-failure.log) {
+            Get-Content tmp/e2e/window-failure.log | Select-Object -Last 120 | Out-File -Append -Encoding utf8 $env:GITHUB_STEP_SUMMARY
+          }
+
+      - name: Upload window failure logs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: window-failure
+          path: tmp/e2e/**/*.log
+          if-no-files-found: warn

@@ -40,6 +40,9 @@ export async function openRail(label: string) {
  * "Start a session", one that already has sessions offers the "+ session" button.
  */
 export async function startSession() {
+  // The project must be open before the Session surface can offer a start control. This is the
+  // same readiness condition the screenshot and window specs assert explicitly.
+  await waitForText("e2e-project");
   await openRail("Session");
   // The rail swaps the surface asynchronously. A fresh app can show the nav before the
   // Session surface has rendered its start control; wait for the control instead of racing it.

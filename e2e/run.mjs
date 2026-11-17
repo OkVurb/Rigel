@@ -22,7 +22,15 @@
  */
 
 import { execFileSync, spawn } from "node:child_process";
-import { existsSync, mkdirSync, readdirSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
+import {
+  existsSync,
+  mkdirSync,
+  readdirSync,
+  rmSync,
+  statSync,
+  symlinkSync,
+  writeFileSync,
+} from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -47,6 +55,27 @@ const spec = specIndex >= 0 ? args[specIndex + 1] : null;
 function run(command, commandArgs, options = {}) {
   console.log(`\n$ ${command} ${commandArgs.join(" ")}`);
   execFileSync(command, commandArgs, { cwd: ROOT, stdio: "inherit", ...options });
+}
+
+/** Run one spec in its own process while retaining its output for a hosted annotation. */
+function runSpec(name) {
+  return new Promise((resolve) => {
+    const child = spawn(
+      process.execPath,
+      [fileURLToPath(import.meta.url), "--skip-build", "--spec", `e2e/specs/${name}`],
+      { cwd: ROOT, env: { ...process.env }, stdio: ["ignore", "pipe", "pipe"] },
+    );
+    let output = "";
+    const collect = (chunk, stream) => {
+      const text = chunk.toString();
+      output += text;
+      stream.write(text);
+    };
+    child.stdout.on("data", (chunk) => collect(chunk, process.stdout));
+    child.stderr.on("data", (chunk) => collect(chunk, process.stderr));
+    child.on("error", (error) => resolve({ code: 1, output: `${output}\n${error}` }));
+    child.on("exit", (code) => resolve({ code: code ?? 1, output }));
+  });
 }
 
 /**
@@ -213,18 +242,25 @@ async function main() {
       .filter((name) => name.endsWith(".spec.ts"))
       .sort();
     if (specs.length === 0) throw new Error("no window specs found");
+    const failureLog = path.join(ROOT, "tmp", "e2e", "window-failure.log");
+    mkdirSync(path.dirname(failureLog), { recursive: true });
     let failed = 0;
     for (const name of specs) {
-      try {
-        run(
-          process.execPath,
-          [fileURLToPath(import.meta.url), "--skip-build", "--spec", `e2e/specs/${name}`],
-          { cwd: ROOT, env: { ...process.env } },
-        );
-      } catch {
-        failed += 1;
-        console.error(`window spec failed: ${name}`);
-      }
+      const result = await runSpec(name);
+      if (result.code === 0) continue;
+      failed += 1;
+      const lines = result.output
+        .split(/\r?\n/)
+        .map((line) => line.trim())
+        .filter(Boolean);
+      const detail =
+        lines.find((line) => /^Error:|^AssertionError:|FAILED in |✖ /.test(line)) ??
+        lines.slice(-3).join(" | ") ??
+        "no diagnostic output";
+      const message = `${name}: ${detail}`.slice(0, 900).replace(/\r?\n/g, " ");
+      console.error(`window spec failed: ${message}`);
+      console.log(`::error title=Window spec failed::${message}`);
+      writeFileSync(failureLog, `${message}\n\n${result.output.slice(-12000)}\n`);
     }
     process.exit(failed === 0 ? 0 : 1);
   }
@@ -294,6 +330,8 @@ async function main() {
 }
 
 main().catch((error) => {
+  const message = error instanceof Error ? error.message : String(error);
   console.error(error);
+  console.log(`::error title=Window runner failed::${message.replace(/\r?\n/g, " ").slice(0, 900)}`);
   process.exit(1);
 });
