@@ -41,6 +41,22 @@ export async function openRail(label: string) {
  */
 export async function startSession() {
   await openRail("Session");
+  // The rail swaps the surface asynchronously. A fresh app can show the nav before the
+  // Session surface has rendered its start control; wait for the control instead of racing it.
+  await browser.waitUntil(
+    async () =>
+      (await browser.execute(() => {
+        const labels = ["Start a session", "+ session"];
+        return Array.from(document.querySelectorAll("button")).some((candidate) =>
+          labels.some((label) => (candidate.textContent ?? "").includes(label)),
+        );
+      })) === true,
+    {
+      timeout: 30_000,
+      interval: 100,
+      timeoutMsg: "the session surface never offered a start control",
+    },
+  );
   if (!(await clickByText("Start a session")) && !(await clickByText("+ session"))) {
     throw new Error("the session surface offered no way to start a session");
   }
