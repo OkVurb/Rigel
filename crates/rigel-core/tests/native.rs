@@ -1698,11 +1698,16 @@ impl Model for OverlapModel {
             return Ok(());
         }
 
-        if let Some((cancels, agent_id)) = &self.canceller {
-            cancels.cancel_agent(agent_id);
-        }
         let now = self.active.fetch_add(1, Ordering::SeqCst) + 1;
         self.peak.fetch_max(now, Ordering::SeqCst);
+        // Cancel only once both children are inside their model calls, so both turns exist
+        // before the parent stops. Cancelling from whichever child happened to start first
+        // raced the other child's registration and made the transcript count flaky.
+        if now >= 2
+            && let Some((cancels, agent_id)) = &self.canceller
+        {
+            cancels.cancel_agent(agent_id);
+        }
         tokio::time::sleep(Duration::from_millis(250)).await;
         self.active.fetch_sub(1, Ordering::SeqCst);
         on_delta(Delta::Text(format!("{last_user} done.\n")));
