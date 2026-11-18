@@ -22,6 +22,7 @@
  */
 
 import { execFileSync, spawn } from "node:child_process";
+import { createServer } from "node:net";
 import {
   existsSync,
   mkdirSync,
@@ -44,8 +45,9 @@ const APP = path.join(ROOT, "target", "debug", "rigel-app.exe");
 const DRIVER = path.join(process.env.USERPROFILE ?? "", ".cargo", "bin", "tauri-driver.exe");
 const PORT = 4446;
 const NATIVE_PORT = 9516;
-// Derived from the pid so a leftover browser process cannot hold the port a new run needs.
-const CDP_PORT = 9300 + (process.pid % 300);
+// Chosen from the OS's free-port pool in main(). A PID-derived port in a narrow range can land in
+// a Windows excluded range on a hosted runner, leaving WebView2 unable to bind its debug socket.
+let CDP_PORT = 9300 + (process.pid % 300);
 
 const args = process.argv.slice(2);
 const skipBuild = args.includes("--skip-build");
@@ -55,6 +57,19 @@ const spec = specIndex >= 0 ? args[specIndex + 1] : null;
 function run(command, commandArgs, options = {}) {
   console.log(`\n$ ${command} ${commandArgs.join(" ")}`);
   execFileSync(command, commandArgs, { cwd: ROOT, stdio: "inherit", ...options });
+}
+
+/** Ask the OS for a currently free loopback port, then release it for WebView2. */
+function freePort() {
+  return new Promise((resolve, reject) => {
+    const server = createServer();
+    server.once("error", reject);
+    server.listen(0, "127.0.0.1", () => {
+      const address = server.address();
+      const port = typeof address === "object" && address !== null ? address.port : 0;
+      server.close((error) => (error ? reject(error) : resolve(port)));
+    });
+  });
 }
 
 /** Run one spec in its own process while retaining its output for a hosted annotation. */
@@ -246,8 +261,24 @@ async function main() {
     mkdirSync(path.dirname(failureLog), { recursive: true });
     let failed = 0;
     for (const name of specs) {
-      const result = await runSpec(name);
-      if (result.code === 0) continue;
+      let result = await runSpec(name);
+      // A WebView2 process that still owns its profile can make the next fresh app fail before
+      // the debug port binds. Retry that startup failure once; assertions are never retried.
+      if (
+        result.code !== 0 &&
+        /never opened a debug port|app exited early|tauri-driver did not become ready/.test(
+          result.output,
+        )
+      ) {
+        console.error(`window spec startup failed: ${name}; retrying once`);
+        await new Promise((resolve) => setTimeout(resolve, 2_000));
+        result = await runSpec(name);
+      }
+      if (result.code === 0) {
+        // Let the killed app and its WebView2 children release ports before the next spec.
+        await new Promise((resolve) => setTimeout(resolve, 1_000));
+        continue;
+      }
       failed += 1;
       const lines = result.output
         .split(/\r?\n/)
@@ -265,6 +296,7 @@ async function main() {
     process.exit(failed === 0 ? 0 : 1);
   }
   if (!existsSync(DRIVER)) throw new Error(`missing tauri-driver: ${DRIVER}`);
+  CDP_PORT = await freePort();
   prepareWorkspace();
 
   const env = {
