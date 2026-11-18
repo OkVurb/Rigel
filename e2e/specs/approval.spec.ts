@@ -80,8 +80,13 @@ describe("the approval card", () => {
       timeout: 20_000,
       timeoutMsg: "the card stayed after Reject",
     });
-    // The refusal is recorded, and the turn carries on to its closing step.
-    expect(await bodyText()).toMatch(/denied|refused|skipped/i);
+    // The refusal is recorded, and the turn carries on to its closing step. The card can
+    // disappear one frame before the denial row paints, so wait for the record instead of
+    // sampling once and depending on the runner's speed.
+    await browser.waitUntil(
+      async () => /denied|refused|skipped/i.test(await bodyText()),
+      { timeout: 20_000, timeoutMsg: "the refusal did not reach the transcript" },
+    );
     await approveEveryCard();
     await waitForText("Done.");
   });
