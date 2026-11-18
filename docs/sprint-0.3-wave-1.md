@@ -13,7 +13,8 @@ inspector, an approval card, and the state/keyboard audits. It does not add a ne
 - [x] `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets -- -D warnings`,
       `cargo test --workspace`, `npm --prefix ui run build` and `node scripts/check-docs.mjs` pass.
       Evidence (2026-11-08): all five exit 0; the UI Playwright suite is 55/55.
-- [ ] The native-window test runs on a Windows CI runner and fails when an IPC command is renamed.
+- [x] The native-window test runs on a Windows CI runner and fails when an IPC command is renamed.
+      Evidence (2026-11-18): hosted run [44213703351](https://github.com/OkVurb/Rigel/actions/runs/44213703351) passed the six-spec suite; `ipc.spec.ts` invokes `turn_send_renamed`.
 - [x] The migration rehearsal upgrades every historical project/index schema prefix.
       Evidence: `cargo test -p rigel-core --test schema` -> 13 passed; `node scripts/rehearse-migrations.mjs` -> 17 prefix runs.
 - [x] No credential or secret appears in a diagnostic, log or crash payload in the test corpus.

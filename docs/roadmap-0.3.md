@@ -4,7 +4,7 @@
 tree of 6 Nov 2026 and absorbs the deferred round-9 items from [roadmap-0.2.md](roadmap-0.2.md)
 rather than leaving a second list.
 
-**Tally (2026-11-08):** 71 Done · 7 Blocked · 122 Open. The 0.3.0 preview tree ships every Done
+**Tally (2026-11-18):** 71 Done · 7 Blocked · 122 Open. The 0.3.0 preview tree ships every Done
 item. The last pass closed 53, 60, 64, 67, 69, 70, 75, 78, 80, 106, 107, 130, 140 and 182; the
 open and blocked items below are unchanged by it.
 
@@ -14,8 +14,11 @@ open and blocked items below are unchanged by it.
 functions test` passes 37 tests; `node scripts/check-docs.mjs` validates 55 documents and 200
 roadmap items; `check-tokens.mjs` covers 44 files; `check-versions.mjs` agrees on 0.3.0; and
 `node deploy/check.mjs` reports 11 checks with 4 notes. This is local evidence only: no VPS
-deployment or database migration was run. Item 1's local driver is done; its first Windows CI run
-is still external proof. The signing, VM and published-asset items (6-11 and 200) stay blocked.
+deployment or database migration was run.
+
+**Hosted proof (2026-11-18).** The `main` run [44213703351](https://github.com/OkVurb/Rigel/actions/runs/44213703351)
+passed rust, ui, functions, docs, supply-chain, hygiene and the six-spec window lane. The signing,
+VM and published-asset items (6-11 and 200) stay blocked.
 
 **Built without further input.** These are the inferred Hallmark design-context answers; redirect
 one and only the affected items change:
@@ -97,7 +100,7 @@ done signal, and the eight-state table is the evidence a review will use.
 1. **W1 · P0 · L · Native window driver.** `e2e/wdio.conf.ts` drives the built app through open,
    scripted turn, approval and diff, and a second spec renames an IPC command. — done when
    `npm run test:window` passes on the Windows CI runner and the renamed run fails by name.
-   **Done (2026-11-06):** `npm --prefix ui run test:window` runs four spec files (window, IPC, approval, route) green on Windows, the renamed command fails by name, and the `window` job in `.github/workflows/ci.yml` runs the same command (its first GitHub run is the remaining external proof).
+   **Done (2026-11-18):** `npm --prefix ui run test:window` runs six spec files (window, IPC, approval, route, gravity, screenshot) green on Windows, the renamed command fails by name, and the `window` job in `.github/workflows/ci.yml` passed the same suite in hosted run [44213703351](https://github.com/OkVurb/Rigel/actions/runs/44213703351).
 
 
 2. **W1 · P0 · M · Migration rehearsal.** `crates/rigel-core/tests/schema.rs` builds a database at
@@ -158,7 +161,7 @@ done signal, and the eight-state table is the evidence a review will use.
 9. **W1 · P0 · M · Supply-chain CI lane.** `.github/workflows/ci.yml` gains a `supply-chain` job
    running `cargo audit`, `cargo deny check`, `gitleaks` and the SBOM generator. — done when the job
    is required on `main` and a committed fake key fixture fails it.
-   **Blocked (2026-11-06):** the `supply-chain` job exists, but "required on `main`" is a GitHub branch-protection setting and the failing-fixture proof needs a GitHub-hosted run. This machine has no repository-admin credentials and no hosted runner. Prerequisite: a repository admin marks the `supply-chain` check required on `main`, then a pushed branch with a committed fake-key fixture must show that required check failing by name.
+   **Blocked (2026-11-18):** the `supply-chain` job now passes on hosted `main`, but "required on `main`" is a GitHub branch-protection setting and the committed-fake-key proof still needs a deliberate failing branch. This machine has no repository-admin credentials. Prerequisite: a repository admin marks the `supply-chain` check required on `main`, then a pushed branch with a committed fake-key fixture must show that required check failing by name.
 
 10. **W2 · P1 · M · Two CI lanes.** `.github/workflows/ci.yml` and `.github/workflows/nightly.yml`
     split a fast PR lane from a nightly one. — done when the PR lane finishes under ten minutes and

@@ -15,12 +15,14 @@ same project without silently overwriting each other.
 
 </div>
 
-**0.3.0 preview.** This tree ships the 0.3 runtime, safety and window wave. Verified on 2026-11-08:
-the Rust workspace (53 test binaries), `cargo fmt` and clippy, the renderer build, the 55-test UI
-end-to-end suite, the docs, claims, design and version checks, the Functions tests and the VPS
-deploy checker are green. Of the [200-item roadmap](docs/roadmap-0.3.md), **71 items are done,
-7 are blocked and 122 remain open**; the blocked set needs a signing certificate, a clean Windows
-VM or GitHub-hosted release proof.
+**0.3.0 preview.** This tree ships the 0.3 runtime, safety and window wave. Verified locally on
+2026-11-08: the Rust workspace (53 test binaries), `cargo fmt` and clippy, the renderer build, the
+55-test UI end-to-end suite, the docs, claims, design and version checks, the Functions tests and
+the VPS deploy checker are green. The hosted `main` workflow is green on 2026-11-18 (run
+[44213703351](https://github.com/OkVurb/Rigel/actions/runs/44213703351)): Rust, UI, Functions,
+docs, supply-chain, hygiene and the six-spec native window lane all pass. Of the
+[200-item roadmap](docs/roadmap-0.3.md), **71 items are done, 7 are blocked and 122 remain open**;
+the blocked set needs a signing certificate, a clean Windows VM or GitHub-hosted release proof.
 
 ![The Rigel session pane: an agent roster, a transcript with a command waiting on approval, and the per-agent bill](screenshots/2026-session.png)
 
@@ -214,6 +216,7 @@ cargo fmt --all -- --check
 cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
 (cd ui && npx tsc --noEmit && npm run build && npm run test:e2e)
+npm --prefix ui run test:window
 node scripts/check-docs.mjs
 node scripts/release-check.mjs
 ```
