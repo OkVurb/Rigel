@@ -11,8 +11,11 @@
  * `--remote-debugging-port` and msedgedriver attaches to it through `ms:edgeOptions`. tauri-driver
  * stays in the middle: it is the WebDriver endpoint the specs talk to.
  *
- * The turn itself needs no key: `RIGEL_E2E_SCRIPT` makes `turn_send` use the core's ScriptedModel,
- * while approvals, tools, patches, the transcript and the bill stay on the production path.
+ * The turn itself needs no provider: `RIGEL_E2E_SCRIPT` makes `turn_send` use the core's
+ * ScriptedModel, while approvals, tools, patches, the transcript and the bill stay on the
+ * production path. The window's key gate still asks whether any chat provider is configured, so
+ * the harness seeds a deliberately fake OpenRouter key; its base URL points at a closed loopback
+ * port, and the scripted model means no request reaches a vendor.
  *
  * Usage: node e2e/run.mjs [--skip-build] [--spec <file>]
  *
@@ -310,6 +313,10 @@ async function main() {
     // port at all (measured: arg reaches the browser, nothing binds). Settings and the index are
     // already isolated by APPDATA, LOCALAPPDATA, RIGEL_INDEX_DIR and the webview folder.
     RIGEL_OMNIROUTE_URL: "http://127.0.0.1:9",
+    // The window's key gate needs one configured chat provider. This is not a real credential:
+    // the scripted model replaces the network door, and this base URL refuses roster reads.
+    OPENROUTER_API_KEY: "e2e-not-a-real-key",
+    RIGEL_OPENROUTER_BASE_URL: "http://127.0.0.1:9",
     // A fixed port, so msedgedriver can attach to a webview this runner started.
     WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS: `--remote-debugging-port=${CDP_PORT}`,
     // WebView2 honours the debug port only while it starts a browser process. A folder that a

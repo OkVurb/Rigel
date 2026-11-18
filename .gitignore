@@ -71,6 +71,10 @@ vendor/*
 !vendor/rigel-b/**
 vendor/rigel-b/target/
 vendor/rigel-b/build.log
+# Vendored SQLx SQLite driver with a one-line libsqlite3-sys security bump.
+!vendor/sqlx-sqlite/
+!vendor/sqlx-sqlite/**
+vendor/sqlx-sqlite/target/
 
 # Local room data and one-off captures stay machine-local. The built sidecar in
 # crates/rigel-app/binaries is tracked so a clean checkout can bundle the app.
@@ -82,6 +86,9 @@ ui/shot-*.png
 
 # Local MCP wiring for the chat agents: absolute paths and per-machine agent ids
 .mcp.json
+
+# Local Codex/MCP configuration; machine-specific and may contain a credential
+.codex/
 
 # local README render check, not part of the repository
 .preview/
