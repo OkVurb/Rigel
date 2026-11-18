@@ -1563,13 +1563,15 @@ chat_send/chat_wait.",
                     self.chat_tool(agent_id, &call_name, &args, token).await
                 } else {
                     self.tools
-                        .execute(session_id, agent_id, &call_name, args.clone())
+                        .execute_for_turn(session_id, agent_id, &turn.id, &call_name, args.clone())
                         .await
                 };
 
                 let mut recorded = serde_json::json!({
                     "tool": call_name,
                     "requested_tool": call.name,
+                    "tool_call_id": call.id,
+                    "step": steps,
                     "arguments": args,
                     "result": outcome.body,
                     "malformed_arguments": malformed,
@@ -2214,6 +2216,7 @@ chat_send/chat_wait.",
         // gate is recorded next to the agent it belongs to.
         let writable_requested = planned.iter().filter(|child| child.mode.writable()).count();
         let mut plan_note = None;
+        let mut plan_approval_id = None;
         if writable_requested > 0 {
             if self.worktree_dir.is_none() {
                 return ToolOutcome::error(
@@ -2253,15 +2256,46 @@ chat_send/chat_wait.",
                     })
                     .collect(),
             };
-            match self.tools.approve_plan(&request).await {
-                PlanDecision::Deny => {
+            let requested_at = crate::migrate::now_ms();
+            let decision = self.tools.approve_plan(&request).await;
+            let decision_name = match &decision {
+                PlanDecision::Approve => "approved",
+                PlanDecision::Skip { .. } => "skipped",
+                PlanDecision::Deny => "denied",
+            };
+            let note = decision.note();
+            let approval = match self
+                .session
+                .record_approval(
+                    session_id,
+                    agent_id,
+                    Some(parent_turn_id),
+                    "plan",
+                    &serde_json::to_value(&request).unwrap_or(serde_json::Value::Null),
+                    decision_name,
+                    None,
+                    requested_at,
+                )
+                .await
+            {
+                Ok(record) => record,
+                Err(error) => {
                     return ToolOutcome::error(
-                        "PLAN_DENIED",
-                        "the user did not approve the plan; nothing was started",
+                        "AUDIT_FAILED",
+                        format!(
+                            "the plan approval could not be audited; nothing was started: {error}"
+                        ),
                     );
                 }
-                decision => plan_note = decision.note(),
+            };
+            plan_approval_id = Some(approval.approval_id);
+            if matches!(decision, PlanDecision::Deny) {
+                return ToolOutcome::error(
+                    "PLAN_DENIED",
+                    "the user did not approve the plan; nothing was started",
+                );
             }
+            plan_note = note;
         }
 
         let hub = self.tools.subagents();
@@ -2720,6 +2754,7 @@ chat_send/chat_wait.",
                 "errors": errors,
                 "graph": dag.snapshot(),
                 "edges": dag.edges(),
+                "plan_approval_id": plan_approval_id,
                 "note": "Children are running in the background. Talk to them with chat_send/\
             chat_wait, then call subagent_results before your final answer.",
                 "work_board": board,

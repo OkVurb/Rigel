@@ -133,6 +133,13 @@ async fn an_approved_command_runs_and_records_its_exit_code() {
     assert_eq!(seen[0].command, "echo rigel-command-ok");
     assert_eq!(seen[0].cwd, seen[0].project_root);
     assert_eq!(seen[0].timeout_secs, outcome.body["timeout_secs"]);
+
+    // Roadmap 65: the decision the user made is sealed in the approval ledger, and the command
+    // result names the approval row that provenance will read back.
+    let ledger = rigel_core::audit::verify(tmp.path()).unwrap();
+    assert!(ledger.valid, "{ledger:?}");
+    assert_eq!(ledger.records, 1);
+    assert!(outcome.body["approval_id"].as_str().is_some());
 }
 
 #[tokio::test]

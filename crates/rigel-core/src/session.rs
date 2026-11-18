@@ -238,6 +238,9 @@ pub enum SessionError {
 
     #[error("database error: {0}")]
     Database(#[from] sqlx::Error),
+
+    #[error(transparent)]
+    Audit(#[from] crate::audit::ChainError),
 }
 
 /// Owns every read and write of session state. Cloning shares the pool, not the state:
@@ -1429,6 +1432,64 @@ impl SessionService {
             return Err(SessionError::SessionNotFound(session_id.to_string()));
         }
         Ok(())
+    }
+
+    /// Record one approval in the database and seal the same row into the append-only hash
+    /// chain. The database is written first; if the ledger cannot be sealed, the row is removed
+    /// and the caller receives an error rather than an unaudited decision.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn record_approval(
+        &self,
+        session_id: &str,
+        agent_id: &str,
+        turn_id: Option<&str>,
+        kind: &str,
+        request: &serde_json::Value,
+        decision: &str,
+        scope: Option<&str>,
+        requested_at: i64,
+    ) -> Result<crate::audit::ApprovalRecord, SessionError> {
+        let id = Uuid::new_v4().to_string();
+        let decided_at = now_ms();
+        sqlx::query(
+            "INSERT INTO approvals
+                (id, agent_id, turn_id, kind, request_json, decision, scope, requested_at, decided_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        )
+        .bind(&id)
+        .bind(agent_id)
+        .bind(turn_id)
+        .bind(kind)
+        .bind(request.to_string())
+        .bind(decision)
+        .bind(scope)
+        .bind(requested_at)
+        .bind(decided_at)
+        .execute(&self.pool)
+        .await?;
+
+        let input = crate::audit::ApprovalInput {
+            approval_id: id.clone(),
+            session_id: session_id.to_string(),
+            agent_id: agent_id.to_string(),
+            turn_id: turn_id.map(str::to_string),
+            kind: kind.to_string(),
+            request: request.clone(),
+            decision: decision.to_string(),
+            scope: scope.map(str::to_string),
+            requested_at,
+            decided_at: Some(decided_at),
+        };
+        match crate::audit::append(self.path(), input) {
+            Ok(record) => Ok(record),
+            Err(error) => {
+                let _ = sqlx::query("DELETE FROM approvals WHERE id = ?")
+                    .bind(&id)
+                    .execute(&self.pool)
+                    .await;
+                Err(error.into())
+            }
+        }
     }
 
     /// The `interventions` counter is the product metric's denominator (D17, §8.8). One

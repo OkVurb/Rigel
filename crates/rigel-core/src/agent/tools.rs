@@ -841,6 +841,32 @@ impl Tools {
         name: &str,
         args: Value,
     ) -> ToolOutcome {
+        self.execute_with_turn(session_id, agent_id, None, name, args)
+            .await
+    }
+
+    /// Execute a tool inside a known turn. Command approvals use this path so the audit row
+    /// can name the turn as well as the agent; callers without a turn keep using `execute`.
+    pub async fn execute_for_turn(
+        &self,
+        session_id: &str,
+        agent_id: &str,
+        turn_id: &str,
+        name: &str,
+        args: Value,
+    ) -> ToolOutcome {
+        self.execute_with_turn(session_id, agent_id, Some(turn_id), name, args)
+            .await
+    }
+
+    async fn execute_with_turn(
+        &self,
+        session_id: &str,
+        agent_id: &str,
+        turn_id: Option<&str>,
+        name: &str,
+        args: Value,
+    ) -> ToolOutcome {
         if !self.tool_allowed(name) {
             return ToolOutcome::error(
                 "NOT_ALLOWED",
@@ -897,7 +923,7 @@ impl Tools {
             "skill_load" => self.skill_load(session_id, &args).await,
             "budget" => self.budget(agent_id).await,
             "propose_plan" => self.propose_plan(session_id, &args).await,
-            "run_command" => self.run_command(session_id, agent_id, &args).await,
+            "run_command" => self.run_command(session_id, agent_id, turn_id, &args).await,
             "web_search" => self.web_search(session_id, &args).await,
             "web_fetch" => self.web_fetch(session_id, &args).await,
             "fetch_url" => self.fetch_url(session_id, &args).await,
@@ -1307,10 +1333,58 @@ impl Tools {
         }
     }
 
+    /// Seal one command decision into the approval ledger. A ledger that cannot be written
+    /// refuses the command: running an unaudited approval would defeat the chain's purpose.
+    #[allow(clippy::too_many_arguments)]
+    async fn record_command_approval(
+        &self,
+        session_id: &str,
+        agent_id: &str,
+        turn_id: Option<&str>,
+        request: &CommandRequest,
+        relative_cwd: &str,
+        decision: &str,
+        scope: Option<ApprovalScope>,
+        requested_at: i64,
+    ) -> Result<String, ToolOutcome> {
+        let body = json!({
+            "command": &request.command,
+            "cwd": relative_cwd,
+            "timeout_secs": request.timeout_secs,
+            "destructive": &request.destructive,
+            "skill_scripts": &request.skill_scripts,
+        });
+        self.session
+            .record_approval(
+                session_id,
+                agent_id,
+                turn_id,
+                "command",
+                &body,
+                decision,
+                scope.map(ApprovalScope::as_str),
+                requested_at,
+            )
+            .await
+            .map(|record| record.approval_id)
+            .map_err(|error| {
+                ToolOutcome::error(
+                    "AUDIT_FAILED",
+                    format!("the approval ledger could not be written; nothing ran: {error}"),
+                )
+            })
+    }
+
     /// Run one shell command, after consent. The process is killed on timeout and both streams
     /// are read to EOF into a bounded buffer, so a hostile command can neither exhaust memory
     /// nor deadlock on a full pipe.
-    async fn run_command(&self, session_id: &str, agent_id: &str, args: &Value) -> ToolOutcome {
+    async fn run_command(
+        &self,
+        session_id: &str,
+        agent_id: &str,
+        turn_id: Option<&str>,
+        args: &Value,
+    ) -> ToolOutcome {
         let Some(text) = arg_str(args, "command") else {
             return ToolOutcome::error("BAD_ARGUMENTS", "command is required");
         };
@@ -1431,8 +1505,27 @@ impl Tools {
         };
         // A grant from an earlier answer at session/project/always scope means the question is
         // not asked again (N2). The key is the exact text, so a near-miss still asks.
-        let scope = match granted {
-            Some(scope) => scope,
+        let requested_at = crate::migrate::now_ms();
+        let (scope, approval_id) = match granted {
+            Some(scope) => {
+                let approval_id = match self
+                    .record_command_approval(
+                        session_id,
+                        agent_id,
+                        turn_id,
+                        &request,
+                        &relative,
+                        "allowed",
+                        Some(scope),
+                        requested_at,
+                    )
+                    .await
+                {
+                    Ok(id) => id,
+                    Err(outcome) => return outcome,
+                };
+                (scope, approval_id)
+            }
             None => match self.commands.approve(&request).await {
                 CommandDecision::Allow(scope) => {
                     // A store that cannot write is not permission to widen the answer: the
@@ -1441,6 +1534,22 @@ impl Tools {
                         ApprovalScope::Once
                     } else {
                         scope
+                    };
+                    let approval_id = match self
+                        .record_command_approval(
+                            session_id,
+                            agent_id,
+                            turn_id,
+                            &request,
+                            &relative,
+                            "allowed",
+                            Some(scope),
+                            requested_at,
+                        )
+                        .await
+                    {
+                        Ok(id) => id,
+                        Err(outcome) => return outcome,
                     };
                     // A skill-script answer is remembered under its own key. A failed write
                     // narrows the answer to one run, never widens it to the next.
@@ -1456,6 +1565,7 @@ impl Tools {
                                     "ok": false,
                                     "command": text,
                                     "approved": true,
+                                    "approval_id": approval_id,
                                     "skill_scripts": skill_scripts,
                                     "error": {
                                         "code": "SCOPE_STORE",
@@ -1467,11 +1577,27 @@ impl Tools {
                             };
                         }
                     }
-                    scope
+                    (scope, approval_id)
                 }
                 CommandDecision::Deny => {
                     // A refusal is still a command item: the transcript should show what was
                     // asked for and that it did not run, not only an error with no text.
+                    let approval_id = match self
+                        .record_command_approval(
+                            session_id,
+                            agent_id,
+                            turn_id,
+                            &request,
+                            &relative,
+                            "denied",
+                            None,
+                            requested_at,
+                        )
+                        .await
+                    {
+                        Ok(id) => id,
+                        Err(outcome) => return outcome,
+                    };
                     return ToolOutcome {
                         ok: false,
                         body: json!({
@@ -1481,6 +1607,7 @@ impl Tools {
                                 "message": format!("the user did not approve `{text}`; nothing ran"),
                             },
                             "command": text,
+                            "approval_id": approval_id,
                             "cwd": relative,
                             "timeout_secs": timeout_secs,
                             "timeout_source": timeout_source.as_str(),
@@ -1602,6 +1729,7 @@ impl Tools {
                 "ok": ok,
                 "command": text,
                 "approved": true,
+                "approval_id": approval_id,
                 "scope": scope.as_str(),
                 "destructive": destructive,
                 "blast_radius": blast_radius,

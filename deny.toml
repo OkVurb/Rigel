@@ -14,6 +14,7 @@ ignore = [
     { id = "RUSTSEC-2025-0098", reason = "unic-ucd-version is unmaintained; transitive via Tauri's GTK stack, no replacement release" },
     { id = "RUSTSEC-2025-0100", reason = "unic-ucd-ident is unmaintained; transitive via Tauri's urlpattern, no replacement release" },
     { id = "RUSTSEC-2024-0429", reason = "glib 0.18 VariantStrIter unsoundness; Linux-only and no fixed 0.18 release is published" },
+    { id = "RUSTSEC-2026-0543", reason = "chrono is unmaintained; optional serde_with dependency, no maintained 0.4 replacement, not used at runtime" },
 ]
 
 [licenses]

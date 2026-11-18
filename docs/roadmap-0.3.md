@@ -4,9 +4,9 @@
 tree of 6 Nov 2026 and absorbs the deferred round-9 items from [roadmap-0.2.md](roadmap-0.2.md)
 rather than leaving a second list.
 
-**Tally (2026-11-18):** 71 Done · 7 Blocked · 122 Open. The 0.3.0 preview tree ships every Done
-item. The last pass closed 53, 60, 64, 67, 69, 70, 75, 78, 80, 106, 107, 130, 140 and 182; the
-open and blocked items below are unchanged by it.
+**Tally (2026-11-18):** 73 Done · 7 Blocked · 120 Open. The 0.3.0 preview tree ships every Done
+item. The previous pass closed 53, 60, 64, 67, 69, 70, 75, 78, 80, 106, 107, 130, 140 and 182;
+this pass closed 65 and 84. The open and blocked items below are unchanged by these passes.
 
 **Verified gate (2026-11-08).** `cargo fmt --all -- --check`, `cargo clippy --workspace
 --all-targets -- -D warnings` and `cargo test --workspace --no-fail-fast` pass (53 test binaries,
@@ -582,6 +582,12 @@ done signal, and the eight-state table is the evidence a review will use.
 65. **W3 · P1 · M · Tamper-evident audit export.** `crates/rigel-core/src/audit/chain.rs` writes
     JSONL of every approval with a hash chain. — done when `rigel audit verify` rejects a mutated
     line and names the first broken link.
+    **Done (2026-11-18):** command and plan decisions are written to `.rigel/audit/approvals.jsonl`
+    through `SessionService::record_approval`; each line commits to the previous hash. The ledger
+    refuses to append to a broken chain. `cargo test -p rigel-core --lib audit` -> 3 passed;
+    `cargo test -p rigel-core --test command` -> 11 passed, including one real command decision
+    sealed in the ledger; `cargo test -p rigel-cli --test audit` -> 2 passed, including the mutated
+    CLI ledger rejected with `first_bad.line == 1` and a hash-mismatch reason.
 
 66. **W3 · P1 · M · Permission matrix.** `ui/src/settings/permissions.tsx` shows per-agent and
     per-role tool grants in one table. — done when a role can narrow a project grant but a test
@@ -681,6 +687,12 @@ done signal, and the eight-state table is the evidence a review will use.
 84. **W3 · P1 · M · Command provenance.** `crates/rigel-core/src/audit/provenance.rs` links each
     command to its model step, tool call, approval and snapshot. — done when a missing link prints
     `unknown` with the reason instead of an empty cell.
+    **Done (2026-11-18):** the coordinator records `step` and `tool_call_id` on every tool item and
+    every command result names its `approval_id`; `rigel audit provenance --item <id>` renders a
+    `known` value or `unknown` plus the exact reason, and `--json` exposes the same links.
+    `cargo test -p rigel-core --test native a_coordinator_command_records_an_auditable_chain` ->
+    1 passed; `cargo test -p rigel-core --test audit` -> 2 passed; `cargo test -p rigel-cli --test
+    audit` -> 2 passed, including the all-unknown case and its named reasons.
 
 85. **W4 · P2 · M · Retention controls.** `ui/src/settings/retention.tsx` sets per-project retention
     for turns, blobs, logs and snapshots. — done when a purge preview lists counts and bytes first

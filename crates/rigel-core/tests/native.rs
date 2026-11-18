@@ -15,7 +15,9 @@ use rigel_core::agent::{
     Cancels, ChatRequest, Coordinator, Delta, DeltaSink, Model, ModelError, RawUsage,
     ScriptedModel, StopReason, Tools,
 };
-use rigel_core::{BudgetService, SessionService, StopAt, Usage};
+use rigel_core::{
+    BudgetService, CommandApprover, CommandDecision, CommandRequest, SessionService, StopAt, Usage,
+};
 use tokio::sync::Notify;
 use tokio_util::sync::CancellationToken;
 
@@ -2852,4 +2854,115 @@ async fn a_failed_prerequisite_blocks_its_dependent_and_reports_why() {
     assert_eq!(blocked["ok"], false);
     assert_eq!(blocked["code"], "DEPENDENCY_FAILED");
     assert!(blocked["error"].as_str().unwrap().contains("first"));
+}
+
+struct AuditAllow;
+
+#[async_trait]
+impl CommandApprover for AuditAllow {
+    async fn approve(&self, _request: &CommandRequest) -> CommandDecision {
+        CommandDecision::ALLOW_ONCE
+    }
+}
+
+/// Roadmap 65/84 end to end: a real coordinator command records the approval, the model step,
+/// and the provider tool-call id, and provenance reads the same links back.
+#[tokio::test]
+async fn a_coordinator_command_records_an_auditable_chain() {
+    let tmp = repo();
+    let service = SessionService::open(tmp.path()).await.unwrap();
+    let session = service
+        .start(Some("audit-command"), Some(25))
+        .await
+        .unwrap();
+    let agent = service
+        .register_agent_with(
+            &session.id,
+            "native",
+            Some("commander"),
+            Some("script-model"),
+        )
+        .await
+        .unwrap();
+    let script = r#"{
+      "steps": [
+        {
+          "text": "Running the command.\n",
+          "tool_calls": [{"name": "run_command", "arguments": {"command": "echo audited"}}],
+          "usage": {"input_tokens": 20, "output_tokens": 4, "cost_usd": 0.0001}
+        },
+        {
+          "text": "Finished.\n",
+          "usage": {"input_tokens": 10, "output_tokens": 2, "cost_usd": 0.0001}
+        }
+      ]
+    }"#;
+    let cancels = Arc::new(Cancels::new());
+    let budget = Arc::new(BudgetService::new(
+        service.pool().clone(),
+        cancels.clone() as Arc<dyn rigel_core::InterruptSink>,
+    ));
+    let tools = Tools::new(
+        tmp.path().to_path_buf(),
+        service.clone(),
+        budget.clone(),
+        tmp.path().join("index"),
+        StopAt::Never,
+    )
+    .with_command_approval(Arc::new(AuditAllow));
+    let coordinator = Coordinator {
+        session: service.clone(),
+        budget,
+        tools,
+        model: Arc::new(ScriptedModel::from_json(script).unwrap()),
+        sink: Arc::new(rigel_core::NullSink),
+        cancels,
+        project_root: tmp.path().to_path_buf(),
+        model_name: "script-model".to_string(),
+        effort: None,
+        max_steps: 5,
+        subagents: rigel_core::agent::SubagentPolicy::default(),
+        depth: 0,
+        parent_cancel: None,
+        worktree_dir: None,
+        chat_parent: None,
+    };
+    let run = coordinator
+        .run(&session.id, &agent.id, "run the command")
+        .await
+        .unwrap();
+    assert_eq!(run.stop, StopReason::Completed);
+
+    let items = service.items(&run.turn.id).await.unwrap();
+    let command = items
+        .iter()
+        .find(|item| item.kind == "command")
+        .expect("the command item is in the transcript");
+    assert_eq!(command.body["step"], 1);
+    assert!(command.body["tool_call_id"].as_str().is_some());
+    assert!(command.body["result"]["approval_id"].as_str().is_some());
+
+    let chain = rigel_core::audit::provenance::command(service.pool(), &command.id)
+        .await
+        .unwrap();
+    assert_eq!(chain.command.value.as_deref(), Some("echo audited"));
+    assert_eq!(chain.step.value, Some(1));
+    assert!(chain.tool_call.is_known(), "{:?}", chain.tool_call);
+    assert!(chain.approval.is_known(), "{:?}", chain.approval);
+    assert_eq!(
+        chain.approval.value.as_ref().unwrap().decision.as_deref(),
+        Some("allowed")
+    );
+    assert_eq!(chain.snapshot.status, "unknown");
+    assert!(
+        chain
+            .snapshot
+            .reason
+            .as_deref()
+            .unwrap()
+            .contains("not destructive")
+    );
+    let ledger = rigel_core::audit::verify(tmp.path()).unwrap();
+    assert!(ledger.valid, "{ledger:?}");
+    assert_eq!(ledger.records, 1);
 }

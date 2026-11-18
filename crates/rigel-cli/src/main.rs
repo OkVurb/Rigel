@@ -15,6 +15,7 @@ use rigel_core::{
 };
 use serde_json::json;
 
+mod audit;
 mod claims;
 mod cloud;
 mod doctor;
@@ -106,6 +107,12 @@ enum Command {
     Route {
         #[command(subcommand)]
         command: route::RouteCommand,
+    },
+
+    /// Verify the tamper-evident approval chain, or read one command's provenance.
+    Audit {
+        #[command(subcommand)]
+        command: audit::AuditCommand,
     },
 
     /// Advisory file claims: who holds what, and release one by hand.
@@ -503,6 +510,8 @@ async fn main() -> ExitCode {
         Command::Keys { command } => phase3::run_keys(command).await,
 
         Command::Snapshot { command } => phase3::run_snapshot(command, dir),
+
+        Command::Audit { command } => audit::run(command).await,
 
         Command::Claim { command } => claims::run_claim(command).await,
 
