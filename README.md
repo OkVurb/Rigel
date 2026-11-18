@@ -21,7 +21,7 @@ same project without silently overwriting each other.
 the VPS deploy checker are green. The hosted `main` workflow is green on 2026-11-18 (run
 [44213703351](https://github.com/OkVurb/Rigel/actions/runs/44213703351)): Rust, UI, Functions,
 docs, supply-chain, hygiene and the six-spec native window lane all pass. Of the
-[200-item roadmap](docs/roadmap-0.3.md), **74 items are done, 7 are blocked and 119 remain open**;
+[200-item roadmap](docs/roadmap-0.3.md), **75 items are done, 7 are blocked and 118 remain open**;
 the blocked set needs a signing certificate, a clean Windows VM or GitHub-hosted release proof.
 
 ![The Rigel session pane: an agent roster, a transcript with a command waiting on approval, and the per-agent bill](screenshots/2026-session.png)
@@ -165,7 +165,7 @@ Fastify routes replace them. The migration is staged so either side can be rolle
 
 The gaps are part of the record:
 
-- **119 roadmap items are still open.** [docs/roadmap-0.3.md](docs/roadmap-0.3.md) lists each with
+- **118 roadmap items are still open.** [docs/roadmap-0.3.md](docs/roadmap-0.3.md) lists each with
   its artifact and its "done when"; the seven blocked items need a signing identity, a clean Windows
   VM or GitHub-hosted release proof. No open item is described here as finished.
 - **The signed release is not cut.** 0.3.0 has no published installer, provenance or receipt; the

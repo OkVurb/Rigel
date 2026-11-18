@@ -388,13 +388,27 @@ export const previewSubagentGraph: SubagentGraph[] = [
   {
     parent_turn_id: turnOne.id,
     nodes: [
-      { id: "reader", role: "reader", depends_on: [], state: "done", detail: null },
+      {
+        id: "reader",
+        role: "reader",
+        depends_on: [],
+        state: "done",
+        detail: null,
+        depth: 1,
+        budget_micros: 250_000,
+        spent_micros: 1_200,
+        remaining_micros: 248_800,
+      },
       {
         id: "verifier",
         role: "verifier",
         depends_on: ["reader"],
         state: "running",
         detail: null,
+        depth: 1,
+        budget_micros: 250_000,
+        spent_micros: 0,
+        remaining_micros: 248_800,
       },
     ],
   },

@@ -710,8 +710,9 @@ impl SessionService {
             let depends_on = serde_json::to_string(&node.depends_on).unwrap_or_default();
             sqlx::query(
                 "INSERT INTO subagent_nodes
-                    (session_id, parent_turn_id, node_id, role, depends_on_json, state, detail, updated_at)
-                 VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                    (session_id, parent_turn_id, node_id, role, depends_on_json, state, detail,
+                     depth, budget_micros, spent_micros, remaining_micros, updated_at)
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             )
             .bind(session_id)
             .bind(parent_turn_id)
@@ -720,6 +721,10 @@ impl SessionService {
             .bind(depends_on)
             .bind(node.state.as_str())
             .bind(&node.detail)
+            .bind(i64::from(node.depth))
+            .bind(node.budget_micros)
+            .bind(node.spent_micros)
+            .bind(node.remaining_micros)
             .bind(now)
             .execute(&mut *tx)
             .await?;
@@ -730,16 +735,40 @@ impl SessionService {
 
     /// Every parent turn's graph in this session, dependencies before dependents.
     pub async fn dag(&self, session_id: &str) -> Result<Vec<SubagentGraph>, SessionError> {
-        type DagRow = (String, String, String, String, String, Option<String>);
+        type DagRow = (
+            String,
+            String,
+            String,
+            String,
+            String,
+            Option<String>,
+            i64,
+            Option<i64>,
+            i64,
+            Option<i64>,
+        );
         let rows: Vec<DagRow> = sqlx::query_as(
-            "SELECT parent_turn_id, node_id, role, depends_on_json, state, detail
+            "SELECT parent_turn_id, node_id, role, depends_on_json, state, detail,
+                    depth, budget_micros, spent_micros, remaining_micros
              FROM subagent_nodes WHERE session_id = ? ORDER BY parent_turn_id, updated_at, rowid",
         )
         .bind(session_id)
         .fetch_all(&self.pool)
         .await?;
         let mut graphs: Vec<SubagentGraph> = Vec::new();
-        for (parent_turn_id, node_id, role, depends_on_json, state, detail) in rows {
+        for (
+            parent_turn_id,
+            node_id,
+            role,
+            depends_on_json,
+            state,
+            detail,
+            depth,
+            budget_micros,
+            spent_micros,
+            remaining_micros,
+        ) in rows
+        {
             let node = crate::agent::dag::DagNode {
                 id: node_id,
                 role,
@@ -747,6 +776,10 @@ impl SessionService {
                 state: crate::agent::dag::NodeState::parse(&state)
                     .unwrap_or(crate::agent::dag::NodeState::Pending),
                 detail,
+                depth: u8::try_from(depth).unwrap_or(1),
+                budget_micros,
+                spent_micros,
+                remaining_micros,
             };
             match graphs
                 .iter_mut()

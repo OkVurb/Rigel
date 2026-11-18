@@ -71,6 +71,21 @@ pub struct DagNode {
     pub state: NodeState,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub detail: Option<String>,
+    /// 1 for a direct child of the root turn, 2 for its child, and so on.
+    #[serde(default = "default_depth")]
+    pub depth: u8,
+    /// What was left of the root's tree allowance when this node was spawned.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub budget_micros: Option<i64>,
+    /// This child's own model spend. The tree remaining below is shared with the whole tree.
+    #[serde(default)]
+    pub spent_micros: i64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub remaining_micros: Option<i64>,
+}
+
+fn default_depth() -> u8 {
+    1
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -294,6 +309,16 @@ impl Dag {
         self.wake.notify_waiters();
     }
 
+    /// Record how much this child spent and what the shared tree has left.
+    pub fn set_budget(&self, id: &str, spent_micros: i64, remaining_micros: Option<i64>) {
+        if let Ok(mut nodes) = self.nodes.lock()
+            && let Some(node) = nodes.iter_mut().find(|node| node.id == id)
+        {
+            node.spent_micros = spent_micros.max(0);
+            node.remaining_micros = remaining_micros;
+        }
+    }
+
     /// Mark a dependent that never started because a prerequisite broke.
     pub fn block(&self, id: &str, detail: impl Into<String>) {
         if let Ok(mut nodes) = self.nodes.lock()
@@ -385,6 +410,10 @@ mod tests {
             depends_on: depends_on.iter().map(|id| id.to_string()).collect(),
             state: NodeState::Pending,
             detail: None,
+            depth: 1,
+            budget_micros: None,
+            spent_micros: 0,
+            remaining_micros: None,
         }
     }
 

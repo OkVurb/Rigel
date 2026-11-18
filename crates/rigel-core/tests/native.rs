@@ -796,6 +796,222 @@ impl Model for SubagentScriptModel {
     }
 }
 
+#[derive(Default)]
+struct NestedDepthModel {
+    root_calls: AtomicUsize,
+    middle_calls: AtomicUsize,
+    leaf_calls: AtomicUsize,
+}
+
+#[async_trait]
+impl Model for NestedDepthModel {
+    fn id(&self) -> String {
+        "nested-depth-script".to_string()
+    }
+
+    async fn chat(
+        &self,
+        request: ChatRequest,
+        _cancel: &CancellationToken,
+        on_delta: &mut DeltaSink<'_>,
+    ) -> Result<(), ModelError> {
+        let last_user = request
+            .messages
+            .iter()
+            .rev()
+            .find(|message| message.role == "user")
+            .and_then(|message| message.content.clone())
+            .unwrap_or_default();
+
+        if last_user.contains("leaf") {
+            let call = self.leaf_calls.fetch_add(1, Ordering::SeqCst);
+            if call == 0 {
+                on_delta(Delta::ToolCall {
+                    index: 0,
+                    id: Some("leaf_spawn".to_string()),
+                    name: Some("spawn_agents".to_string()),
+                    arguments: serde_json::json!({
+                        "agents": [{ "role": "too-deep", "files": ["README.md"], "prompt": "too deep" }]
+                    })
+                    .to_string(),
+                });
+                on_delta(Delta::Finish("tool_calls".to_string()));
+            } else {
+                on_delta(Delta::Text("leaf stopped at the cap.\n".to_string()));
+                on_delta(Delta::Finish("stop".to_string()));
+            }
+            return Ok(());
+        }
+
+        if last_user.contains("middle") {
+            let call = self.middle_calls.fetch_add(1, Ordering::SeqCst);
+            if call == 0 {
+                on_delta(Delta::ToolCall {
+                    index: 0,
+                    id: Some("middle_spawn".to_string()),
+                    name: Some("spawn_agents".to_string()),
+                    arguments: serde_json::json!({
+                        "agents": [{ "role": "leaf", "files": ["README.md"], "prompt": "leaf please" }]
+                    })
+                    .to_string(),
+                });
+                on_delta(Delta::Finish("tool_calls".to_string()));
+            } else if call == 1 {
+                on_delta(Delta::ToolCall {
+                    index: 0,
+                    id: Some("middle_results".to_string()),
+                    name: Some("subagent_results".to_string()),
+                    arguments: serde_json::json!({ "timeout_secs": 10 }).to_string(),
+                });
+                on_delta(Delta::Finish("tool_calls".to_string()));
+            } else {
+                on_delta(Delta::Text("middle done.\n".to_string()));
+                on_delta(Delta::Finish("stop".to_string()));
+            }
+            return Ok(());
+        }
+
+        let call = self.root_calls.fetch_add(1, Ordering::SeqCst);
+        if call == 0 {
+            on_delta(Delta::ToolCall {
+                index: 0,
+                id: Some("root_spawn".to_string()),
+                name: Some("spawn_agents".to_string()),
+                arguments: serde_json::json!({
+                    "agents": [{ "role": "middle", "files": ["README.md"], "prompt": "middle please" }]
+                })
+                .to_string(),
+            });
+            on_delta(Delta::Finish("tool_calls".to_string()));
+        } else if call == 1 {
+            on_delta(Delta::ToolCall {
+                index: 0,
+                id: Some("root_results".to_string()),
+                name: Some("subagent_results".to_string()),
+                arguments: serde_json::json!({ "timeout_secs": 10 }).to_string(),
+            });
+            on_delta(Delta::Finish("tool_calls".to_string()));
+        } else {
+            on_delta(Delta::Text("nested tree done.\n".to_string()));
+            on_delta(Delta::Finish("stop".to_string()));
+        }
+        Ok(())
+    }
+}
+
+#[tokio::test]
+async fn a_nested_tree_refuses_a_spawn_past_max_depth_and_names_the_cap() {
+    let tmp = repo();
+    let service = SessionService::open(tmp.path()).await.unwrap();
+    let session = service.start(Some("nested-depth"), Some(25)).await.unwrap();
+    let agent = service
+        .register_agent(&session.id, "native", Some("worker"))
+        .await
+        .unwrap();
+
+    let cancels = Arc::new(Cancels::new());
+    let budget = Arc::new(BudgetService::new(
+        service.pool().clone(),
+        cancels.clone() as Arc<dyn rigel_core::InterruptSink>,
+    ));
+    let tools = Tools::new(
+        tmp.path().to_path_buf(),
+        service.clone(),
+        budget.clone(),
+        tmp.path().join("index"),
+        StopAt::Never,
+    );
+    let run = Coordinator {
+        session: service.clone(),
+        budget,
+        tools,
+        model: Arc::new(NestedDepthModel::default()),
+        sink: Arc::new(rigel_core::NullSink),
+        cancels,
+        project_root: tmp.path().to_path_buf(),
+        model_name: "nested-depth-script".to_string(),
+        effort: None,
+        max_steps: 10,
+        subagents: rigel_core::agent::SubagentPolicy {
+            max_depth: 2,
+            ..Default::default()
+        },
+        depth: 0,
+        parent_cancel: None,
+        worktree_dir: None,
+        chat_parent: None,
+    }
+    .run(&session.id, &agent.id, "nest the work")
+    .await
+    .unwrap();
+
+    assert_eq!(run.stop, StopReason::Completed);
+    let transcript = service.transcript(&session.id).await.unwrap();
+    assert_eq!(
+        transcript.len(),
+        3,
+        "root, middle and leaf; no fourth level"
+    );
+    let root = transcript
+        .iter()
+        .find(|entry| entry.turn.id == run.turn.id)
+        .unwrap();
+    let middle = transcript
+        .iter()
+        .find(|entry| entry.turn.parent_turn_id.as_deref() == Some(root.turn.id.as_str()))
+        .expect("the middle child ran");
+    let leaf = transcript
+        .iter()
+        .find(|entry| entry.turn.parent_turn_id.as_deref() == Some(middle.turn.id.as_str()))
+        .expect("the leaf child ran at depth 2");
+
+    let root_results = root
+        .items
+        .iter()
+        .find(|item| {
+            item.body.get("tool").and_then(|tool| tool.as_str()) == Some("subagent_results")
+        })
+        .expect("the root collected its child");
+    assert_eq!(root_results.body["result"]["agents"][0]["depth"], 1);
+    assert_eq!(root_results.body["result"]["agents"][0]["role"], "middle");
+
+    let refused = leaf
+        .items
+        .iter()
+        .find(|item| item.body.get("tool").and_then(|tool| tool.as_str()) == Some("spawn_agents"))
+        .expect("the leaf's spawn attempt is recorded");
+    assert_eq!(refused.body["result"]["ok"], false);
+    assert_eq!(refused.body["result"]["error"]["code"], "DEPTH_LIMIT");
+    let message = refused.body["result"]["error"]["message"].as_str().unwrap();
+    assert!(
+        message.contains("max_depth 2"),
+        "the refusal names the cap: {message}"
+    );
+    assert_eq!(
+        transcript
+            .iter()
+            .filter(|entry| entry.turn.parent_turn_id.as_deref() == Some(leaf.turn.id.as_str()))
+            .count(),
+        0,
+        "the refused spawn created no fourth turn"
+    );
+
+    let graph = service.dag(&session.id).await.unwrap();
+    let middle_node = graph
+        .iter()
+        .flat_map(|graph| graph.nodes.iter())
+        .find(|node| node.role == "middle")
+        .unwrap();
+    assert_eq!(middle_node.depth, 1);
+    assert_eq!(middle_node.budget_micros, Some(250_000));
+    assert!(
+        middle_node
+            .remaining_micros
+            .is_some_and(|left| left < 250_000),
+        "the session tree shows the node's remaining shared budget: {middle_node:?}"
+    );
+}
+
 #[tokio::test]
 async fn subagents_are_read_only_billed_separately_and_nested_under_the_parent() {
     let tmp = repo();
@@ -849,6 +1065,16 @@ async fn subagents_are_read_only_billed_separately_and_nested_under_the_parent()
         run.usage.cost_micros, 500,
         "the parent pays only for its own steps"
     );
+    assert_eq!(
+        run.tree_budget.allowance_micros,
+        Some(250_000),
+        "the tree inherits the session's remaining allowance"
+    );
+    assert_eq!(
+        run.tree_budget.spent_micros, 1_100,
+        "the shared tree account includes both children and the parent"
+    );
+    assert_eq!(run.tree_budget.remaining_micros, Some(248_900));
 
     let agents = service.agents(&session.id).await.unwrap();
     assert_eq!(agents.len(), 3, "the parent plus two children");
@@ -912,6 +1138,37 @@ async fn subagents_are_read_only_billed_separately_and_nested_under_the_parent()
     );
     assert_eq!(results.body["result"]["spent_micros"], 600);
     assert_eq!(results.body["result"]["pending"], false);
+    assert_eq!(
+        results.body["result"]["tree_budget"]["spent_micros"], 1_000,
+        "the parent's final answer has not been billed yet at collect time"
+    );
+    assert_eq!(
+        results.body["result"]["tree_budget"]["reserved_micros"], 1_000,
+        "the collect step's own reservation is still held"
+    );
+    assert_eq!(
+        results.body["result"]["tree_budget"]["remaining_micros"],
+        248_000
+    );
+    for agent in returned {
+        let tree = &agent["tree_budget"];
+        let spent = tree["spent_micros"].as_i64().unwrap();
+        assert_eq!(
+            agent["budget_micros"], 250_000,
+            "the child is on the same inherited tree account as its root"
+        );
+        assert_eq!(agent["depth"], 1);
+        assert!(
+            spent >= 700,
+            "a child reports the parent plus its own spend: {tree}"
+        );
+        let reserved = tree["reserved_micros"].as_i64().unwrap();
+        assert_eq!(
+            tree["remaining_micros"].as_i64(),
+            Some(250_000 - spent - reserved),
+            "the child reports the inherited allowance minus shared spend and live reservations"
+        );
+    }
 
     let synthesis = &results.body["result"]["synthesis"];
     let claims = synthesis["claims"].as_array().unwrap();

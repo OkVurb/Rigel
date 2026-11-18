@@ -32,6 +32,7 @@ use super::model::ToolSpec;
 use super::obscura;
 use super::roblox;
 use super::subagents::SubagentHub;
+use super::tree::TreeBudget;
 use crate::agentmail::Mail;
 use crate::budget::BudgetService;
 use crate::domain::ItemKind;
@@ -69,10 +70,16 @@ pub struct Tools {
     /// Opt-in per surface (`rigel serve --full-access`); the default is the project jail.
     full_access: bool,
     reads: Mutex<HashMap<String, String>>,
-    /// Subagents may read, list and search, but not write or spawn their own children. The
-    /// restriction is enforced here as well as hidden from the schema: a model that calls a
-    /// tool it was not offered still gets an error, not a write.
+    /// Subagents may read, list and search, but not write or run commands. The restriction is
+    /// enforced here as well as hidden from the schema: a model that calls a tool it was not
+    /// offered still gets an error, not a write.
     read_only: bool,
+    /// Roadmap 44: a read-only child below `max_depth` may spawn its own read-only children.
+    /// Its write and command tools stay hidden; only the subagent tools become visible.
+    allow_spawn: bool,
+    /// The one budget every level of this tree charges. A child clone shares this `Arc`, so a
+    /// grandchild cannot open a fresh allowance of its own.
+    tree_budget: Arc<TreeBudget>,
     /// D94: the exact tools a role preset allows. `None` is a custom role with the normal set.
     allowed: Mutex<Option<HashSet<String>>>,
     /// D98: plan mode hides every tool that can change the tree or run a command.
@@ -171,6 +178,8 @@ impl Tools {
             full_access: false,
             reads: Mutex::new(HashMap::new()),
             read_only: false,
+            allow_spawn: true,
+            tree_budget: Arc::new(TreeBudget::unbounded()),
             allowed: Mutex::new(None),
             plan_mode: AtomicBool::new(false),
             approved_plan: Mutex::new(None),
@@ -190,6 +199,16 @@ impl Tools {
     pub fn with_scopes(mut self, scopes: Scopes) -> Self {
         self.scopes = scopes;
         self
+    }
+
+    /// The shared allowance for this tree. Child tool sets clone this exact account.
+    pub(crate) fn tree_budget(&self) -> Arc<TreeBudget> {
+        self.tree_budget.clone()
+    }
+
+    /// Open a fresh tree for a root turn. Children never call this.
+    pub(crate) fn start_tree_budget(&self, allowance_micros: Option<i64>) {
+        self.tree_budget.restart(allowance_micros);
     }
 
     /// Install the approval surface a `run_command` needs. Without one the tool exists and
@@ -265,6 +284,8 @@ impl Tools {
             full_access: false,
             reads: Mutex::new(HashMap::new()),
             read_only: true,
+            allow_spawn: false,
+            tree_budget: self.tree_budget.clone(),
             allowed: Mutex::new(None),
             plan_mode: AtomicBool::new(false),
             approved_plan: Mutex::new(None),
@@ -281,6 +302,14 @@ impl Tools {
             subagents: Arc::new(SubagentHub::new()),
             skill_scripts: self.skill_scripts.clone(),
         }
+    }
+
+    /// The same child, but one level below the cap: it may start its own read-only children.
+    /// This is the only difference from [`Self::subagent`] — writes and commands stay hidden.
+    pub fn subagent_nested(&self) -> Self {
+        let mut tools = self.subagent();
+        tools.allow_spawn = true;
+        tools
     }
 
     /// The tool set a writable child gets: the full set, rooted at its worktree and limited
@@ -302,6 +331,8 @@ impl Tools {
             full_access: false,
             reads: Mutex::new(HashMap::new()),
             read_only: false,
+            allow_spawn: true,
+            tree_budget: self.tree_budget.clone(),
             allowed: Mutex::new(None),
             plan_mode: AtomicBool::new(false),
             approved_plan: Mutex::new(None),
@@ -468,22 +499,31 @@ impl Tools {
                     ))
             })
             .filter(|spec| {
-                !(self.read_only
-                    && matches!(
-                        spec.name.as_str(),
-                        "edit_file"
-                            | "write_file"
-                            | "spawn_agents"
-                            | "subagent_results"
-                            | "assign_agents"
-                            | "merge_subagent"
-                            | "run_command"
-                            | "fetch_url"
-                            | "roblox_studio"
-                            | "roblox_sound"
-                            | "email_send"
-                            | "email_reply"
-                    ))
+                if !self.read_only {
+                    return true;
+                }
+                // A nested read-only child needs the two subagent tools, but nothing that
+                // writes, runs a command or hands work to the chat room.
+                if self.allow_spawn
+                    && matches!(spec.name.as_str(), "spawn_agents" | "subagent_results")
+                {
+                    return true;
+                }
+                !matches!(
+                    spec.name.as_str(),
+                    "edit_file"
+                        | "write_file"
+                        | "spawn_agents"
+                        | "subagent_results"
+                        | "assign_agents"
+                        | "merge_subagent"
+                        | "run_command"
+                        | "fetch_url"
+                        | "roblox_studio"
+                        | "roblox_sound"
+                        | "email_send"
+                        | "email_reply"
+                )
             })
             .collect()
     }

@@ -65,6 +65,7 @@ pub mod team;
 pub mod tokens;
 pub mod tool_repair;
 pub mod tools;
+pub mod tree;
 pub mod untrusted;
 pub mod vertex;
 
@@ -102,3 +103,4 @@ pub use routing::{Route, RouteExplanation, RouteReason};
 pub use scripted::{Script, ScriptedModel};
 pub use synthesis::{Synthesis, SynthesisClaim, SynthesisConflict};
 pub use tools::{ToolOutcome, Tools};
+pub use tree::{TreeBudget, TreeBudgetError, TreeBudgetSnapshot, TreeReservation};

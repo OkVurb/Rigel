@@ -117,15 +117,18 @@ fn guard_live_model(provider: &str, model: &str) -> Result<(), String> {
 /// proved, children run on that same door and the coordinator allows the id, so a swarm does not
 /// quietly spend on a paid nano default behind a free parent.
 fn subagent_policy(settings: &Settings) -> SubagentPolicy {
+    // Roadmap 44: the window allows one nested generation (root -> child -> leaf). The shared
+    // tree budget still comes from the root turn, so depth cannot buy a new allowance.
+    let mut policy = SubagentPolicy {
+        max_depth: 2,
+        ..SubagentPolicy::default()
+    };
     let model = settings.model.trim();
     if settings.free_mode && !model.is_empty() {
-        return SubagentPolicy {
-            model: model.to_string(),
-            extra_models: vec![model.to_string()],
-            ..SubagentPolicy::default()
-        };
+        policy.model = model.to_string();
+        policy.extra_models = vec![model.to_string()];
     }
-    SubagentPolicy::default()
+    policy
 }
 
 /// The Free-mode agent the Swarm room can launch. `None` when Free mode is off, no model is

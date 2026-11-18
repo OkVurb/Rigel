@@ -94,7 +94,7 @@ only after a successful handshake.
 ## Migration refusal: the database is newer than the build
 
 ```
-schema version 99 is newer than this build knows about (newest: 17)
+schema version 99 is newer than this build knows about (newest: 18)
 ```
 
 **Cause.** A newer Rigel build migrated the project database, and the current binary is older.

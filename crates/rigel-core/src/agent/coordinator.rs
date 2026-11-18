@@ -24,6 +24,7 @@ use super::dag::{Dag, DagNode, NodeState, WaitError};
 use super::model::{ChatMessage, ChatRequest, Delta, Model, ModelError, ToolCall, ToolCallBuilder};
 use super::team;
 use super::tools::{ToolOutcome, Tools};
+use super::tree::{STEP_RESERVE_MICROS, TreeBudgetError, TreeBudgetSnapshot};
 use crate::budget::{BudgetError, BudgetOutcome, BudgetService, InterruptSink};
 use crate::claims::ClaimService;
 use crate::domain::{AgentEvent, EventSink, ItemKind, NullSink, Usage};
@@ -133,8 +134,13 @@ pub fn supports_subagents(provider: &str) -> bool {
 /// Whether this turn may offer `spawn_agents`. The provider gate exists because the tool schema
 /// names OpenRouter-shaped ids, but a Free-mode policy carries the one id its door proved. That
 /// explicit id is enough to fan out on any provider, including Gemini and Anthropic.
-fn offers_children(provider: &str, extra_models: &[String], depth: u8) -> bool {
-    depth == 0 && (supports_subagents(provider) || !extra_models.is_empty())
+///
+/// Roadmap 44: `depth` is the depth of the turn being offered the tool, and `max_depth` is the
+/// deepest level allowed to have children. With the default `max_depth = 1` a child at depth 1
+/// is never offered the tool, which is the old flat fan-out. A policy of 2 gives children one
+/// more level and refuses the level below that.
+fn offers_children(provider: &str, extra_models: &[String], depth: u8, max_depth: u8) -> bool {
+    depth < max_depth && (supports_subagents(provider) || !extra_models.is_empty())
 }
 
 /// How much cheap help one turn may buy.
@@ -149,7 +155,8 @@ pub struct SubagentPolicy {
     pub max_steps: usize,
     /// Across the whole parent turn, not per `spawn_agents` call.
     pub max_per_turn: usize,
-    /// 1 means a subagent cannot spawn its own children; the spawn tool is hidden from it.
+    /// The deepest level that may spawn children. `1` means a top-level turn can spawn, but
+    /// its children cannot; `2` allows one nested generation, and so on.
     pub max_depth: u8,
 }
 
@@ -333,6 +340,9 @@ pub struct TurnRun {
     /// The bound this turn was driven under. A continued turn records the new bound rather
     /// than silently inheriting the stopped turn's.
     pub step_budget: usize,
+    /// Roadmap 44: the shared tree account at the end of this turn. A child run reports the
+    /// same account its parent and siblings charged, not a private copy.
+    pub tree_budget: TreeBudgetSnapshot,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -357,6 +367,9 @@ pub enum AgentError {
 
     #[error("turn {0} is not a running paused turn")]
     NotPaused(String),
+
+    #[error(transparent)]
+    TreeBudget(#[from] TreeBudgetError),
 }
 
 impl AgentError {
@@ -364,7 +377,7 @@ impl AgentError {
     /// is `2`, and an unavailable provider is `1` (the user can fix the key).
     pub fn exit_code(&self) -> u8 {
         match self {
-            Self::BudgetExhausted { .. } | Self::Budget(_) => 3,
+            Self::BudgetExhausted { .. } | Self::Budget(_) | Self::TreeBudget(_) => 3,
             Self::Session(SessionError::Storage(_) | SessionError::Database(_)) => 2,
             Self::Session(_) => 1,
             Self::InvalidStepBudget => 1,
@@ -390,7 +403,8 @@ pub struct Coordinator {
     pub effort: Option<String>,
     pub max_steps: usize,
     pub subagents: SubagentPolicy,
-    /// 0 for a user turn; 1 for a subagent. Only depth 0 is offered `spawn_agents`.
+    /// 0 for a user turn; 1 for a subagent; 2 for a grandchild. `SubagentPolicy::max_depth`
+    /// decides the deepest level that is still offered `spawn_agents`.
     pub depth: u8,
     /// The token of the turn that spawned this one, if any. A child's token is a child of it,
     /// so stopping the parent stops every child still running.
@@ -651,7 +665,12 @@ impl Coordinator {
     /// Whether this turn is offered `spawn_agents`: a top-level turn on a provider whose model
     /// ids match the subagent allowlist.
     fn offers_subagents(&self) -> bool {
-        offers_children(&self.model.id(), &self.subagents.extra_models, self.depth)
+        offers_children(
+            &self.model.id(),
+            &self.subagents.extra_models,
+            self.depth,
+            self.subagents.max_depth,
+        )
     }
 
     /// The worktree service for this project, or `None` when no base directory is configured.
@@ -1097,6 +1116,24 @@ Plan mode is on (D98): inspect the project and propose a plan. You cannot edit o
         let mut last_stop = StopReason::Completed;
         let mut step_boundary = Instant::now();
 
+        // Roadmap 44: a root opens one tree account from what is left of its session and task
+        // allowances. Every child clone of `Tools` charges this same account, so nested work
+        // cannot invent a second allowance. A child drive inherits the root's account and
+        // must not reset it.
+        if self.depth == 0 {
+            let snapshot = self.budget.snapshot(agent_id).await?;
+            let task_remaining = snapshot
+                .task_cap_micros
+                .map(|cap| (cap - snapshot.agent_micros).max(0));
+            let allowance = match (snapshot.remaining_micros, task_remaining) {
+                (Some(session), Some(task)) => Some(session.min(task)),
+                (Some(session), None) => Some(session),
+                (None, Some(task)) => Some(task),
+                (None, None) => None,
+            };
+            self.tools.start_tree_budget(allowance);
+        }
+
         loop {
             // Q254: the pause is checked only between steps. A pause requested during a model
             // stream is honoured before the next request, so no provider call is cut in half.
@@ -1176,6 +1213,31 @@ Plan mode is on (D98): inspect the project and propose a plan. You cannot edit o
                 .await?;
                 messages.push(ChatMessage::user(note));
             }
+
+            // Hold a small estimate before the provider call. The reservation is replaced by
+            // the real charge below, and released if the call produced no billable usage.
+            let tree = self.tools.tree_budget();
+            let mut tree_reservation = match tree.reserve(agent_id, self.depth, STEP_RESERVE_MICROS)
+            {
+                Ok(reservation) => Some(reservation),
+                Err(error) => {
+                    let snapshot = tree.snapshot();
+                    self.persist(
+                        turn,
+                        ItemKind::Error,
+                        "error",
+                        serde_json::json!({
+                            "code": "TREE_BUDGET_EXHAUSTED",
+                            "message": error.to_string(),
+                            "depth": self.depth,
+                            "tree_budget": snapshot,
+                        }),
+                    )
+                    .await?;
+                    last_stop = StopReason::BudgetExceeded;
+                    break;
+                }
+            };
 
             let queue_ms = step_boundary.elapsed().as_millis() as u64;
             let step_started = Instant::now();
@@ -1266,6 +1328,9 @@ Plan mode is on (D98): inspect the project and propose a plan. You cannot edit o
                                 ),
                             )
                             .await?;
+                            // Keep the tree account in step with the partial bill even when
+                            // the model failed before returning a complete step.
+                            tree.charge(tree_reservation.take(), usage.cost_micros);
                             if let Err(error) =
                                 self.budget.account(agent_id, &turn.id, &usage).await
                             {
@@ -1368,6 +1433,7 @@ Plan mode is on (D98): inspect the project and propose a plan. You cannot edit o
 
             if step.usage.cost_micros > 0 || step.usage.total_tokens() > 0 {
                 total.add(&step.usage);
+                let tree_snapshot = tree.charge(tree_reservation.take(), step.usage.cost_micros);
                 self.persist(
                     turn,
                     ItemKind::Usage,
@@ -1442,6 +1508,29 @@ Plan mode is on (D98): inspect the project and propose a plan. You cannot edit o
                         spend_micros: snapshot.agent_micros,
                         cap_micros: cap,
                     });
+                    last_stop = StopReason::BudgetExceeded;
+                    break;
+                }
+
+                // A step can cost more than its reservation. The shared tree is checked
+                // after the charge, so one level cannot run another level's allowance into
+                // the red without the turn saying why it stopped.
+                if tree_snapshot
+                    .remaining_micros
+                    .is_some_and(|remaining| remaining < 0)
+                {
+                    self.persist(
+                        turn,
+                        ItemKind::Error,
+                        "error",
+                        serde_json::json!({
+                            "code": "TREE_BUDGET_EXHAUSTED",
+                            "message": "the tree spent past the allowance inherited from its root",
+                            "depth": self.depth,
+                            "tree_budget": tree_snapshot,
+                        }),
+                    )
+                    .await?;
                     last_stop = StopReason::BudgetExceeded;
                     break;
                 }
@@ -1644,6 +1733,7 @@ chat_send/chat_wait.",
                 steps,
                 tool_calls,
                 step_budget,
+                tree_budget: self.tools.tree_budget().snapshot(),
             });
         }
 
@@ -1663,6 +1753,7 @@ chat_send/chat_wait.",
             steps,
             tool_calls,
             step_budget,
+            tree_budget: self.tools.tree_budget().snapshot(),
         })
     }
 
@@ -1988,12 +2079,33 @@ chat_send/chat_wait.",
         parent_token: &CancellationToken,
     ) -> ToolOutcome {
         if self.depth >= self.subagents.max_depth {
-            return ToolOutcome::error("DEPTH_LIMIT", "subagents cannot spawn further subagents");
+            return ToolOutcome::error(
+                "DEPTH_LIMIT",
+                format!(
+                    "subagent depth {} is at the configured max_depth {}; no child was started",
+                    self.depth, self.subagents.max_depth
+                ),
+            );
         }
         if !self.offers_subagents() {
             return ToolOutcome::error(
                 "NOT_AVAILABLE",
                 "subagents are not available with this provider's model ids",
+            );
+        }
+        // A child inherits the root's remaining tree allowance, not a fresh one. Refuse a
+        // spawn that could not even reserve one step before registering anything.
+        let tree = self.tools.tree_budget();
+        let tree_before = tree.snapshot();
+        if let Some(remaining) = tree_before.remaining_micros
+            && remaining < STEP_RESERVE_MICROS
+        {
+            return ToolOutcome::error(
+                "TREE_BUDGET_EXHAUSTED",
+                format!(
+                    "the parent's tree budget has {remaining}µ$ left of {}µ$; no child was started",
+                    tree_before.allowance_micros.unwrap_or_default()
+                ),
             );
         }
         let Some(requests) = args.get("agents").and_then(|value| value.as_array()) else {
@@ -2194,6 +2306,10 @@ chat_send/chat_wait.",
                     depends_on: child.depends_on.clone(),
                     state: NodeState::Pending,
                     detail: None,
+                    depth: self.depth + 1,
+                    budget_micros: tree_before.allowance_micros,
+                    spent_micros: 0,
+                    remaining_micros: tree_before.remaining_micros,
                 })
                 .collect(),
         ) {
@@ -2492,7 +2608,16 @@ chat_send/chat_wait.",
 
             let tools = match &worktree_path {
                 Some(path) => self.tools.writer(path.clone(), files.clone()),
-                None => self.tools.subagent().with_scope(files.clone()),
+                None => {
+                    let child = self.tools.subagent();
+                    // A child one level below the cap may start its own read-only children.
+                    let child = if self.depth + 1 < self.subagents.max_depth {
+                        child.subagent_nested()
+                    } else {
+                        child
+                    };
+                    child.with_scope(files.clone())
+                }
             };
             let coordinator = Coordinator {
                 session: self.session.clone(),
@@ -2527,6 +2652,9 @@ chat_send/chat_wait.",
             let child_worktree = worktree_path.clone();
             let thread_dag = dag.clone();
             let thread_node = node_id.clone();
+            let thread_tree = coordinator.tools.tree_budget();
+            let child_depth = self.depth + 1;
+            let child_budget = tree_before.allowance_micros;
             let wait_token = child_cancel.clone();
 
             // A child is a whole turn of its own: give it a thread and a current-thread
@@ -2561,6 +2689,8 @@ chat_send/chat_wait.",
                             WaitError::Blocked { .. } => "DEPENDENCY_FAILED",
                         };
                         thread_dag.block(&thread_node, &message);
+                        let tree_after = thread_tree.snapshot();
+                        thread_dag.set_budget(&thread_node, 0, tree_after.remaining_micros);
                         let _ = runtime.block_on(thread_session.save_dag(
                             &thread_session_id,
                             &thread_parent_turn,
@@ -2590,6 +2720,9 @@ chat_send/chat_wait.",
                                 "stop": "dependency",
                                 "code": code,
                                 "error": message,
+                                "depth": child_depth,
+                                "budget_micros": child_budget,
+                                "tree_budget": tree_after,
                             }),
                         );
                         return;
@@ -2649,6 +2782,16 @@ chat_send/chat_wait.",
                         _ => Vec::new(),
                     };
 
+                    let tree_after = thread_tree.snapshot();
+                    let child_spent = run
+                        .as_ref()
+                        .map(|run| run.usage.cost_micros)
+                        .unwrap_or(0);
+                    thread_dag.set_budget(
+                        &thread_node,
+                        child_spent,
+                        tree_after.remaining_micros,
+                    );
                     let result = match run {
                         Ok(run) => {
                             let text = runtime
@@ -2670,6 +2813,9 @@ chat_send/chat_wait.",
                                 "status": run.status,
                                 "stop": run.stop.as_str(),
                                 "spent_micros": run.usage.cost_micros,
+                                "depth": child_depth,
+                                "budget_micros": child_budget,
+                                "tree_budget": tree_after,
                                 "text": text.chars().take(6_000).collect::<String>(),
                             })
                         }
@@ -2682,6 +2828,9 @@ chat_send/chat_wait.",
                             "mode": child_mode.as_str(),
                             "worktree": child_worktree.as_ref().map(|path| path.display().to_string()),
                             "error": error.to_string(),
+                            "depth": child_depth,
+                            "budget_micros": child_budget,
+                            "tree_budget": tree_after,
                         }),
                     };
                     thread_dag.finish(
@@ -2711,6 +2860,8 @@ chat_send/chat_wait.",
                     "chat_name": chat_name,
                     "mode": mode.as_str(),
                     "worktree": worktree_path.as_ref().map(|path| path.display().to_string()),
+                    "depth": self.depth + 1,
+                    "budget_micros": tree_before.allowance_micros,
                 })),
                 Err(error) => {
                     dag.finish(
@@ -2773,12 +2924,8 @@ chat_send/chat_wait.",
         args: &serde_json::Value,
         token: &CancellationToken,
     ) -> ToolOutcome {
-        if self.depth > 0 {
-            return ToolOutcome::error(
-                "NOT_AVAILABLE",
-                "only the coordinator collects subagent results",
-            );
-        }
+        // A nested coordinator collects its own children with the same tool. The check is
+        // deliberately gone: depth is bounded at spawn time, not at collection time.
         let wanted: Option<Vec<String>> = args
             .get("agents")
             .and_then(serde_json::Value::as_array)
@@ -2874,6 +3021,8 @@ chat_send/chat_wait.",
                     "spent_micros": spent,
                     "agents": agents,
                     "synthesis": synthesis,
+                    "depth": self.depth,
+                    "tree_budget": self.tools.tree_budget().snapshot(),
                     "graph": self.session.dag(session_id).await.unwrap_or_default(),
                     "work_board": board,
                 }));
@@ -3553,10 +3702,14 @@ mod tests {
     #[test]
     fn a_free_mode_model_unlocks_fan_out_on_its_own_provider() {
         let free = vec!["gemini-2.5-flash".to_string()];
-        assert!(offers_children("gemini", &free, 0));
-        assert!(!offers_children("gemini", &[], 0));
-        assert!(!offers_children("gemini", &free, 1));
-        assert!(offers_children("openrouter", &[], 0));
+        assert!(offers_children("gemini", &free, 0, 1));
+        assert!(!offers_children("gemini", &[], 0, 1));
+        assert!(!offers_children("gemini", &free, 1, 1));
+        assert!(offers_children("openrouter", &[], 0, 1));
+        // Roadmap 44: max_depth 2 gives a depth-1 child one more generation, not a third.
+        assert!(offers_children("openrouter", &[], 1, 2));
+        assert!(!offers_children("openrouter", &[], 2, 2));
+        assert!(!offers_children("openrouter", &[], 0, 0));
     }
 
     #[test]

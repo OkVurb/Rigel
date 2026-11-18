@@ -499,6 +499,12 @@ export interface SubagentNode {
   depends_on: string[];
   state: SubagentState;
   detail?: string | null;
+  /** Roadmap 44: 1 for a direct child, deeper for a nested generation. */
+  depth?: number;
+  /** The inherited shared tree allowance and what is left of it. */
+  budget_micros?: number | null;
+  spent_micros?: number;
+  remaining_micros?: number | null;
 }
 
 export interface SubagentGraph {

@@ -7,6 +7,8 @@
  */
 import type { SubagentGraph } from "./api";
 
+const money = (micros: number): string => `$${(micros / 1_000_000).toFixed(4)}`;
+
 const STATE_LABEL: Record<string, string> = {
   pending: "waiting",
   running: "running",
@@ -33,6 +35,13 @@ export function SubagentGraphView({ graph }: { graph: SubagentGraph }) {
             <span className="mono subagent-node-id">{node.id}</span>
             <span className="fine">{node.role}</span>
             <span className={`subagent-state ${node.state}`}>{STATE_LABEL[node.state] ?? node.state}</span>
+            {node.depth ? <span className="fine">depth {node.depth}</span> : null}
+            {node.remaining_micros !== null && node.remaining_micros !== undefined &&
+            node.budget_micros !== null && node.budget_micros !== undefined ? (
+              <span className="fine subagent-budget">
+                {money(node.remaining_micros)} left of {money(node.budget_micros)}
+              </span>
+            ) : null}
             {node.depends_on.length > 0 ? (
               <span className="fine subagent-depends">after {node.depends_on.join(", ")}</span>
             ) : (

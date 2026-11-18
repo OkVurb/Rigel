@@ -12,6 +12,8 @@ test("the parent turn renders its subagent graph and edges", async ({ page }) =>
 
   const reader = graph.locator("li[data-state='done']").filter({ hasText: "reader" });
   await expect(reader).toContainText("root");
+  await expect(reader).toContainText("left of");
+  await expect(reader).toContainText("depth 1");
   const verifier = graph.locator("li[data-state='running']").filter({ hasText: "verifier" });
   await expect(verifier).toContainText("after reader");
   await expect(graph.locator(".subagent-edge")).toHaveText("reader → verifier");

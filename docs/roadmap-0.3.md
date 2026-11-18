@@ -4,9 +4,10 @@
 tree of 6 Nov 2026 and absorbs the deferred round-9 items from [roadmap-0.2.md](roadmap-0.2.md)
 rather than leaving a second list.
 
-**Tally (2026-11-18):** 74 Done · 7 Blocked · 119 Open. The 0.3.0 preview tree ships every Done
+**Tally (2026-11-18):** 75 Done · 7 Blocked · 118 Open. The 0.3.0 preview tree ships every Done
 item. The previous pass closed 53, 60, 64, 67, 69, 70, 75, 78, 80, 106, 107, 130, 140 and 182;
-this pass closed 43, 65 and 84. The open and blocked items below are unchanged by these passes.
+this pass closed 43, 44, 65 and 84. The open and blocked items below are unchanged by these
+passes.
 
 **Verified gate (2026-11-08).** `cargo fmt --all -- --check`, `cargo clippy --workspace
 --all-targets -- -D warnings` and `cargo test --workspace --no-fail-fast` pass (53 test binaries,
@@ -485,6 +486,24 @@ done signal, and the eight-state table is the evidence a review will use.
 44. **W3 · P1 · M · Nested depth and budget.** `crates/rigel-core/src/agent/tree.rs` enforces a hard
     depth cap and an inherited budget. — done when the refused spawn names the cap, and the session
     tree shows each node's remaining budget.
+    **Done (2026-11-18):** `agent/tree.rs` holds one `TreeBudget` per root turn: the root opens it
+    from the smaller of the session's remaining allowance and the root agent's task remainder;
+    every child and grandchild clones the same `Arc`, reserving a step estimate before a provider
+    call and charging the actual bill after it. `Tools::subagent_nested` exposes only the two
+    subagent tools to a child below `SubagentPolicy::max_depth`, while writes and commands stay
+    hidden; the coordinator refuses a spawn at the cap with `DEPTH_LIMIT` naming `max_depth`, and
+    `subagent_results` now lets a nested coordinator collect its own children. Migration
+    `0018_subagent_budget` stores depth, inherited allowance, child spend and remaining balance on
+    `subagent_nodes`; `subagent_results`, every child result and the UI graph render the shared
+    balance and depth. The window policy allows one nested generation (`max_depth: 2`).
+    `cargo test -p rigel-core --lib agent::tree` -> 2 passed (charge/limit/refund and unbounded
+    spend reporting); `cargo test -p rigel-core --test native
+    a_nested_tree_refuses_a_spawn_past_max_depth_and_names_the_cap` -> 1 passed (three turns, the
+    depth-2 refusal names `max_depth 2`, no fourth turn, node depth/budget persisted);
+    `cargo test -p rigel-core --test native
+    subagents_are_read_only_billed_separately_and_nested_under_the_parent` -> 1 passed (the child
+    reports the shared tree spend and remaining balance); `ui/tests/subagentdag.spec.ts` asserts
+    the rendered depth and remaining budget.
 
 45. **W3 · P1 · L · Guided merge conflicts.** `ui/src/conflict-editor.tsx` is a three-way editor
     with per-hunk accept, a test hint and a stored verdict. — done when a conflicted hunk can never
