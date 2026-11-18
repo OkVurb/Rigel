@@ -196,8 +196,24 @@ jobs:
           $edge = (Get-Item $edgePath).VersionInfo.ProductVersion
           Invoke-WebRequest "https://msedgedriver.microsoft.com/$edge/edgedriver_win64.zip" -OutFile edgedriver.zip
           Expand-Archive edgedriver.zip -DestinationPath (Join-Path $env:USERPROFILE '.cargo/bin') -Force
+
+      # WebView2 Runtime 150+ drops WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS (which carries
+      # --remote-debugging-port) when the host process is elevated, and GitHub's Windows runners
+      # run as administrator. gsudo re-runs the suite at Medium integrity, where the debug port
+      # opens. See https://github.com/tauri-apps/wry/issues/1782
+      - name: De-elevation setup (gsudo)
+        shell: pwsh
+        run: |
+          winget install gerardog.gsudo --accept-source-agreements --accept-package-agreements --disable-interactivity
+          $env:PATH = [Environment]::GetEnvironmentVariable('PATH','Machine') + ';' + [Environment]::GetEnvironmentVariable('PATH','User')
+          $gsudo = (Get-Command gsudo -ErrorAction Stop).Source
+          Split-Path $gsudo | Add-Content -Path $env:GITHUB_PATH
+          & $gsudo --version
+          icacls "$env:GITHUB_WORKSPACE" /grant "Everyone:(OI)(CI)F"
+
       - name: Window end-to-end
-        run: npm --prefix ui run test:window
+        shell: pwsh
+        run: gsudo --integrity Medium pwsh -NoProfile -Command "npm --prefix ui run test:window"
 
       # Job logs need authentication; the step annotation names the failing spec, and these
       # artifacts retain its full output for diagnosis.
