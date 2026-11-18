@@ -2867,11 +2867,13 @@ chat_send/chat_wait.",
                     .collect();
                 hub.mark_collected(&collected_ids);
                 let board = self.session.team(session_id).await.unwrap_or_default();
+                let synthesis = super::synthesis::synthesize(&agents);
                 return ToolOutcome::ok(serde_json::json!({
                     "ok": all_ok,
                     "pending": running,
                     "spent_micros": spent,
                     "agents": agents,
+                    "synthesis": synthesis,
                     "graph": self.session.dag(session_id).await.unwrap_or_default(),
                     "work_board": board,
                 }));

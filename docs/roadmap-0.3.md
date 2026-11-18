@@ -4,9 +4,9 @@
 tree of 6 Nov 2026 and absorbs the deferred round-9 items from [roadmap-0.2.md](roadmap-0.2.md)
 rather than leaving a second list.
 
-**Tally (2026-11-18):** 73 Done · 7 Blocked · 120 Open. The 0.3.0 preview tree ships every Done
+**Tally (2026-11-18):** 74 Done · 7 Blocked · 119 Open. The 0.3.0 preview tree ships every Done
 item. The previous pass closed 53, 60, 64, 67, 69, 70, 75, 78, 80, 106, 107, 130, 140 and 182;
-this pass closed 65 and 84. The open and blocked items below are unchanged by these passes.
+this pass closed 43, 65 and 84. The open and blocked items below are unchanged by these passes.
 
 **Verified gate (2026-11-08).** `cargo fmt --all -- --check`, `cargo clippy --workspace
 --all-targets -- -D warnings` and `cargo test --workspace --no-fail-fast` pass (53 test binaries,
@@ -473,6 +473,14 @@ done signal, and the eight-state table is the evidence a review will use.
 43. **W3 · P1 · M · Subagent synthesis.** `crates/rigel-core/src/agent/synthesis.rs` builds the
     parent result from the children's claims. — done when every claim cites the child and files it
     came from and two children disagreeing produce a conflict row.
+    **Done (2026-11-18):** `subagent_results` now returns a deterministic `synthesis` beside the raw
+    child answers. Every `SynthesisClaim` carries `agent_id`, `chat_name`, `role` and assigned
+    `files`; a `subject: value` pair that differs across two children becomes a `SynthesisConflict`
+    row naming both children and the union of their files, and the compact summary shows the same
+    citations and `CONFLICT` line. A failed or pending child contributes no invented claim.
+    `cargo test -p rigel-core --lib agent::synthesis` -> 5 passed;
+    `cargo test -p rigel-core --test native
+    subagents_are_read_only_billed_separately_and_nested_under_the_parent` -> 1 passed.
 
 44. **W3 · P1 · M · Nested depth and budget.** `crates/rigel-core/src/agent/tree.rs` enforces a hard
     depth cap and an inherited budget. — done when the refused spawn names the cap, and the session

@@ -756,7 +756,7 @@ impl Tools {
             },
             ToolSpec {
                 name: "subagent_results".to_string(),
-                description: "Wait for the background subagents started by spawn_agents and return their final answers, spend and status. Call this before you finish; while you wait they can still message you in the room. If a child is still running at the timeout, the result says pending and you can call again.".to_string(),
+                description: "Wait for the background subagents started by spawn_agents and return their final answers, spend and status, plus a synthesis where every claim cites its child and files and disagreeing children appear as conflict rows. Call this before you finish; while you wait they can still message you in the room. If a child is still running at the timeout, the result says pending and you can call again.".to_string(),
                 parameters: json!({
                     "type": "object",
                     "properties": {

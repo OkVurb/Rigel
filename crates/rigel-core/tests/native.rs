@@ -913,6 +913,30 @@ async fn subagents_are_read_only_billed_separately_and_nested_under_the_parent()
     assert_eq!(results.body["result"]["spent_micros"], 600);
     assert_eq!(results.body["result"]["pending"], false);
 
+    let synthesis = &results.body["result"]["synthesis"];
+    let claims = synthesis["claims"].as_array().unwrap();
+    assert_eq!(claims.len(), 2, "one cited claim from each child");
+    for (claim, agent) in claims.iter().zip(returned) {
+        assert_eq!(claim["agent_id"], agent["agent_id"]);
+        assert_eq!(claim["chat_name"], agent["chat_name"]);
+        assert_eq!(claim["files"], agent["files"]);
+        assert!(claim["text"].as_str().is_some_and(|text| !text.is_empty()));
+    }
+    assert!(
+        claims
+            .iter()
+            .any(|claim| claim["files"] == serde_json::json!(["README.md"])),
+        "the claim cites the files it came from"
+    );
+    assert_eq!(
+        synthesis["conflicts"].as_array().unwrap().len(),
+        0,
+        "the two readers agree on Demo"
+    );
+    let summary = synthesis["summary"].as_str().unwrap();
+    assert!(summary.contains("README says Demo."), "{summary}");
+    assert!(summary.contains("lib.rs adds and subtracts."), "{summary}");
+
     let board = service.team(&session.id).await.unwrap();
     assert_eq!(board.len(), 2, "both children are on the work board");
     let first = board
