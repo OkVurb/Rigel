@@ -132,10 +132,12 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
 
+      # audit-check's check-run update fails with "Not Found" after a clean audit. Run the
+      # same RustSec database directly; cargo audit exits non-zero on a vulnerability.
       - name: RustSec advisories
-        uses: rustsec/audit-check@v2
-        with:
-          token: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          cargo install cargo-audit --locked --version 0.22.2
+          cargo audit
 
       - name: Licences, bans and sources
         uses: EmbarkStudios/cargo-deny-action@v2
